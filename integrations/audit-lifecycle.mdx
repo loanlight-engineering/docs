@@ -1,0 +1,82 @@
+---
+title: "Audit lifecycle: webhook to report delivery"
+description: From a signed Encompass webhook to the AUS report PATCHed back into Encompass.
+icon: workflow
+---
+
+This is the spine of the EPC integration service. The trigger is an Encompass user pressing **"Run LoanLight AUS"** (transaction type `"Run LoanLight AUS"`). From there, the service ingests the loan, hands it to the AUS, watches progress, and delivers the rendered report back into Encompass.
+
+The thread that ties every stage together is the **`correlationId`** — it equals `transaction_state.id` and is the AUS `auditRunId`. It appears in S3 keys, EventBridge payloads, SQS messages, and the database. When tracing a run, start from the `correlationId`.
+
+## End to end
+
+<Steps>
+<Step title="Signed webhook arrives">
+Encompass POSTs a signed webhook to `POST /integrations/webhooks/transactions` (created/updated) or `POST /integrations/webhooks/events`. The HMAC `VerifyElliSignatureMiddleware` validates the `elli-signature` header before the controller runs. See [Webhook security](/integrations/epc-webhook-security).
+</Step>
+<Step title="Fetch and dedup the event">
+`WebhooksService.handleWebhook` fetches the full EPC event via `EpcService.getEvent(eventId, resourceId, isUat)` (UAT is `environment === "concept"`), persists the raw event to `epc_event`, and dedups: if `event.updateCount > 1` it is a duplicate and is skipped.
+</Step>
+<Step title="Enqueue for processing">
+The webhook handler enqueues to the `transaction-event-handling` SQS queue (`created` → `TRANSACTION_CREATED_EVENT_HANDLING`, `updated` → `TRANSACTION_UPDATED_EVENT_HANDLING`) and returns `{ message: "Transaction received" }` immediately. `QueueConsumerService.handleTransactionEvent` drains the queue and calls `processTransaction(eventData, eventType)`.
+</Step>
+<Step title="Persist loans and transactions">
+`processTransaction` runs staged work (the `currentStage` string drives error reporting):
+
+- **fetch-transaction** — `getTransactionByResourceRef`. For `created`, if a different EPC transaction already exists for this loan, the new one is canceled (`cancelTransaction`).
+- **resolve-client** — `ensureClientExists(clientId, token)`. New clients are only auto-created if in the hard-coded `CLIENT_ALLOW_LIST` (LoanLight/ICE/Red Palm test accounts; `LOA-212` tracks removing this). Otherwise the client resolves to null and the run fails.
+- **initialize-record** — upserts `loan` + `transaction_record`; back-links `epc_event.transaction_record_id`.
+- **initialize-audit** — inserts `transaction_state` and upserts `audit_details` to `Processing`. `transactionStateId = transaction_state.id` becomes the `correlationId`.
+</Step>
+<Step title="Upload documents to S3">
+**fetch-and-upload-documents** — `filterDocuments` splits the EPC resource list into the MISMO XML (required), supported docs (PDF/JPEG/PNG/TIFF/TXT/DOCX/DOC), and unsupported. Each is downloaded (`downloadResource`, base64, 400 MB cap, 2-min timeout) and uploaded to S3 with content-hash dedup. The MISMO XML is mandatory — a missing XML throws. **finalize** writes the `{correlationId}/metadata.json` manifest plus a non-blocking transaction-history snapshot. See [S3 layout](/storage/s3-layout).
+</Step>
+<Step title="Publish Audit Requested">
+**publishAuditRequestedEvent** publishes the "Audit Requested" EventBridge event (Source `loanlight.encompass`) carrying `correlationId`, `requestorId` (the client `providerClientId`), `environment`, `s3Bucket`, `s3Prefix`, decoded `loanMetadata`, `requestingParty`, and `documents[]`. This is the handoff to loanlight-api / AUS. See [Messaging](/integrations/messaging).
+
+The service then PATCHes Encompass back to `Processing` / partnerStatus `Processing`, sets `referenceNumber = correlationId`, and sets the loan extension `loanLightAusHasBeenRun = "STARTED"`. An optional shadow fan-out runs here if enabled (see [Shadow audits](/integrations/shadow-audits)).
+</Step>
+<Step title="Consume AUS progress and results">
+The AUS publishes EventBridge events (Source `loanlight.aus`). The `AusUpdateRule` routes an allow-list of detail-types to the `handle-aus-updates` SQS queue, drained by `QueueConsumerService.handleAusUpdate`:
+
+- `workflow:complete` → terminal handler with `auditState: Complete`.
+- `workflow:error` → `auditState: Error` (recoverable). `DUPLICATE_AUDIT` is ignored. Skipped if already in a final state.
+- `workflow:start` → resets `audit_details` to `Processing`; shadow runs are skipped.
+- progress / `document_processing:*` / `agent:*` → `updateAuditProgress(...)`, which drives the frontend progress bar.
+</Step>
+<Step title="Render the AUS Report PDF">
+`AusUpdateService.handleAusUpdate` is the terminal handler. It loads `transaction_state` + client + `transaction_record`, applies the shadow guard, updates `audit_details`, and generates the PDF via `AuditReportPdfService.generate(...)`. That fetches results from loanlight-api (`AuditResultsFetcherService.fetchV2Inputs`) and renders with the [audit-pdf library](/integrations/audit-pdf). On a non-`Complete` state, or missing identifiers/token/fetch error, it renders a NULL_SECTIONS status PDF.
+</Step>
+<Step title="PATCH the report into Encompass">
+The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResources` → generate streaming URLs → PUT bytes → resource refs), then the EPC transaction is PATCHed:
+
+- **Complete** — status `completed` / partnerStatus `Complete`, attaches the PDF, sets `loanLightAusHasBeenRun = "COMPLETED"`, emits a `ReportComplete` service event. Local `transaction_state` is updated to `completed` (3× retry).
+- **Error (recoverable)** — uploads the report but keeps Encompass status `Processing` so the user can retry; no `errors[]`.
+- **Failed (terminal)** — status `failed`, `loanLightAusHasBeenRun = "FAILED"`, includes `errors[]`. Only when Encompass explicitly fails.
+</Step>
+</Steps>
+
+## Single vs split delivery
+
+`AusUpdateService` decides delivery shape from the client's lender `audit_delivery_mode` (`single` default, `split`, or `pipeline`; see [Integrations database schema](/integrations/database-schema)).
+
+<Tabs>
+<Tab title="Single (default)">
+One AUS Report PDF is generated and attached in a single PATCH. This is the default path for every lender unless their `lender.audit_delivery_mode` says otherwise.
+</Tab>
+<Tab title="Split (LOA-970)">
+When `audit_delivery_mode = 'split'` and the state is `Complete`, `deliverSplit` generates one main AUS PDF plus one PDF **per property**. All are stored in S3 under `audit-deliveries/{transactionStateId}/` and uploaded in a single PATCH. Property PDFs are bound to per-property `resourceContainers` typed `loanlight_property_report_{i}` with the address as the description. One `audit_delivery_log` row is written per delivered doc, only after the PATCH confirms. The path fails loud on a dropped upload.
+</Tab>
+</Tabs>
+
+<Note>
+The `epc-delivery.fifo` queue and `epc_delivery_records` table are B-track scaffolding (LOA-946/948/949/989) and are **not** yet driving deliveries. Current delivery is the synchronous single/split path inside `AusUpdateService`. See [Messaging](/integrations/messaging).
+</Note>
+
+## Failure handling
+
+- On any failure after `transactionStateId` is set, `processTransaction` publishes a `workflow:error` EventBridge event (Source `loanlight.aus`, errorCode `TRANSACTION_PROCESSING_FAILED`, errorStep `transaction_processing`) so `audit_details` and the UI reflect the failure. These errors are treated as **recoverable** — the user can retry.
+- A stuck-audit cron (`@Cron(EVERY_5_MINUTES)` plus on-startup) resets audits stuck in `Processing` for over 30 minutes to `Error` (recoverable, errorCode `INTERRUPTED`, errorStep `system_recovery`). Shadow rows are excluded.
+- `POST /integrations/admin/trigger-recovery` runs recovery manually when `ENABLE_ADMIN_ENDPOINTS=true`.
+
+For the events and queues referenced here, see [Messaging](/integrations/messaging). For the persisted state, see [Integrations database schema](/integrations/database-schema).

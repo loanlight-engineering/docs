@@ -1,0 +1,185 @@
+---
+title: Property-Data agent
+description: Address extraction and external property-data consolidation.
+icon: map-pin
+---
+
+The Property-Data agent (`Property-Data`) extracts the subject and borrower addresses from the
+MISMO XML, fetches property data from external providers, and consolidates it into a single
+`ConsolidatedProperty` per property. It is a LangGraph compiled graph under
+`langgraph/agents/propertyData/`, built by `buildGraph(options)` with
+`{ progressEvents, zillowUrlFinder, hasData, attom, llama }`.
+
+The agent is invoked from `langgraph.service.ts` via `buildPropertyGraph(...)`. The graph itself
+only returns state and instrumentation; **the service writes all DB rows**, not the graph.
+
+The `ConsolidatedProperty` objects this agent produces are the primary input to the
+[Property-Red-Flags agent](/agents/property-red-flags).
+
+## Graph topology
+
+```text
+__start__ → extractAddresses → validateAddresses
+  validateAddresses → fetchProperty   (Zillow URL + HasData scrape + ATTOM property, bundled)
+  validateAddresses → fetchHazard     (ATTOM natural-hazard)
+  validateAddresses → fetchRedfin     (Redfin gap-fill; gated by ENABLE_REDFIN_SOURCE, default OFF)
+  fetchProperty / fetchHazard / fetchRedfin → consolidate   (true barrier join)
+  consolidate → aggregate → __end__
+```
+
+The three source fetches run as equal-depth parallel siblings under one shared wall-clock ceiling.
+`fetchProperty` bundles Zillow + ATTOM so the instrumentation channel is written once per
+super-step.
+
+<Info>
+**Wall-clock ceiling.** `PROPERTY_DATA_CEILING_MS = 10 minutes`. `withWallClockCeiling(...)` races
+each fetch against `graphStartedAt + ceilingMs`; on exceed it resolves to `null` (a no-data
+sentinel) and emits `property_data_wall_clock_abort`. Real fetch errors still propagate to the
+caller's try/catch.
+</Info>
+
+## Stages
+
+<Steps>
+<Step title="extractAddresses">
+If subject + borrower address overrides are present, uses them directly (REO addresses always come
+from the override). Otherwise runs an LLM extraction over the MISMO 3.4 XML
+("MISMO 3.4 XML ADDRESS EXTRACTION EXPERT" prompt): the subject property address from
+`//SUBJECT_PROPERTY/ADDRESS` and the borrower current address from the borrower party's current
+residence. `monthlyRent` is extracted only when the borrower address has a unit. The LLM does not
+extract Section 3 REO addresses.
+</Step>
+
+<Step title="validateAddresses">
+Requires subject street/city/state, else skips and emits `EVENTS.WORKFLOW.ERROR`. The borrower
+address is required for non-refinance loans; a missing borrower address on a REFINANCE continues
+subject-only.
+</Step>
+
+<Step title="fetchProperty — Zillow + HasData + ATTOM">
+`zillowUrlFinder.findPropertyUrl(...)` resolves a Zillow detail URL via SerpApi;
+`hasData.getPropertyDetails(...)` scrapes the listing, photos, and zestimate; `attom.getPropertyData(...)`
+fetches official records. The borrower fetch is gated by `shouldFetchBorrower(state)`, and there is
+a REO loop per `reoAddresses`.
+</Step>
+
+<Step title="fetchHazard">
+`attom.getNaturalHazard(...)` for the subject (borrower + REO gated). Writes only the natural-hazard
+channels, disjoint from the instrumentation channel.
+</Step>
+
+<Step title="fetchRedfin (gated, off by default)">
+A no-op unless `ENABLE_REDFIN_SOURCE === "true"`. When enabled, resolves a redfin.com URL via the
+site-aware SerpApi finder, then calls `hasData.getRedfinPropertyDetails(url)`. A null result
+degrades to a no-op merge.
+</Step>
+
+<Step title="consolidate">
+`consolidateProperty({ address, hasData, attom, zillowUrl, redfin })` produces a
+`ConsolidatedProperty`. Precedence: HasData/Zillow for listing, photos, and coordinates; ATTOM for
+official records (ownership, mortgages, title, liens, sales/assessment history, AVM).
+`mergeRedfin()` only fills null incumbents. Subject↔borrower proximity is computed by haversine;
+`proximity.flagged = miles > 50`. One `consolidateProperty` runs per REO address.
+</Step>
+
+<Step title="aggregate">
+Logs the instrumentation summary and returns `{ completed: true }`.
+</Step>
+</Steps>
+
+## Borrower-fetch gate
+
+`shouldFetchBorrower(state)` decides whether to fetch the borrower's current address:
+
+- Non-refinance → fetch.
+- Refinance and borrower address equals subject → skip (duplicate).
+- Refinance, different address, `housingExpenseType === "OWN"` → fetch (Property-Red-Flags Rule B
+  needs ownership data).
+- Refinance, different address, RENT or unknown → skip.
+
+## External providers
+
+<AccordionGroup>
+<Accordion title="ATTOM (AttomService)">
+`baseUrl = https://api.gateway.attomdata.com`, env `ATTOM_API_KEY` (header `apikey`).
+`getPropertyData()` fans out **10 endpoints** in parallel (`/property/basicprofile`,
+`/property/expandedprofile`, `/assessmenthistory/detail`, `/saleshistory/expandedhistory`,
+`/property/detailowner`, `/property/detailmortgageowner`, `/property/detail`, `/sale/detail`,
+`/attomavm/detail`, preforeclosure detail) with a unit-qualified lookup and street-only fallback.
+`getNaturalHazard()` is a 2-step v4 flow (`property/detail` → `geoIdV4` →
+`/v4/neighborhood/community`) parsed into a FEMA flood zone + hazards. 30s timeout, 3 retries with
+backoff.
+</Accordion>
+
+<Accordion title="HasData (HasDataService)">
+Env `HASDATA_KEY` (header `x-api-key`). `getPropertyDetails(zillowUrl, ...)` and
+`getRedfinPropertyDetails(url)`. Scrape timeout `HASDATA_SCRAPE_TIMEOUT_MS` (default 300000ms),
+retry budget `HASDATA_RETRY_BUDGET_MS` (default 600000ms), max 3 attempts. Errors:
+`HasDataError`, `HasDataUpstreamStatusError`, `HasDataRetryExhaustedError`.
+</Accordion>
+
+<Accordion title="SerpApi / Zillow URL finder (ZillowUrlFinderService)">
+Env `SERPAPI_KEY`, `serpApiUrl = https://serpapi.com/search`.
+`findPropertyUrl(input, site = "zillow" | "redfin")` runs a Google search via SerpApi, filters to
+`site:zillow.com/homedetails` (or `site:redfin.com`), and matches street-number + city (+ unit) in
+result titles. Returns null on no exact match.
+</Accordion>
+</AccordionGroup>
+
+## ConsolidatedProperty and coverage metrics
+
+`attomExtractAll(attomData)` extracts ids (attomId/apn/fips), coordinates, property facts (beds,
+baths, living sqft, year built, stories, condition, exterior, PUD), lot (size, zoning, pool),
+ownership (owners, absentee, vesting type, trust indicator, owner-occupied resolution), mortgages,
+title, liens (foreclosure + preforeclosure), sales history, assessment history, tax history, and
+AVM valuation.
+
+`computeCoverageBuckets()` produces 10 buckets — `ids`, `coordinates`, `ownership`, `mortgages`,
+`assessmentCurrent`, `assessmentHistory`, `salesHistory`, `propertyFacts`, `lot`, `freshness` — and
+`attomBucketsPercent = round(present / 10 * 100)`. Missing buckets are the ones with a value of 0.
+
+## Persistence
+
+The service (`langgraph.service.ts`), not the graph, writes these tables in
+`src/database/schema/property-data.ts`:
+
+<ResponseField name="property_data_runs" type="table">
+`id`, `audit_run_id`, `loan_id`, `document_id`, `rerun_allowed` (default false), `created_at`.
+</ResponseField>
+
+<ResponseField name="property_data_raw" type="table">
+Full JSONB payloads: HasData/listing/valuation/rent/proximity, `consolidated_subject`,
+`consolidated_borrower`, `consolidated_reo`, Zillow URLs, and ATTOM payloads. The consolidated blobs
+carry `naturalHazard` as a discriminated union that is never omitted (`{coverage:true,...}` or a
+`{coverage:false, fetchedAt}` sentinel).
+</ResponseField>
+
+<ResponseField name="property_data_results" type="table">
+One row per property, with a `property_type` CHECK of `subject | current_home | investment`. Carries
+the consolidated facts (address, coordinates, beds/baths, AVM, flood zone, last sale, owner,
+photos), coverage metrics (`subject_coverage_percent`, `borrower_coverage_percent`,
+`*_missing_buckets`), and `county_fips` as TEXT (leading-zero-safe).
+</ResponseField>
+
+<Warning>
+The borrower's current home is stored with **`property_type: "current_home"`**, not `"borrower"`.
+The subject row is `"subject"` (`source_order: 0`); REO rows are `"investment"`. The
+`current_home` row is persisted whenever borrower data was fetched, regardless of loan purpose.
+</Warning>
+
+## Related
+
+<Columns cols={2}>
+<Card title="Property-data module" href="/storage/property-data-module">
+The storage layout and consolidated-property module detail.
+</Card>
+<Card title="Property-Red-Flags" href="/agents/property-red-flags">
+Consumes these ConsolidatedProperty objects.
+</Card>
+<Card title="URLA extraction" href="/agents/urla-extraction">
+Provides `loanPurpose` and `housingExpenseType` to this agent.
+</Card>
+<Card title="Financial data model" href="/data-model/financial-data-model">
+Where property results fit in the schema.
+</Card>
+</Columns>

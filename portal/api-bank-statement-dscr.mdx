@@ -1,0 +1,111 @@
+---
+title: "Portal API: bank statement and DSCR"
+description: Bank-statement analysis, exports, and the DSCR agent.
+icon: landmark
+---
+
+These modules cover bank-statement analysis (fraud and income), the QI calculation exports built from it, and the DSCR (debt service coverage ratio) agent. All endpoints use [`PortalAuthGuard`](/portal/api-auth). The DSCR endpoints additionally gate on a per-lender feature flag.
+
+<Warning>
+The portal API runs on the NestJS Fastify adapter, so multipart uploads are parsed with `req.parts()`, not Express multer. Using `FileInterceptor` / multer on a multipart endpoint (such as the DSCR lease and MISMO imports) throws before the handler runs.
+</Warning>
+
+## bank-statement
+
+Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank-statements`. Class throttle 60/min.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `POST /api/v1/portal/bank-statements/enqueue` | client_admin, client_user | Enqueue analysis (HTTP 201, throttle 10/min) |
+| `GET /api/v1/portal/bank-statements` | read+ | List borrower files |
+| `GET /api/v1/portal/bank-statements/:id` | read+ | Detail |
+| `GET /api/v1/portal/bank-statements/:id/status` | read+ | Status |
+| `DELETE /api/v1/portal/bank-statements/:id` | client_admin | Delete |
+| `GET /api/v1/portal/bank-statements/:id/statements` | read+ | List statements |
+| `GET /api/v1/portal/bank-statements/:id/statements/:statementId` | read+ | One statement |
+| `GET /api/v1/portal/bank-statements/:id/transactions` | read+ | Transactions |
+| `POST /api/v1/portal/bank-statements/:id/transactions/classify` | client_admin, client_user | Ntropy categorization (HTTP 202, `ClassifyTransactionsDto`) |
+| `GET /api/v1/portal/bank-statements/:id/findings` | read+ | Fraud/income findings |
+| `GET /api/v1/portal/bank-statements/:id/findings/:findingId` | read+ | One finding |
+| `PATCH /api/v1/portal/bank-statements/:id/findings/:findingId` | client_admin, client_user | `UpdateFindingFeedbackDto` |
+| `PATCH /api/v1/portal/bank-statements/:id/settings` | client_admin, client_user | `UpdateSettingsDto` |
+| `GET /api/v1/portal/bank-statements/:id/income-filters` | read+ | List income filters |
+| `POST /api/v1/portal/bank-statements/:id/income-filters` | client_admin, client_user | `CreateIncomeFilterDto` (HTTP 201) |
+| `DELETE /api/v1/portal/bank-statements/:id/income-filters/:filterId` | client_admin, client_user | Delete filter |
+| `POST /api/v1/portal/bank-statements/:id/summary` | client_admin, client_user | Enqueue AI summary (HTTP 202, throttle 5/min) |
+| `GET /api/v1/portal/bank-statements/:id/summary` | read+ | Get AI summary |
+| `GET /api/v1/portal/bank-statements/:id/income-analysis` | read+ | Income analysis |
+| `POST /api/v1/portal/bank-statements/:id/income-analysis/recompute` | client_admin, client_user | Recompute (HTTP 200, throttle 10/min) |
+| `GET /api/v1/portal/bank-statements/:id/export` | read+ | Export data (throttle 10/min) |
+
+#### POST /api/v1/portal/bank-statements/enqueue
+
+Enqueue a borrower's bank statements for extraction and analysis. Returns HTTP 201.
+
+<ParamField body="s3Keys" type="string[]" required>
+Up to 50 statement PDFs.
+</ParamField>
+<ParamField body="borrowerType" type="string" required>
+`personal` or `business`.
+</ParamField>
+<ParamField body="expenseFactor" type="number">
+Optional expense factor for business income.
+</ParamField>
+<ParamField body="incomeQualification" type="number">
+Optional qualification window: `12` or `24` months.
+</ParamField>
+<ParamField body="loanId" type="string">
+Optional loan association.
+</ParamField>
+<ParamField body="name" type="string">
+Optional borrower name.
+</ParamField>
+
+Processors: `bank-statement.processor.ts` (extraction pipeline), `ai-summary.processor.ts`, and `categorization.service.ts` (Ntropy enrichment in batches of 1000, with a daily credit-budget circuit breaker). `VALID_FINDING_TYPES` is imported from the processor.
+
+## bank-statement-export
+
+Controller: `bank-statement-export/bank-statement-export.controller.ts`, mounted on the same `api/v1/portal/bank-statements` prefix as a separate controller. Class throttle 60/min. This builds QI (qualified income) calculation exports.
+
+#### POST /api/v1/portal/bank-statements/:id/export
+
+Render and bundle QI calculation exports. Returns HTTP 200 (throttle 5/min).
+
+<ParamField body="formats" type="string[]" required>
+One or more of `pdf`, `xlsx`.
+</ParamField>
+<ParamField body="notes" type="string">
+Optional notes embedded in the export.
+</ParamField>
+
+The service builds the payload, renders the requested formats in parallel, uploads them to S3 under `exports/:id/:stamp/...`, and returns `{ files: [{ format, url, filename }] }`. Multiple formats are bundled into a single ZIP (the frontend dedupes by URL). Supporting modules: `excel-writer.service.ts`, `pdf-writer.service.ts`, `pdf-template.ts` (`renderQiCalculationHtml`), `signed-url.service.ts`, `export-data.service.ts`.
+
+## portal-dscr-agent
+
+Controller: `portal-dscr-agent/portal-dscr-agent.controller.ts` at `api/v1/portal/dscr-agent`. Every endpoint calls `assertDscrAgentEnabled(ctx)`, which checks the `dscr_agent` flag in `lender_feature_flags`.
+
+| Method / path | Purpose |
+|---|---|
+| `POST /api/v1/portal/dscr-agent/compute` | `ComputeDscrDto` (borrower, units, loan inputs) → DSCR engine output (HTTP 200) |
+| `POST /api/v1/portal/dscr-agent/lease-pipeline` | Multipart (`files`, ≤8 files × 10MB). LLM lease extraction → `ingestLeases` (HTTP 200). Daily LLM budget exceeded → 400 |
+| `POST /api/v1/portal/dscr-agent/mismo-import` | Multipart single XML (≤25MB). Parses MISMO → DSCR loan input fields via `mismoLoanFieldsToDscrLoanInput` (note rate %→decimal) (HTTP 200) |
+| `POST /api/v1/portal/dscr-agent/pdf` | `ComputeDscrDto` → rendered DSCR PDF (`StreamableFile`, `dscr-<name>-<date>.pdf`) (HTTP 200) |
+
+Supporting: `dscr-pdf.service.ts`, `portal-dscr-agent.service.ts`, and the libraries `dscr-engine`, `lease-pipeline`, and `mismo-loan-import`.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Authentication and authorization" icon="shield-check" href="/portal/api-auth">
+    The feature-flag gating model.
+  </Card>
+  <Card title="Credit and income runs" icon="credit-card" href="/portal/api-credit-income">
+    Sibling agent-run modules.
+  </Card>
+  <Card title="Income analysis agent" icon="dollar-sign" href="/agents/income-analysis">
+    Income computation in the pipeline.
+  </Card>
+  <Card title="File uploads (BFF)" icon="upload" href="/portal/file-uploads">
+    How the portal app uploads to S3 before enqueue.
+  </Card>
+</Columns>

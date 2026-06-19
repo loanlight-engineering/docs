@@ -1,0 +1,146 @@
+---
+title: LangSmith
+description: Projects, run naming, and PII anonymization.
+icon: brain
+---
+
+LangSmith is the source of truth for **agent reasoning**. Every LangGraph agent
+invocation is traced with its prompt, model inputs and outputs, and node-by-node
+state. When a field comes out wrong or a finding fires incorrectly, the answer is
+almost always in the trace. See [Tracing a bad field](/runbooks/tracing-a-bad-field)
+for the end-to-end workflow.
+
+## Projects
+
+| Project | Used by | Set in |
+|---|---|---|
+| `loanlight-aus` | Production and int AUS pipeline | `packages/api/.env` and the API CDK app env (`packages/api/infra/lib/application-stack.ts`) |
+| `loanlight-studio` | LangGraph Studio dev env | `packages/api/.env.studio` |
+
+Octy can override the project through CDK context (`langsmithProject` /
+`langchainProject`), which sets `LANGSMITH_PROJECT` / `LANGCHAIN_PROJECT` for its
+own runs (`octy/infra/lib/application-stack.ts`).
+
+### Connection environment variables
+
+Non-secret values are baked into CDK; secrets come from Secrets Manager. The code
+reads both `LANGSMITH_*` and `LANGCHAIN_*` names as fallbacks
+(for example `LANGSMITH_API_KEY || LANGCHAIN_API_KEY`).
+
+| Variable | Value (int/prod) |
+|---|---|
+| `LANGSMITH_TRACING` | `true` |
+| `LANGSMITH_ENDPOINT` | `https://api.smith.langchain.com` |
+| `LANGSMITH_PROJECT` | `loanlight-aus` |
+| `LANGSMITH_BASE_URL` | `https://smith.langchain.com` (UI base) |
+| `LANGSMITH_ORG_ID` | `85860921-adac-442f-8e33-711fceed28f7` |
+| `LANGSMITH_API_KEY` | secret `LLApi/LANGSMITH_API_KEY` |
+| `LANGCHAIN_CALLBACKS_BACKGROUND` | `true` |
+
+## How runs are named
+
+Run configuration is built in
+`packages/api/src/langgraph/langgraph.service.ts` by `createAgentConfig(agentType,
+loanId, documentId, auditRunId, additionalMetadata)`. This produces the
+`RunnableConfig` used on every `app.invoke(...)`.
+
+<ParamField path="runName" type="string">
+  `` `${agentType}-Loan-${loanId}` `` normally. For Credit-Evaluation with a real
+  `documentId`, it is `` `${agentType}-Loan-${loanId}-Doc-${documentId}` ``.
+</ParamField>
+
+<ParamField path="tags" type="string[]">
+  `[agentTag, "audit", "langgraph"]`, where `agentTag` is `"credit"` for
+  Credit-Evaluation, otherwise `agentType.toLowerCase().replace(/[^a-z0-9]/g, "-")`.
+</ParamField>
+
+<ParamField path="metadata" type="object">
+  `{ loanId, documentId, auditRunId, agentType, timestamp (ISO),
+  executionContext: "langgraph-service", environment: NODE_ENV,
+  ...additionalMetadata }`.
+</ParamField>
+
+<ParamField path="hide_inputs / hide_outputs" type="function">
+  Both set to the PII anonymizer (see below), LangSmith's payload-scrubbing hook.
+</ParamField>
+
+`agentType` values seen in practice: `Pre-Audit-Classification`, `Property-Data`,
+`Document-Health`, `PII-Validation`, `Credit-Evaluation`, and appraisal. These map
+to `BUG_REPORT_AGENT_TYPES` in
+[`@loanlight-engineering/shared-types`](/ops/shared-packages).
+
+<Tip>
+To find every trace for one audit, filter LangSmith root runs on
+`metadata.auditRunId`. `LangSmithTracesService.getTracesForAuditRun(auditRunId)`
+(`packages/api/src/audit/services/langsmith-traces.service.ts`) does exactly this:
+it lists root runs by `auditRunId`, reads `run.extra.metadata.agentType` (falling
+back to parsing the run name on `-Loan-`), and returns `RelatedTrace[]`
+(`{ trace_id, agent_type, run_name }`).
+</Tip>
+
+### Resolvable trace links
+
+Two code paths persist a clickable trace URL:
+
+- **Appraisal** — `buildAppraisalLangsmithUrl(langsmithRunId)`
+  (`packages/api/src/modules/portal-appraisal/appraisal.processor.ts`) builds
+  `` `${LANGSMITH_BASE_URL}/o/${LANGSMITH_ORG_ID}/traces/${langsmithRunId}` ``. The
+  run id is pinned into `config.runId` so the stored URL resolves to the real
+  trace.
+- **Pre-audit dry-run** — `resolveTraceUrl()`
+  (`packages/api/src/dry-run/dry-run.service.ts`) polls `client.listRuns`
+  (filtering on `dryRunId` metadata and `is_root`) for up to ~12s, then returns
+  `` `${uiBase}${run.app_path}` ``.
+
+The `agent_runs` and `appraisal_runs` tables both carry a `langsmith_url` column
+so a resolved trace link survives on the run record.
+
+## PII anonymization
+
+Run inputs and outputs are scrubbed before they leave the process, by the
+anonymizer in
+`packages/api/src/langgraph/utils/langsmith-anonymizer.ts`
+(`createLangSmithAnonymizer()`), wired into `hide_inputs` / `hide_outputs`.
+
+<Warning>
+Anonymization happens client-side, before the payload is sent to LangSmith.
+LangSmith never receives raw borrower PII. Do not rely on raw values being present
+in a trace, and do not disable the anonymizer to "see more."
+</Warning>
+
+The anonymizer does three things:
+
+1. **Key denylist** — a case-insensitive `PII_KEY_DENYLIST` whose values are
+   replaced with `[REDACTED:<key>]`. It covers, among others, `loanname`, `first`,
+   `last`, `loanssnlast4`, `ssnlast4`, `loanaddress`, `line1`, `city`, `state`,
+   `postal_code`, `property_address`, `zip_code`, `ownername`, `borrowername`,
+   `subjectaddress`, `streetaddress`, `mailingaddress`, the CRED_016
+   `work_number_*` fields, and `label_text` (Reducto positional evidence).
+2. **Drops `pdfBytes`** entirely.
+3. **Free-text pattern scrub** — credit-card, driver's license, names, SSN, ITIN,
+   email, phone, and bank-account patterns, plus the CRED_016 "Work Number Income
+   Qualify" inline labels, MISMO XML field tags, and JSON field patterns.
+
+## Mapping a trace node back to code
+
+A LangGraph trace is a tree of nodes; each node corresponds to a function in the
+agent's graph. To go from a node you see in LangSmith to the code that produced
+it:
+
+<Steps>
+  <Step title="Read the run name to identify the agent">
+    `${agentType}-Loan-${loanId}` tells you which agent graph ran. The agent
+    pages under [/agents](/agents/platform-overview) describe each graph's nodes.
+  </Step>
+  <Step title="Match the node name to a graph node">
+    Node names in the trace are the names passed to `StateGraph.addNode(...)` in
+    that agent's graph definition. Search the agent's graph file for the node
+    name.
+  </Step>
+  <Step title="Cross-check timing and errors in Datadog">
+    The same node is wrapped as a `langgraph.node` span in Datadog (resource =
+    node name). If LangSmith shows a node that never produced output, check
+    Datadog for a stall or terminal failure on that node. See
+    [Datadog](/ops/datadog).
+  </Step>
+</Steps>

@@ -1,0 +1,83 @@
+---
+title: The audit run
+description: The central unit of work and what it contains.
+icon: play
+---
+
+The audit run is the central unit of work in LoanLight. One row in `audit_runs` represents one pass of the audit pipeline; it parents nearly every per-agent result table and is the object that triggers, results, and observability all key off.
+
+## Shape
+
+`audit_runs` is **lender-anchored and loan-optional**. Selected columns:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | On the EPC path, equals the `correlationId`. On the partner path, a fresh uuid. |
+| `lender_id` | uuid, NOT NULL → `lenders.id` | The tenant anchor. Tightened to NOT NULL in migration 0179. |
+| `loan_id` | uuid, nullable → `loans.id` | Null for loanless runs (for example a standalone appraisal). |
+| `loan_program_id` | uuid, nullable | |
+| `run_number` | integer, nullable | Per-loan sequence. Null only when `loan_id` is null (CHECK `audit_runs_run_number_requires_loan`). |
+| `trigger_source` | varchar(32), NOT NULL | `epc`, `los`, `partner`, `portal`, `admin_rerun`, or `shadow`. |
+| `status` | varchar(20), NOT NULL, default `pending` | `pending`, `processing`, `complete`, `failed`. |
+| `requestor_id` | text, NOT NULL | The Encompass client ID (EPC) or partner identity. |
+| `mismo_xml_hash` | text | Dedup/cache key for URLA-extraction reuse. |
+| `expected_closing_date` | text | Resolved and persisted during agent execution. |
+| `agent_config` | jsonb | The selected agents (partner allow-list or router bridge). A compatibility bridge only. |
+| `is_shadow` | boolean, NOT NULL, default false | Shadow (parity) runs. |
+| `shadow_of_correlation_id` | uuid | Links a shadow run to the real run it mirrors. |
+
+A partial unique index enforces `(loan_id, run_number)` where `loan_id` is not null. See [core tables](/data-model/core-tables) for the full schema.
+
+<Note>
+`audit_runs` is lender-anchored and loan-optional. Older descriptions that say "every audit run belongs to a loan" are wrong: `lender_id` and `trigger_source` are NOT NULL, but `loan_id`, `run_number`, and `loan_program_id` are nullable (migrations 0176/0179).
+</Note>
+
+## Status lifecycle
+
+```text
+pending → processing → complete | failed
+```
+
+The code inserts runs as `processing`. Transitions are guarded so races cannot corrupt terminal state:
+
+- **`completeAuditRun(id)`** sets `status="complete"` only where `status IN ('pending','processing')`. This prevents a late success from overwriting a `failed` terminal state (the timeout-then-late-resolve race).
+- **`failAuditRun(id, step, msg)`** sets `status="failed"` where `status IN ('pending','processing')` (idempotent).
+- **`markAuditAsInterrupted(id)`** unconditionally sets `failed` (server-restart cleanup).
+
+Stale `processing` runs older than 55 minutes are auto-reset for retry (below the 60-minute SQS visibility timeout). See [lifecycle and dedup](/pipeline/lifecycle-and-dedup).
+
+## What it parents
+
+The result tables are children of `audit_runs` (`onDelete: cascade`), all keyed by `audit_run_id`:
+
+| Agent | Result tables |
+|---|---|
+| PII-Validation | `pii_validation_results`, `pii_document_validations` |
+| Document-Health | `doc_expiration_results` (+ evidence), `doc_completeness_results`, `doc_signature_verification_results` (+ evidence) |
+| Property-Data / Red-Flags | `property_data_results`, `property_data_raw`, `red_flag_results` |
+| Credit-Evaluation | `credit_runs` (nullable `audit_run_id` link) |
+| URLA-Extraction | `urla_extraction_results`, `urla_rules_engine_results`, `urla_rules_findings` |
+
+Classify-split produces `classify_split_runs` and `document_classifications`. See [result tables](/data-model/result-tables).
+
+## Errors
+
+Per-agent failures do not fail the run. They are recorded in `audit_errors` (FK → `audit_runs.id`, cascade), and the run still reaches `complete`.
+
+| Column | Notes |
+|---|---|
+| `agent_name` | e.g. `piiValidation`, `classifySplit`, `urlaExtraction`, `creditEvaluation`. |
+| `error_type` | `transient`, `permanent`, or `validation`. |
+| `error_message` | The message. |
+| `error_details` | jsonb: `{ step, stack, code, auditedCreditDocumentId? }`. |
+| `retryable` | Defaults to true when `error_type === "transient"`. |
+
+`failAuditRun` is reserved for infrastructure failures (XML download, classification, S3 retrieval, lender resolution) caught in the outer orchestrator. See [issue kinds](/pipeline/issue-kinds) and [observability](/agents/observability).
+
+## Creation entry points
+
+- **`createAuditRun(...)`** — EPC; `trigger_source="epc"`; `id` equals the `correlationId`.
+- **`createAuditRunForPartner(...)`** — Partner; `trigger_source="partner"`; `id` is a fresh uuid.
+- **`createAuditRunDirect(...)`** / **`AuditRunFactory.create(...)`** — generic.
+
+See [triggers](/pipeline/triggers) and [lifecycle and dedup](/pipeline/lifecycle-and-dedup).

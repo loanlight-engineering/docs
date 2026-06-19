@@ -1,0 +1,188 @@
+---
+title: Integrations database schema
+description: The loanlight_epc Aurora Postgres schema.
+icon: database
+---
+
+The encompass service owns its own database: Aurora Serverless v2 PostgreSQL, schema `loanlight_epc`. It is separate from the loanlight-api / AUS database.
+
+## Migrations
+
+Migrations live in `packages/encompass/migrations/*.sql` and are applied by the `DbMigrate` Lambda custom resource on every deploy.
+
+<Warning>
+There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
+</Warning>
+
+The current schema has **12 tables**. Migration `001_baseline_schema.sql` creates the original baseline; migrations 003 through 013 add the rest.
+
+| Migration | Adds |
+|---|---|
+| `001_baseline_schema` | `loan`, `client`, `transaction_record`, `transaction_state`, `epc_event`, `transaction_update` |
+| `002_add_processed_at_to_events` | `epc_event.processed_at` |
+| `003_create_audit_details` | `audit_details` |
+| `004_drop_is_processed_successfully` | drops a `transaction_update` column |
+| `005_add_error_details_to_audit_details` | error columns on `audit_details` |
+| `006_add_progress_to_audit_details` | progress columns on `audit_details` |
+| `007_create_transaction_documents` | `transaction_document` |
+| `008_transaction_is_shadow` | `transaction_record.is_shadow`, widen `loan.encompass_loan_number` to 64 |
+| `009_create_document_push_records` | `document_push_record` |
+| `010_create_epc_delivery_records` | `epc_delivery_records` |
+| `011_add_delivery_cancelled_after` | `transaction_state.delivery_cancelled_after` |
+| `012_create_lender_and_client_lender_id` | `lender`, `client.lender_id` |
+| `013_create_audit_delivery_log` | `audit_delivery_log` |
+
+<Note>
+The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The six tables added by migrations 003–013 (`audit_details`, `transaction_document`, `document_push_record`, `epc_delivery_records`, `lender`, `audit_delivery_log`) are missing from it. Trust the schema, not the README.
+</Note>
+
+## Tables
+
+### loan
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `encompass_loan_number` | varchar(64). **Not unique** (widened to 64 in 008 for shadow suffixes). |
+| `encompass_loan_id` | uuid, **UNIQUE** — the only unique key |
+| `created_at` | |
+
+### client
+
+The EPC/lender client.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `provider_client_id` | varchar(100), UNIQUE |
+| `client_token` | |
+| `lender_id` | FK → `lender` (added in 012) |
+
+### transaction_record
+
+One per EPC transaction.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `epc_transaction_id` | uuid, UNIQUE |
+| `client_id`, `loan_id` | FKs |
+| `product_id`, `instance_id`, `request_type`, `is_uat` | |
+| `is_shadow` | added in 008; flags synthetic shadow transactions |
+
+### transaction_state
+
+Per-run state. Its `id` is the `correlationId` that threads the whole pipeline.
+
+| Column | Notes |
+|---|---|
+| `id` | PK — the **correlationId** |
+| `transaction_record_id` | FK |
+| `status`, `partner_status`, `active`, `is_dirty` | |
+| `transaction` | jsonb |
+| `delivery_cancelled_after` | added in 011 |
+
+### epc_event
+
+Raw EPC events.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `transaction_record_id` | FK |
+| `epc_event_id` | uuid, UNIQUE |
+| `epc_request_correlation_id`, `type`, `resource_type`, `environment` | |
+| `event` | jsonb |
+| `update_count` | `> 1` means a duplicate (dedup signal) |
+
+### transaction_update
+
+EPC update tracking.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `transaction_record_id` | FK |
+| `correlation_id` | uuid, UNIQUE |
+| `status`, `partner_status`, `is_processed_successfully` | |
+| `request_data` | jsonb |
+
+### audit_details
+
+The record the [frontend](/integrations/frontend-plugin) polls and streams.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `transaction_record_id` | UNIQUE FK |
+| `transaction_state_id` | FK |
+| `audit_state` | `Processing` / `Complete` / `Failed` / `Error` |
+| `updated`, `initial_run`, `epc_transaction_id` | |
+| `error_message`, `error_code`, `error_step`, `error_timestamp` | added in 005 |
+| `progress_step`, `progress_message`, `progress_percent`, `progress_updated_at` | added in 006 |
+
+### transaction_document
+
+One row per S3 file. UNIQUE `(transaction_state_id, doc_id)`.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `transaction_state_id` | FK |
+| `doc_id` | EPC resource id |
+| `s3_key`, `doc_map_type`, `original_name`, `mime_type`, `is_mismo` | |
+
+### document_push_record
+
+Backs the document-push pipeline (see [Messaging](/integrations/messaging)). UNIQUE `(transaction_record_id, document_id)`.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `transaction_record_id` | FK |
+| `document_id`, `s3_key`, `classification_type` | |
+| `state` | `pending` → `resource_created` → `uploaded` → `attached` → `completed` / `failed` |
+| `epc_resource_id`, container columns, error columns | |
+
+### epc_delivery_records
+
+B-track durable delivery-queue scaffold (LOA-946/948/949). UNIQUE `(transaction_state_id, sequence_order)`.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `transaction_state_id`, `sequence_order`, `delivery_type` | |
+| `status` | `pending` / `in_progress` / `completed` / `failed` / `cancelled` |
+| `payload` | jsonb |
+| attempt and lock columns | |
+
+<Note>
+This table is scaffolding, not yet in the live delivery path. See [Messaging](/integrations/messaging).
+</Note>
+
+### lender
+
+Per-lender delivery behaviour (added in 012).
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `name` | |
+| `audit_delivery_mode` | `single` / `split` / `pipeline`, default `single` |
+
+The `audit_delivery_mode` drives the single vs split delivery decision in [Audit lifecycle](/integrations/audit-lifecycle). Shadow audits resolve a lender by name via this table — see [Shadow audits](/integrations/shadow-audits).
+
+### audit_delivery_log
+
+Ledger for split deliveries (added in 013), written only after the Encompass PATCH succeeds.
+
+| Column | Notes |
+|---|---|
+| `id` | PK |
+| `transaction_state_id` | |
+| `document_kind` | `aus_report` / `property` |
+| `property_address`, `file_name`, `s3_key`, `epc_resource_id`, `container_type` | |
+
+## Access
+
+Database roles: `db_readonly` (all envs) and `db_readwrite` (int only). The bastion is shared with the API DB; connect on local port 5433 to avoid the 5432 conflict (`db:connect:int:read` / `db:connect:int:write` scripts). See [Integrations infrastructure](/integrations/infrastructure).

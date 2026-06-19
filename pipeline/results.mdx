@@ -1,0 +1,86 @@
+---
+title: Reading audit results
+description: The endpoints that expose audit results to partners, the portal, and internal tools.
+icon: file-text
+---
+
+Each agent writes to its own result table keyed by `audit_run_id`. Three different read surfaces shape those tables for three different consumers. Pick the one that matches your caller.
+
+<Columns cols={3}>
+  <Card title="Partner API" icon="key">
+    `AuditResultsService.getFormattedResults` → bucketed issues for external partners.
+  </Card>
+  <Card title="Portal / Encompass" icon="layout-dashboard">
+    `AuditDataController` → rich finding shape for the portal and PDF report.
+  </Card>
+  <Card title="Internal" icon="terminal">
+    `InternalAuditResultsController` → aggregated raw shape for internal tools.
+  </Card>
+</Columns>
+
+## Partner-facing results
+
+`AuditResultsService.getFormattedResults(auditRunId)` (`audits/services/audit-results.service.ts`) fans out over the result tables (`Promise.all`) and returns `FormattedAuditResults { agents, summary, classificationSummary }`. Each fetcher applies an explicit `orderBy` for deterministic ordering.
+
+| Fetcher | Source table(s) | What it surfaces |
+|---|---|---|
+| `fetchPiiResults` | `pii_validation_results` (+ `pii_document_validations`) | rows with `has_issue`; `issueKind = issue_kind`, `severity` |
+| `fetchExpirationResults` | `doc_expiration_results` (+ evidence) | excludes `document_type = "document_completeness"` and `issue_kind ∈ {valid, null}` |
+| `fetchCompletenessResults` | `doc_completeness_results` | excludes `valid` / `valid_*` |
+| `fetchSignatureResults` | `doc_signature_verification_results` | rows where `status !== "all_signed"` |
+| `fetchPropertyResults` | `property_data_results` (+ `red_flag_results`) | properties via `toPartnerPropertyDto`; red-flag `issueKind = rule_id` |
+| `fetchClassificationSummary` | classify-split tables | `{ totalDocuments, highConfidence, requiresReview }` |
+| `fetchCreditResults` | credit projection bundles | skips `status ∈ {pending, running}`, redacted projection |
+
+The `agents` object only includes keys for agents that ran: `piiValidation`, `documentHealth` (merged expiration + completeness), `propertyData` (issues plus `properties[]`), `signatureVerification`, and `creditEvaluations[]` (with a legacy `creditEvaluation` alias).
+
+### Critical vs warning bucketing
+
+`summary` is `{ totalIssues, criticalIssues, warnings }`. An issue is bucketed by its issue-kind or its severity (critical wins; the buckets are disjoint):
+
+<Tabs>
+  <Tab title="Critical issue kinds">
+    `expired, missing_document, page_mismatch, multi_doc_mismatch, composite_mismatch, mismatch, missing_required_field, unsigned, partially_signed, missing, inconsistent, identity_mismatch`
+  </Tab>
+  <Tab title="Warning issue kinds">
+    `expiring_soon, date_missing, date_invalid, indeterminate, verification_failed`
+  </Tab>
+  <Tab title="Severity buckets">
+    `CRITICAL_SEVERITIES = {CRITICAL, HIGH}`, `WARNING_SEVERITIES = {MEDIUM, LOW}` (case-insensitive). Credit severities derive via `deriveSeverityFromOutcome` (`FAIL→HIGH`, `WARNING→MEDIUM`, default `→LOW`; `PASS`/`SKIPPED` excluded).
+  </Tab>
+</Tabs>
+
+See [Issue-kind taxonomy](/pipeline/issue-kinds) for the canonical codes.
+
+### Partner read endpoints
+
+Base path `api/v1/partner/audits` (`PartnerAuditsController`):
+
+- `GET /api/v1/partner/audits/:auditId` — status and metadata (`getAuditRunByLender`).
+- `GET /api/v1/partner/audits/:auditId/results` — in-progress returns `{ status, message, agents: null, summary: null }`; complete returns `getFormattedResults` (stripping the legacy `creditEvaluation` alias).
+- `POST /api/v1/partner/audits/:auditId/results/access-url` — short-lived single-use JWT URL (`ResultsAccessService`); `409` if not complete.
+- `GET /api/v1/partner/audits/:auditId/errors` — `{ auditId, errors[], canRetry }`.
+- `GET /api/v1/partner/audits/:auditId/classifications` — `buildClassificationsResponse`.
+
+See [Partner API results and access URLs](/partner-api/results-and-access-urls).
+
+## Portal and Encompass results
+
+`AuditDataController` (`audit/controllers/audit-data.controller.ts`, base `api/v1/audit_runs`) serves the rich finding shape used by the portal and the PDF report. It uses `RequestorAccessInterceptor` / `RequestorLoanAccessInterceptor` (header `X-Requestor-ID`, validated by `AuditValidationService.validateRequestorAccess`) and `AuditDataMapperService`.
+
+- `GET /api/v1/audit_runs/:id/results` — `{ success, data: { auditRunId, dataConsistency, summary, documentHealth, ... } }` with `AuditFinding[]` (evidence, severity, expiration fields).
+- `GET /api/v1/audit_runs/:id/property_data`
+- `GET /api/v1/audit_runs/:id/credit`
+- `GET /api/v1/audit_runs/:id/urla_completeness`
+- `GET /api/v1/audit_runs/:id/classifications`
+- `GET /api/v1/audit_runs/by-loan/:encompassLoanId/latest-completed`
+
+See [Portal audit results API](/portal/api-audit-results).
+
+## Internal aggregated results
+
+`InternalAuditResultsController` (`internal/internal-audit-results.controller.ts`, base `internal/v1/audit-results`, guarded by `InternalApiKeyGuard`):
+
+- `GET /internal/v1/audit-results/:auditRunId` — fans out (`Promise.allSettled`) over `auditDataMapper.buildAuditRunResults`, property data and red flags, URLA completeness, classifications, and credit projection bundles. Returns `{ success, data: { auditRunId, auditResults, propertyData, redFlags, urlaCompleteness, classifications, credits } }`. `documentsAnalyzedCount` comes from `llamaClient.listPipelineDocuments(loan.llc_pipeline_id)`.
+
+This endpoint feeds the audit-PDF generator in `loanlight-integrations`. See [Audit PDF](/integrations/audit-pdf).

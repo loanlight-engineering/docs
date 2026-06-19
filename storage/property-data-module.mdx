@@ -1,0 +1,118 @@
+---
+title: Property-data read module
+description: The read-side property-data NestJS module vs the propertyData agent.
+icon: house
+---
+
+The `property-data/` NestJS module is the **read side** of property data. It serves consolidated property records over HTTP by merging the per-property result rows with the latest consolidated blob. It is distinct from the [Property-Data agent](/agents/property-data), which is the **write side** that fetches and persists property data inside a LangGraph run.
+
+<Warning>
+Two different classes are both named `PropertyDataModule`:
+
+- `property-data/property-data.module.ts` — the **read-side** module documented here. Provides and exports `PropertyDataService`.
+- `langgraph/agents/propertyData/property-data.module.ts` — the **write-side** module that provides the fetch services (`ZillowUrlFinderService`, `HasDataService`, `AttomService`).
+
+Disambiguate by path, not class name.
+</Warning>
+
+## PropertyDataService
+
+`PropertyDataService` (`property-data/property-data.service.ts`) injects the `DRIZZLE` DB and exposes three methods.
+
+### getPropertyDataByAuditRun(auditRunId)
+
+Returns `Promise<PropertyDataResponse[]>`.
+
+- Reads `property_data_results` filtered by `audit_run_id`, ordered `asc(property_type), asc(created_at), asc(id)`. The deterministic ordering is load-bearing — these tables have no unique constraints, so the `created_at, id` tiebreakers must stay.
+- In parallel it calls the private `getConsolidatedByAuditRun(auditRunId)` to load the latest consolidated blob.
+- Throws `HttpException 404` (`"No property data found for the given audit run"`) when there are zero rows.
+- Per row, it picks the matching consolidated blob by `property_type`:
+
+| `property_type` | Consolidated source | Zillow URL |
+|---|---|---|
+| `subject` | `consolidated.subject` | `subjectZillowUrl` |
+| `current_home` | `consolidated.borrower` | `borrowerZillowUrl` |
+| `investment` | REO list indexed by `row.source_order` | — |
+
+- It maps each row via `mapToPropertyDataResponse(row, matched, zillowUrl)`.
+
+<Note>
+For `investment` rows there is a hard address guard. The normalized `city`, `street` (line1), `state`, and `zip` must **all** match between the DB row and the consolidated REO candidate, or `matched` is set to `null` and a `logger.warn "REO address guard mismatch"` fires (`failed_guard` = first failing field). An out-of-range `source_order` logs `"REO source_order out of range"`. This prevents historically cross-wired addresses from leaking into a report.
+</Note>
+
+### getConsolidatedByAuditRun(auditRunId) (private)
+
+Selects the **single most recent** `property_data_raw` row: `.orderBy(desc(created_at), desc(id)).limit(1)`. Returns `{ subject, borrower, reo[], subjectZillowUrl, borrowerZillowUrl }` from columns `consolidated_subject`, `consolidated_borrower`, `consolidated_reo`, `subject_zillow_url`, `borrower_zillow_url`.
+
+<Note>
+The write side inserts `property_data_raw` rows with no DB unique constraint (SELECT-then-INSERT), so concurrent runs can create duplicate raw rows. The `.orderBy(desc(created_at), desc(id)).limit(1)` is how the read side always resolves the newest blob. Errors are swallowed and return `null`, degrading gracefully to dbRow-only mapping.
+</Note>
+
+### getRedFlagsByAuditRun(auditRunId)
+
+Returns `Promise<RedFlagResultDto[]>`. Reads `red_flag_results` by `audit_run_id`, ordered `asc(created_at), asc(id)`. Red flags are batch-inserted in one statement and share a `created_at`, so the `id` tiebreaker is load-bearing. On a DB error it throws `HttpException 500`.
+
+## The mapper and precedence
+
+`mapToPropertyDataResponse(dbRow, consolidated, zillowUrl)` follows one precedence rule throughout: **the consolidated (ATTOM/HasData) value wins; the dbRow column is the fallback.** The fallback covers old runs and investment rows (always passed `consolidated = null`).
+
+Top-level response keys: `role`, `label`, `propertyIdentity`, `property`, `ownership`, `transactions`, `taxes`, `photos`, `priceHistory`, `zestimate`, `coordinates`, `listing`, `pricePerSqft`, `distanceFromSubject` (rounded 2dp), `avmValue/avmLow/avmHigh/avmConfidence/avmFsd/avmDate`, `floodZone`, `zillowUrl`.
+
+<Warning>
+Numeric coercion trap door (`property-data/CLAUDE.md`): Drizzle returns Postgres `numeric()` columns as `string | null` at runtime. Every dbRow-fallback numeric MUST be wrapped in `toNumberOrNull()` — `mortgage_amount`, `assessed_value`, `hoa_fee`, `monthly_rent`, `zestimate`, `avm_value`, `price_per_sqft`, `distance_from_subject`, `tax_amount`, `latitude`, `longitude`. `integer()` columns (`bedrooms`, `square_footage`, `lot_size`, `year_built`, `tax_year`, `attom_endpoints_called`, `*_coverage_percent`) return `number` natively and are NOT wrapped.
+</Warning>
+
+## HTTP endpoints
+
+### GET /api/v1/audit_runs/:id/property_data
+
+Defined in `audit/controllers/audit-data.controller.ts` (controller prefix `api/v1/audit_runs`).
+
+<ParamField path="id" type="string (UUID)" required>
+The audit run ID (`ParseUUIDPipe`).
+</ParamField>
+
+<ParamField header="X-Requestor-ID" type="string" required>
+Enforced by `RequestorAccessInterceptor`. Returns 400 if missing.
+</ParamField>
+
+<ResponseField name="data" type="PropertyDataResponse[]">
+Per-property records from `getPropertyDataByAuditRun`.
+</ResponseField>
+
+<ResponseField name="findings" type="RedFlagResultDto[]">
+Red flags from `getRedFlagsByAuditRun`.
+</ResponseField>
+
+<ResponseField name="success" type="boolean">
+Always `true` on a 200 (`GetPropertyDataResponseDto`).
+</ResponseField>
+
+The controller calls `getPropertyDataByAuditRun` and `getRedFlagsByAuditRun` in parallel and returns 404 when there are no property rows.
+
+### GET /internal/v1/audit-results/:auditRunId
+
+Defined in `internal/internal-audit-results.controller.ts` (prefix `internal/v1/audit-results`). Aggregates many branches via `Promise.allSettled`; property data and red flags are two of them. Each branch failure is isolated to `null` and never fails the whole response.
+
+The service is also consumed by the portal-audits projection layer (`modules/portal-audits/...`) for the customer-facing portal.
+
+## Read vs write at a glance
+
+| | Read module (`property-data/`) | Write agent (`langgraph/agents/propertyData/`) |
+|---|---|---|
+| Class | `PropertyDataService` | LangGraph `StateGraph<PropertyDataState>` + fetch services |
+| Module | `PropertyDataModule` (read) | `PropertyDataModule` (write, same name) |
+| Role | Serve consolidated records over HTTP | Fetch ATTOM/HasData/Zillow, consolidate, persist |
+| Touches | `property_data_results`, `property_data_raw`, `red_flag_results` (read) | Same tables (write) + property data PDF |
+| Entry | `GET /api/v1/audit_runs/:id/property_data` | Audit pipeline (Phase 2) |
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Property-Data agent" href="/agents/property-data" icon="bolt">
+The write side that produces the data this module serves.
+</Card>
+<Card title="Property-Red-Flags agent" href="/agents/property-red-flags" icon="flag">
+Produces the `red_flag_results` returned as findings.
+</Card>
+</Columns>

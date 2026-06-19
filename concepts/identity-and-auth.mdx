@@ -1,0 +1,58 @@
+---
+title: Identity and authentication
+description: The authentication surfaces across LoanLight.
+icon: key
+---
+
+LoanLight has several distinct authentication surfaces, each serving a different caller. This page is the orientation map; the detailed mechanics live in the ops, portal, and partner-api sections.
+
+## The surfaces at a glance
+
+| Surface | Who | Mechanism |
+|---|---|---|
+| WorkOS AuthKit | Human portal users and Octy users | WorkOS session + JWT, hydrated against the backend |
+| Partner `sk_*` keys | Lenders / LOS vendors calling the Partner API | WorkOS API keys validated by an API Gateway authorizer |
+| `OCTY_INTERNAL_API_KEY` | Octy ↔ AUS backend service calls | Shared secret in the `x-internal-api-key` header |
+| FusionAuth authorizer lambdas | Encompass / partner integrations | API Gateway authorizers exchanging for FusionAuth tokens |
+
+<Note>
+Multiple identity providers coexist. WorkOS AuthKit handles human login and `sk_*` partner keys; FusionAuth is still live for some Encompass/partner authorizer lambdas. `lender_auth_clients.source` lists `fusionauth`, `encompass`, `devconnect`, and `workos`.
+</Note>
+
+## WorkOS AuthKit (portal and Octy)
+
+Human login goes through WorkOS AuthKit, wrapped by `@loanlight-engineering/shared-auth`. The portal middleware calls `withAuth(request)`; the server then hydrates the user by calling `GET /api/v1/portal/auth/me` with the WorkOS access token, which resolves the `portal_users` row and lender.
+
+- The backend verifies WorkOS tokens in `WorkOSTokenVerifier.verify(token)` (RS256 against the WorkOS JWKS), reading `sub` → `workosUserId` and `sid` → `workosSessionId`. Unknown users are JIT-provisioned from their WorkOS org membership.
+- Octy reuses the same `shared-auth` wrapper and additionally gates every protected route on an `@loanlight.com` email domain. A local-auth bypass (`USE_LOCAL_AUTH=true`, never in prod) returns a hardcoded `super_admin`.
+- The four portal roles are `super_admin`, `client_admin`, `client_user`, and `read_only`. `super_admin` requires an internal lender.
+
+See [portal auth and roles](/portal/auth-and-roles) and [impersonation](/portal/impersonation).
+
+## Partner `sk_*` keys
+
+Partner API requests carry a WorkOS `sk_*` API key. An API Gateway authorizer lambda (`@loanlight-engineering/shared-lambda-auth`, Datadog service `api-auth`) validates the key on every `/api/v1/partner/*` request and sets `X-Requestor-ID` to the org id. The legacy `partner.ts` authorizer also hashes `x-api-key` with SHA-256 and looks it up in `partner_api_keys`, but WorkOS `sk_*` keys short-circuit to a deprecation response. See [partner authentication](/partner-api/authentication).
+
+## OCTY_INTERNAL_API_KEY
+
+Octy calls the AUS backend over an internal NLB using a shared secret. The `InternalApiKeyGuard` reads `INTERNAL_API_KEY` from config and compares the `x-internal-api-key` header with `crypto.timingSafeEqual`.
+
+<Warning>
+The env-name split is real: the guard reads `INTERNAL_API_KEY`, while the dry-run path reads `OCTY_INTERNAL_API_KEY`. CDK aliases both names to the same Secrets Manager value (`LLApi/OCTY_INTERNAL_API_KEY`). Docs that mention only one name are incomplete.
+</Warning>
+
+Octy's client sends both `x-internal-api-key` and `x-acting-user` (the user email or `"system"`). Endpoints it calls include `POST /internal/dry-run/classify-split` (SSE) and `GET /internal/v1/audit-results/{auditRunId}`. See [Octy auth and access](/octy/auth-and-access).
+
+## FusionAuth authorizer lambdas
+
+Encompass and partner-origin integrations authenticate through API Gateway authorizer lambdas that ultimately exchange for FusionAuth tokens:
+
+- **`encompass.ts`** (`encompass-auth`) — loads LoanLight Encompass credentials, gets an Ellie Mae token, fetches the origin, then exchanges for a FusionAuth token. Sets `x-origin-id`, `x-partner-access-token`, `x-is-uat`, `x-session-id`.
+- **`partner.ts`** (`api-partner-auth`) — hashes the partner `x-api-key`, looks it up in `partner_api_keys`, then gets a FusionAuth token.
+- The EPC authorizer (`encompass-epc-auth`) lives in the integrations encompass stack.
+
+See [EPC webhook security](/integrations/epc-webhook-security) and [infrastructure](/ops/infrastructure).
+
+## Lender ↔ auth-client mapping
+
+`lender_auth_clients` maps an external IdP/LOS client id to a LoanLight lender: `client_id` (unique), `lender_id` (FK → `lenders`), and `source` (`fusionauth | encompass | devconnect | workos`). The EPC orchestrator uses it to attribute an incoming `requestorId` to a tenant, self-healing the mapping on a miss. See [lender resolution](/integrations/lender-resolution).

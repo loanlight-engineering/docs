@@ -1,0 +1,106 @@
+---
+title: Results and access URLs
+description: Result payload shape and short-lived access URLs.
+icon: link
+---
+
+Once an audit is `complete`, partners read its findings two ways: the structured JSON from `GET /api/v1/partner/audits/:auditId/results` (see [Audits API](/partner-api/audits)), or a short-lived portal viewer URL minted by `POST /api/v1/partner/audits/:auditId/results/access-url`. This page covers the result payload shape and the access-URL token lifecycle.
+
+## Result payload shape
+
+When the run is `complete`, the results endpoint spreads `AuditResultsService.getFormattedResults(auditId)`. The top level is:
+
+```json
+{
+  "auditId": "uuid",
+  "loanId": "uuid",
+  "status": "complete",
+  "startedAt": "<iso>",
+  "completedAt": "<iso>",
+  "summary": { "totalIssues": 4, "criticalIssues": 1, "warnings": 3 },
+  "agents": { }
+}
+```
+
+### The agents object
+
+`agents` is keyed by agent name; a key is present only if that agent ran. Possible keys:
+
+| Key | Shape | Source |
+| --- | --- | --- |
+| `piiValidation` | `{ status: "completed", results: [...] }` | [PII validation](/agents/pii-validation) |
+| `documentHealth` | `{ status: "completed", results: [...] }` | merged expiration + completeness, [document health](/agents/document-health) |
+| `signatureVerification` | `{ status: "completed", results: [...] }` | signature checks |
+| `propertyData` | `{ status: "completed", results: [...], properties: [...] }` | [property data](/agents/property-data) + [red flags](/agents/property-red-flags) |
+| `creditEvaluations` | `CreditReportPayload[]` (array) | [credit evaluation](/agents/credit-evaluation) |
+
+Each non-credit issue object carries fields such as `issueKind`, `message`, `confidenceScore`, `documentRef`, `severity`, `category`, `expirationDate`, `daysUntilExpiration`, `fieldName`, `documentName`. The [issue kind taxonomy](/pipeline/issue-kinds) explains the codes.
+
+### Summary buckets
+
+`summary` is `{ totalIssues, criticalIssues, warnings }`. Issue kinds and severities are bucketed into critical vs warning (critical wins; the buckets are disjoint). Credit severities are derived from rule outcome (`FAIL → HIGH`, `WARNING → MEDIUM`; `PASS`/`SKIPPED` excluded). The full bucket sets live in [issue kinds](/pipeline/issue-kinds).
+
+## Credit results
+
+<Note>
+**Credit lives under `agents.creditEvaluations` (an array).** The legacy top-level `creditEvaluation` key is stripped from the partner response (`const { creditEvaluation: _legacy, ...agentsWithoutLegacy }`). `creditEvaluations` is absent entirely when no credit agent ran.
+</Note>
+
+Each `creditEvaluations[]` item is a `CreditReportPayload`:
+
+| Field | Notes |
+| --- | --- |
+| `id`, `lenderId`, `userId`, `loanId` | identifiers |
+| `status` | `pending \| running \| completed \| failed \| reviewed` |
+| `inputFilename`, `auditedCreditDocumentFileName` | source document names (`auditedCreditDocumentFileName` nullable) |
+| `extractedData` | parsed credit report fields |
+| `complianceResults[]` | each `{ ruleCode, name, category, outcome (PASS\|FAIL\|WARNING\|NEEDS_INFO\|SKIPPED), message, severitySource, overridden, originalOutcome, overrideReason, overrideUser, overrideAt }` |
+| `aiSummary` | narrative summary |
+| `isScanned`, `coveragePercent`, `overallRisk` | quality / risk signals |
+| `dtiRatio`, `grossMonthlyIncome` | computed ratios |
+| `ruleSetId`, `selectedRuleSources[]` | which rule set evaluated |
+| `errorMessage` | nullable |
+| `startedAt`, `completedAt`, `createdAt`, `updatedAt` | timestamps |
+
+<Warning>
+**The partner surface omits `metrics`, `inputS3Key`, and `triggeredBy`** — these are portal-only fields. The credit projection runs with `{ redact: true, triggeredBy: null, includeInputS3Key: false }`, and `complianceResults` are sorted ascending by `ruleCode`. Rows with `status ∈ {pending, running}` are skipped.
+</Warning>
+
+## Access URLs
+
+`POST /api/v1/partner/audits/:auditId/results/access-url` mints a short-lived, single-use link into the lender portal's results viewer. It is backed by `ResultsAccessService` (`services/results-access.service.ts`).
+
+```json
+{
+  "url": "https://portal.../results/audits/<auditId>?token=<JWT>",
+  "expiresAt": "<iso>"
+}
+```
+
+### Token lifecycle
+
+<Steps>
+  <Step title="Mint an exchange token">
+    `generateAccessUrl(auditId, lenderId, lenderCode, loanId)` produces an HS256 JWT (`expiresIn = ttlMinutes * 60`) with claims `{ auditId, lenderId, lenderCode, loanId, purpose: "partner-results-exchange", embedContext: "top", iat, exp }`. The URL is `{baseUrl}/audits/{auditId}?token={jwt}`.
+  </Step>
+  <Step title="Consume it once">
+    When the portal opens the URL, a one-shot Redis `SET NX` consumes the exchange token (single-use), then `mintViewToken` (`packages/app/src/lib/results-access-token.ts`) issues a view token with `purpose: "partner-results-view"`.
+  </Step>
+  <Step title="Read results">
+    The portal proxy forwards the view token as the bearer on every `/api/v1/portal/audits/...` request. `verifyViewToken` checks the signature and `purpose` claim with a 5-second clock tolerance; the `lenderId` comes from the claims, never from a header.
+  </Step>
+</Steps>
+
+### Configuration and failure modes
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `PARTNER_RESULTS_BASE_URL` | none in prod (dev: `http://localhost:3001/results`) | Missing in prod → `503`. |
+| `PARTNER_RESULTS_JWT_SECRET` | none in prod (dev/test fallback string) | Missing in prod → `503`. |
+| `PARTNER_RESULTS_TOKEN_TTL_MINUTES` | `60` | Token lifetime in minutes. |
+
+<Warning>
+If the service is misconfigured in production, `isConfigured()` returns false and the access-url endpoint throws `503 ServiceUnavailableException`. The endpoint also returns `409` if the audit is not yet `complete`.
+</Warning>
+
+`ResultsAccessService` is shared with the EPC integration, which mints `epc-results-exchange` / `epc-results-view` tokens through the same code path.

@@ -1,0 +1,70 @@
+---
+title: DB Studio
+description: The read-only Postgres explorer (int-only).
+icon: database
+---
+
+DB Studio at `/db-studio` is a read-only Postgres explorer for the shared LoanLight Aurora database. It is meant for engineers inspecting schema and data while triaging an issue — an ER diagram, a filterable data grid, foreign-key expansion, and a command-K jump palette.
+
+<Warning>
+DB Studio is **int-only**. The middleware returns a **404** for any `/db-studio` path when `DEPLOYED_ENVIRONMENT === "prod"`, and the nav link is appended only when `!isProd`. Do not expect it in production.
+</Warning>
+
+## Read-only guarantees
+
+DB Studio never writes. It uses a dedicated raw `pg` pool (`src/lib/studio-db.ts`, separate from the Drizzle app pool, `max: 3`) and routes every query through `studioQuery()`, which calls `assertReadOnly()` before execution:
+
+- The statement must start with `SELECT` (after trimming) — anything else throws.
+- A disallowed-keyword regex rejects `DELETE`, `UPDATE`, `INSERT`, `TRUNCATE`, `DROP`, `ALTER`, `CREATE`, `COPY`, and `WITH ... (DELETE|UPDATE|INSERT)` CTEs.
+- A multi-statement guard rejects a semicolon followed by any non-whitespace.
+- Every query carries a 5-second `query_timeout`.
+
+```ts
+const DISALLOWED =
+  /^\s*(WITH\s+.+?(DELETE|UPDATE|INSERT)|DELETE|UPDATE|INSERT|TRUNCATE|DROP|ALTER|CREATE|COPY)/i;
+const HAS_EXTRA_STMT = /;\s*\S/; // semicolon followed by non-whitespace = multiple statements
+```
+
+Every Studio API route is also wrapped by `withStudioAuth`, which applies the same WorkOS `@loanlight.com` domain gate as the rest of the app. See [Authentication and access control](/octy/auth-and-access).
+
+## API surface
+
+The Studio routes live under `src/app/api/studio/*`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/studio/schemas` | Schemas, tables, views, enums + rule/policy counts + per-table row counts (30s cache). |
+| `GET /api/studio/tables/[schema]/[table]/data` | Paginated rows with filtering and sorting. |
+| `GET /api/studio/tables/[schema]/[table]/structure` | Column definitions for a table. |
+| `GET /api/studio/tables/[schema]/[table]/count` | Row count. |
+| `GET /api/studio/enums` | Enum types and values. |
+| `GET /api/studio/er-schema` | Graph data for the ER diagram. |
+| `GET /api/studio/fk-record` | Resolve a single foreign-key target row (for FK expansion). |
+
+### Column allowlisting on the data route
+
+The data route does not trust client-supplied column names. It validates the table, then builds a column allowlist from `information_schema.columns` and rejects any unknown sort or filter column with a 400. Supported filter operators: `equals`, `not_equals`, `contains`, `starts_with`, `ends_with`, `is_null`, `is_not_null`, `gt`, `lt`, `gte`, `lte`, `like`, `ilike`, `not_like`, `in`. A global text search runs across the table's text columns. The response returns rows, total, and column metadata (including PK/FK info). Page sizes are 25/50/100/150/500.
+
+## UI
+
+The client is rendered from `src/components/studio/`:
+
+- **SchemaSidebar** — navigate schemas and tables.
+- **DataGrid** — TanStack Table data grid with the filter operators above.
+- **AdvancedFilterPanel** — compose column filters.
+- **SchemaVisualizer** / **SchemaVisualizerInner** — React Flow ER diagram (laid out with `dagre`).
+- **QuickJumpPalette** — command-K palette to jump to any table.
+- **FKExpander** — expand a foreign-key value into its target row.
+- **TableTabManager** — Data / Structure / Metadata tabs per table.
+- **MetadataPanel**, **PreviewPanel**, **StudioLayout** — supporting chrome.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Authentication and access control" href="/octy/auth-and-access" icon="lock">
+The domain gate that also protects Studio.
+</Card>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+`DATABASE_URL` and `DEPLOYED_ENVIRONMENT`.
+</Card>
+</Columns>

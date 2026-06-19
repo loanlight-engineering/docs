@@ -1,0 +1,100 @@
+---
+title: "Portal API: audit results and detail sections"
+description: Audit list/summary and per-section detail endpoints.
+icon: clipboard-check
+---
+
+Two controllers serve completed pipeline audits to the portal: `portal-audits-list` (the list and summary) and `portal-audits` (the per-section detail). They use different guards — the list uses [`PortalAuthGuard`](/portal/api-auth), while the detail sections use the multi-arm `PortalAuditsAuthGuard`. These read the per-agent result tables produced by the [audit pipeline](/pipeline/results).
+
+## portal-audits-list
+
+Controller: `portal-audits/portal-audits-list.controller.ts` at `api/v1/portal/audits`. Guarded by `PortalAuthGuard`; all responses set `Cache-Control: private, no-store`. Shadow runs are filtered out (`is_shadow = false`). The tenant filter is `coalesce(audit_runs.lender_id, loans.lender_id) = effectiveLenderId`.
+
+### GET /api/v1/portal/audits
+
+List audits for the effective lender.
+
+<ParamField query="page" type="integer">Page number.</ParamField>
+<ParamField query="limit" type="integer">Page size, capped at 100, default 25.</ParamField>
+<ParamField query="sort" type="string">One of `startedAt`, `completedAt`, `loanNumber`, `status`, `runNumber`.</ParamField>
+<ParamField query="order" type="string">`asc` or `desc`.</ParamField>
+<ParamField query="status" type="string">Filter by status.</ParamField>
+<ParamField query="loan_type" type="string">Filter by loan type.</ParamField>
+<ParamField query="search" type="string">Free-text search (minimum 2 characters).</ParamField>
+<ParamField query="from" type="string">Start of date range.</ParamField>
+<ParamField query="to" type="string">End of date range.</ParamField>
+
+<ResponseField name="audits" type="AuditListItem[]">
+Each item: `{ auditId, loanId | null, loanNumber | null, loanType, loanProgramName, runNumber | null, status, startedAt | null, completedAt | null, issueCount, agents[] }`. `status` is one of `pending`, `processing`, `complete`, `failed`.
+</ResponseField>
+<ResponseField name="pagination" type="object">
+`{ total, limit, offset, hasMore }`.
+</ResponseField>
+
+Invalid query params return `400` with a `code`: `invalid_page`, `invalid_limit`, `invalid_status`, `invalid_search`, `invalid_from`, or `invalid_to`.
+
+### GET /api/v1/portal/audits/summary
+
+Portfolio summary for the effective lender.
+
+<ResponseField name="summary" type="object">
+`{ totalAudits, completionRate, averageDurationSeconds, totalIssues }`. `totalIssues` is a lifetime sum across `pii_validation_results(has_issue)`, `doc_expiration_results(issue_kind <> 'valid')`, and `audit_errors(error_type <> 'transient')`.
+</ResponseField>
+
+## portal-audits
+
+Controller: `portal-audits/portal-audits.controller.ts` at `api/v1/portal/audits/:auditId`. Guarded by `PortalAuditsAuthGuard` (distinct from `PortalAuthGuard`). All sections set `Cache-Control: private, no-store`. Section data is built by `services/audit-data-projection.service.ts`.
+
+| Method / path | Returns |
+|---|---|
+| `GET /api/v1/portal/audits/:auditId/overview` | `AuditOverviewResponse` |
+| `GET /api/v1/portal/audits/:auditId/document-health` | Document health section |
+| `GET /api/v1/portal/audits/:auditId/data-consistency` | Data-consistency (PII) section |
+| `GET /api/v1/portal/audits/:auditId/property-data` | `PropertyDataSection` |
+| `GET /api/v1/portal/audits/:auditId/urla-completeness` | URLA completeness section |
+| `GET /api/v1/portal/audits/:auditId/checks-completed` | Checks-completed section |
+| `GET /api/v1/portal/audits/:auditId/credit` | Credit section |
+| `GET /api/v1/portal/audits/:auditId/errors` | `PortalAuditErrorsResponse` |
+| `GET /api/v1/portal/audits/:auditId/documents/by-name/:filename/pdf` | Document PDF by name |
+
+## PortalAuditsAuthGuard
+
+Source: `portal-audits/portal-audits-auth.guard.ts`. The guard inspects an unverified `purpose` JWT claim (via `jose.decodeJwt`) for routing only, then verifies the token with the matching arm.
+
+| `purpose` claim | Arm | Token contents |
+|-----------------|-----|----------------|
+| `partner-results-view` | partner | HS256 view token (`loanId`, `lenderCode`, `auditRunId`) |
+| `epc-results-view` | EPC | HS256 view token (same fields) |
+| `undefined` | WorkOS session (`portal-workos-session`) | RS256/JWKS (`userId`, `auditRunId`; no `loanId`/`lenderCode`) |
+| anything else | rejected | `401 unsupported_purpose` |
+
+After verification the guard calls `getAuditRunByLender(auditId, derivedLenderId)`; a null result returns `404 audit_not_found`. The guard never reads `x-lender-id` from request headers. Error codes are in `PortalAuditsErrorCode`.
+
+<Note>
+`unsupported_purpose` and `lender_mismatch` are not in the published shared-types pin. `WORKOS_TEST_BEARER_RAW` is a dual-gated local-dev shortcut.
+</Note>
+
+## The Next.js proxy requirement
+
+Every section the portal frontend reads is exposed under `api/v2/audits/:id/<section>` through a Next.js proxy route handler in `packages/app` (`proxyPortalAuditsRoute`).
+
+<Warning>
+Each section the frontend reaches must have a matching Next.js proxy route in `packages/app`, or it 404s silently — the frontend absorbs the failure to `null`. This is how the `overview` section once shipped broken. When adding a new section, add both the NestJS handler and the proxy route.
+</Warning>
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Pipeline results" icon="clipboard-check" href="/pipeline/results">
+    The per-agent result tables these sections read.
+  </Card>
+  <Card title="Authentication and authorization" icon="shield-check" href="/portal/api-auth">
+    PortalAuditsAuthGuard in the wider auth model.
+  </Card>
+  <Card title="Partner results viewer" icon="eye" href="/portal/partner-results-viewer">
+    The partner/EPC HS256 view-token flow.
+  </Card>
+  <Card title="Architecture and BFF" icon="layers" href="/portal/architecture-bff">
+    How the app proxies to the backend.
+  </Card>
+</Columns>

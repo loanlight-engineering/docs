@@ -1,0 +1,108 @@
+---
+title: Route and feature map
+description: The portal's routes, feature flags, and redirects.
+icon: map
+---
+
+The portal uses the Next.js App Router with four route groups under `src/app/`. This page maps the routes, the feature flags that gate them, and the redirects that catch legacy or non-page paths.
+
+## Route groups
+
+<Tabs>
+  <Tab title="(app) — main shell">
+    Authenticated chrome (`ChromeShell mode="scroll"`).
+
+    | Route | Purpose |
+    |---|---|
+    | `/` | redirect → `/loan-audits` |
+    | `/dashboard` | Client dashboard: summary cards, paginated audit table, filters, "New Loan" dropdown (Pre-Underwriting / Appraisal / Income). `PAGE_SIZE=25`, `REQUEST_TIMEOUT_MS=30_000`. Write controls hidden for `read_only`. |
+    | `/appraisal-review` | Appraisal history list (`showInternal` for internal `client_admin`). |
+    | `/appraisal-review/executive` | Appraisal executive dashboard (KPIs, value delta, geography, rules cards); day window 7/14/30/60/90. |
+    | `/appraisal-review/metrics` | Appraisal metrics (internal-only tab): per-field accuracy, confidence chart. |
+    | `/appraisal-review/[runId]` + `/review` | Single appraisal run detail + HITL review. |
+    | `/credit-review` (+ `/[runId]`, `/review`) | Credit list, run detail, HITL review. |
+    | `/income` | Income analyses list; "New Income Analysis" modal; stat cards. Uses the unioned `/api/income/run`. |
+    | `/income/[familySlug]/[runId]` | Income run detail. |
+    | `/income/bank-statements/[runId]` | Bank-statement run detail. |
+    | `/dscr-agent` | DSCR calculator; gated on `flags.dscrAgent`. |
+    | `/classification` | Document classification (upload zone + results table). |
+  </Tab>
+  <Tab title="settings">
+    Tenant settings (`SectionTabNav` of visible tabs). `/settings` redirects to the first visible tab.
+
+    | Route | Roles |
+    |---|---|
+    | `/settings/users` | `client_admin`, `super_admin` |
+    | `/settings/loan-programs` (+ `/[id]`) | all roles (create admin-only) |
+    | `/settings/rules` | all roles (`/new` admin-only) |
+    | `/settings/rules/agency` | under rules layout |
+    | `/settings/rules/credit` (+ `/new`) | all roles (create admin-only) |
+    | `/settings/key-field-review` | all roles |
+    | `/settings/appraiser-deny-list` | all roles; hidden from a global super admin unless impersonating |
+    | `/settings/global-appraiser-deny-list` | `super_admin` + `requireInternal` |
+  </Tab>
+  <Tab title="admin">
+    Internal global admin. Every route is `super_admin` + `requireInternal`.
+
+    | Route | Purpose |
+    |---|---|
+    | `/admin` | Admin dashboard (stats + audit log). |
+    | `/admin/clients` (+ `/new`, `/[clientId]`) | Lender list + detail. Detail tabs: Overview, Users, Feature Flags, Loan Programs, Rules, Key Field Review, Usage, Guideline Admin, API Keys. Has an "Impersonate" button. |
+    | `/admin/users` | Cross-lender user admin. |
+    | `/admin/audit-log` | Global audit log. |
+    | `/admin/rule-sets` | Rule-set catalog/status. |
+    | `/admin/staged-rules`, `/admin/staged-credit-rules` | Staged rule bundles. |
+    | `/admin/yaml-viewer` | YAML config viewer/editor (CodeMirror) with version history/diff. |
+    | `/admin/shadow-audit-diffs` (+ `/[id]`) | Shadow-audit diff list/detail + replay modal. |
+    | `/admin/appraisal-runs` | Cross-lender appraisal runs admin. |
+  </Tab>
+  <Tab title="(detail) — audit viewer">
+    Staff loan-audit detail viewer (`ChromeShell mode="fixed"`). `/loan-audits/[auditRunId]` with an `AuditSidebar`:
+
+    - Overview (base)
+    - Document Health (`/document-health`)
+    - Data Consistency (`/data-consistency`)
+    - Properties Check (`/properties-check`)
+    - 1003 Check (`/1003-check`)
+    - Credit Results (`/credit-results`)
+    - linked per-agent runs: Appraisal (`/appraisal/[runId]`), Income (`/income/[runId]`)
+
+    Sidebar and overview issue counts must come from the v2 `useResultsData()` projections (`dataConsistency.issueCount`, `documentHealth.issueCount`, `propertyData.redFlags.length`, `urlaCompleteness.rules_engine_result.summary.failed_count`). The "Errors" card/route was removed.
+  </Tab>
+</Tabs>
+
+The `(auth)` group (`/login`, `/invite`, `/reset-password`) is unauthenticated and forces light theme via `AuthThemeGuard`. The `results` group is documented separately in the [partner results viewer](/portal/partner-results-viewer).
+
+## Feature flags
+
+The `FeatureFlags` object (`src/lib/feature-flags.ts`) has these keys:
+
+`classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`.
+
+`getFeatureFlags(lenderId)` GETs the backend `/lenders/${lenderId}/feature-flags`, which returns `{ featureKey, enabled }[]`; the result is transformed via `KEY_MAP` onto an env-default base. An empty array or any failure falls back to `getEnvDefaults()`.
+
+<Warning>
+Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (opt-in), mirroring the backend resolvers — an absent per-lender row does NOT light up the UI: `appraisal`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`.
+</Warning>
+
+`feature-gates.ts` composes flags: `isChatEnabled(flags, isInternal) = flags.chat || isInternal`; `isAgencyRulesEnabled = appraisal && agencyRules`.
+
+`TopNav` nav items are keyed by flag: Appraisal→`appraisal`, Credit→`creditReview`, Income→`bankStatements`, DSCR→`dscrAgent`.
+
+## Redirects (non-page paths)
+
+Several legacy or non-page routes redirect rather than render:
+
+| From | To | Why |
+|---|---|---|
+| `/guideline-chat` | `/dashboard` | Chat is a floating FAB/drawer, not a page. |
+| `/bank-statements` | `/income` | Legacy; income list is unified. |
+| `/loan-audits` | `/dashboard` | Dashboard is the canonical landing page. |
+
+## DSCR agent: V1 manual only
+
+The `/dscr-agent` route renders only a manual DSCR calculator. It is gated on `flags.dscrAgent` (default-OFF per LOA-907) and renders a "not enabled" message otherwise. There is no LOS integration in V1 — it is manual entry only.
+
+## Theming
+
+Per-lender dark mode is opt-in via the `darkMode` flag. The CSS/dark-class plumbing is unconditional (every page must be dark-mode compatible using semantic tokens like `bg-card`, `bg-muted`, `text-foreground`). `ChromeShell` passes `forcedTheme="light"` unless `darkMode` is on; the theme toggle in `TopNav` only appears when `darkMode` is enabled.

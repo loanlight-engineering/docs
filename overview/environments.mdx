@@ -1,0 +1,49 @@
+---
+title: Environments
+description: The int and prod environments and how services deploy across them.
+icon: layers
+---
+
+LoanLight runs two deployed environments: `int` (integration / staging) and `prod` (production). A local `dev` value also exists for laptop and ephemeral work. The environment is selected by a single environment variable and threaded through CDK, Datadog tags, and LangSmith projects.
+
+## The environment variable
+
+`DEPLOYED_ENVIRONMENT` is the canonical switch. It is read by `parseEnvironment()` in `@loanlight-engineering/shared-cdk` and defaults to `int` when unset.
+
+```ts
+// shared-cdk/src/environment/environment.ts
+Environment = { INT: "int", PROD: "prod", DEV: "dev", DEVELOPMENT: "development" }
+```
+
+<Warning>
+Deploying to `int` or `prod` throws unless `CI === "true"` or `NODE_ENV === "test"`. You cannot accidentally deploy `int`/`prod` from a laptop; use `dev` (or `DEPLOYED_ENVIRONMENT=dev`) locally.
+</Warning>
+
+At runtime, `DEPLOYED_ENVIRONMENT` also prefixes queue names (`dev-` only when set to `dev`) and selects EventBridge versus local SQS routing.
+
+## What changes per environment
+
+| Concern | int | prod |
+|---|---|---|
+| LangSmith project | `loanlight-aus` | `loanlight-aus` |
+| Datadog `env` tag | `int` | `prod` |
+| WorkOS issuer (AuthKit) | `reassuring-veil-31-int.authkit.app` | `grand-interest-90-staging.authkit.app` |
+| FusionAuth `authDomain` | `loanlight-dev.fusionauth.io` | `loanlight.fusionauth.io` |
+| Partner S3 bucket | `partner-loan-files` | `partner-loan-files-prod` |
+| Partner results base URL | `portal.int.loanlight.com/results` | `portal.loanlight.com/results` |
+
+<Note>
+The prod `workOsIssuer` context value is `grand-interest-90-staging.authkit.app`. The string contains "staging" but it is the value set in the prod CDK context. Verify before treating any other value as canonical.
+{/* TODO: verify prod workOsIssuer value is intentional and not a context misconfiguration */}
+</Note>
+
+The LangGraph Studio dev environment uses a separate LangSmith project, `loanlight-studio`. Octy can override its LangSmith project via CDK context.
+
+## Observability per environment
+
+- **LangSmith** — the same `loanlight-aus` project serves both int and prod. Filter by run metadata (loan id, audit run id) rather than project to separate environments. See [LangSmith](/ops/langsmith).
+- **Datadog** — every span and log carries an `env:<int|prod>` tag (plus `version`/`commit` from `GIT_COMMIT_SHA`). See [Datadog](/ops/datadog).
+
+## Deploys
+
+Each service deploys with AWS CDK. Stack service names are `LLApi`, `LLIntegrations`, `Octy`, and `WebApp`. CI/CD is GitHub Actions: `loanlight-api` uses `cd-int.yml` / `cd.yml` (prod) and the matching app workflows; `octy` uses `deploy-octy-int.yml` / `deploy-octy-prod.yml`; integrations use `deploy-encompass-int/prod.yml`. `GIT_COMMIT_SHA` propagates into the Datadog `version`/`commit` tags and the RUM build version. See [infrastructure](/ops/infrastructure).

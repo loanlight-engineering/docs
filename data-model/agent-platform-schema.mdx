@@ -1,0 +1,62 @@
+---
+title: Agent platform schema
+description: agents, agent_dependencies, agent_runs, and lender_agent_entitlements.
+icon: boxes
+---
+
+The agent platform tables (added in migrations `0177`/`0178`) back the DB-driven agent catalog, dependency DAG, run ledger, and per-lender entitlements described in [agents platform overview](/agents/platform-overview). They are recent, and all four are keyed on the **string natural key `agent_type`** (varchar(64)) — not surrogate uuids — which is shared by every child table.
+
+<Note>
+This platform is rolling out in two phases. In production it currently runs in **observer mode** (the `agent_runs` ledger is backfilled over the legacy "run all" fan-out); the router does not yet own selection or execution by default. Older docs that describe audit agents only via `audit_runs.agent_config` are incomplete.
+</Note>
+
+## agents
+
+The platform agent registry (`agents.ts`). **PK is `agent_type` varchar(64)**, seeded by migration `0178_agent_catalog_seed.sql`.
+
+<ParamField path="agent_type" type="varchar(64) PK">The natural key, e.g. `PII-Validation`, `Document-Health`, `creditEvaluation`.</ParamField>
+<ParamField path="display_name" type="text NOT NULL" />
+<ParamField path="kind" type="varchar(16)">CHECK `agents_kind_check`: `audit_stage | standalone`.</ParamField>
+<ParamField path="audit_phase" type="integer">Dense `0`/`1`/`2`, only for `audit_stage` agents.</ParamField>
+<ParamField path="requires_llama_indexing" type="boolean" />
+<ParamField path="is_billable" type="boolean" />
+<ParamField path="active" type="boolean">Default `true`.</ParamField>
+
+Plus `created_at`, `updated_at`.
+
+## agent_dependencies
+
+The required-edge DAG between agents (`agent-dependencies.ts`). Composite PK `(agent_type, depends_on)`, both varchar(64) → `agents.agent_type`.
+
+<ParamField path="agent_type" type="varchar(64) → agents (no action)" />
+<ParamField path="depends_on" type="varchar(64) → agents (no action)" />
+
+Both FKs are `ON DELETE NO ACTION` — deleting a referenced agent that still has surviving edges fails loudly, preserving DAG integrity. Every edge is implicitly `required`; there is no kind column.
+
+## agent_runs
+
+The per-(audit run, agent) execution ledger (`agent-runs.ts`). PK `id` uuid.
+
+<ParamField path="audit_run_id" type="uuid → audit_runs (cascade, NOT NULL)" />
+<ParamField path="agent_type" type="varchar(64) → agents (no action, NOT NULL)" />
+<ParamField path="status" type="varchar(16)">Default `pending`. CHECK `agent_runs_status_check`: `pending | processing | complete | failed | skipped`.</ParamField>
+<ParamField path="skip_reason" type="text" />
+<ParamField path="external_run_id" type="uuid">Representative external/LangGraph run for fan-out agents.</ParamField>
+<ParamField path="langsmith_url" type="text" />
+
+Plus `started_at`, `completed_at`, `errors` jsonb, `created_at`. **Unique `(audit_run_id, agent_type)`** — one row per agent per audit run. Index on `(agent_type, status)`.
+
+<Warning>
+The terminal success value is **`complete`**, not `completed`. The standalone `appraisal_runs` / `credit_runs` / `income_runs` ledgers use `completed` instead. See [enums reference](/data-model/enums-reference) for the full status vocabularies.
+</Warning>
+
+## lender_agent_entitlements
+
+Per-lender agent enable/disable (`lender-agent-entitlements.ts`). PK `id`.
+
+<ParamField path="lender_id" type="uuid → lenders (cascade, NOT NULL)" />
+<ParamField path="agent_type" type="varchar(64) → agents (no action, NOT NULL)" />
+<ParamField path="enabled" type="boolean">Default `false`.</ParamField>
+<ParamField path="updated_by" type="uuid → portal_users (set null)" />
+
+Plus `created_at`, `updated_at`. **Unique `(lender_id, agent_type)`**. The absence of a row means "use the platform default" — see [router and entitlements](/agents/router-and-entitlements).

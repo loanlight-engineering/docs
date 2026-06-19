@@ -1,0 +1,67 @@
+---
+title: Loans and lenders
+description: How LoanLight models loans, lenders, and tenancy.
+icon: building
+---
+
+Every piece of data in LoanLight is attributed to a lender, and most data hangs off a loan. This page covers the two root entities and how tenancy works between them.
+
+## Lenders
+
+`lenders` is the tenant root. Nearly every other table FKs to `lenders.id`. Key columns:
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK. The tenant anchor. |
+| `name` | Unique, not null. Used as a fallback for lender resolution on the EPC path. |
+| `config_profile` | The lender's configuration code. Selects which YAML config and rules apply. Defaults to `"default"` when null. |
+| `classification_split_mode` | `per_segment`, `majority_bucket`, or `two_pass`. Drives classify-split. |
+| `slug` | Unique. |
+| `status` | Default `active`. |
+| `is_internal` | Boolean. A single internal lender is allowed (partial unique index). `super_admin` users must belong to an internal lender. |
+| `workos_organization_id` | Unique. Links the lender to its WorkOS organization. |
+
+<Warning>
+There is no `lenders.lender_code` column. A lender's configuration code is `lenders.config_profile`. Older descriptions that mention `lender_code` are wrong. (The term "lenderCode" appears as a parameter name in some service signatures, but it resolves to `config_profile`.)
+</Warning>
+
+Lender configuration is layered on top of this row: YAML config (`lender_yaml_configs`), feature flags (`lender_feature_flags`), per-agent entitlements (`lender_agent_entitlements`), PII severity overrides, and deny lists. See [lender config overview](/lender-config/overview).
+
+## Loans
+
+`loans` is the central loan record. Key columns:
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK. On the EPC path this equals the `correlationId`. |
+| `loan_number` | Not null. |
+| `lender_id` | FK → `lenders.id`. The tenant attribution. |
+| `llc_pipeline_id` | The loan's LlamaCloud pipeline (1:1). See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval). |
+| `encompass_loan_id` | Set for Encompass-sourced loans. |
+| `los_provider` | Default `encompass`. |
+| `processing_status` | `processing`, `ready_for_audit`, `ready`, or `error`. |
+| `loan_type` | Free-form text (not the `loan_type` pgEnum). |
+| `loan_program_name` | The lender's program name; resolved to a canonical program code at audit time. |
+
+Plus many MISMO/Encompass attributes (`ltv`, `combined_ltv`, `closing_date`, `estimated_closing_date`, `nonqm_doc_type`, `ob_doc_type`, citizenship fields, and foreign-address booleans). See [core tables](/data-model/core-tables).
+
+`borrowers` rows (one per borrower index) hang off `loans`.
+
+## Documents
+
+A loan's files live in two table families:
+
+- **`loan_documents`** — the modern, versioned, multi-source record used by the new pipeline. It tracks the file (`file_name`, `file_size`, `content_hash`, `storage_path`), source identity (Encompass or partner, mutually exclusive), versioning (`superseded_by`, `deleted_at`), and LlamaCloud state (`llama_cloud_file_id`, `llama_ingestion_status`).
+- **`documents` / `document_attachments`** — the legacy/LOS document tables. New pipelines use `loan_documents`.
+
+See [core tables](/data-model/core-tables) for the full column lists.
+
+## Tenancy and attribution
+
+LoanLight is multi-tenant by lender. The rules that keep tenants isolated:
+
+- **Reads are lender-scoped.** Partner and portal read endpoints take the caller's lender and join on it (for example `coalesce(audit_runs.lender_id, loans.lender_id) = lenderId`). A caller can never read another lender's runs.
+- **EPC attribution goes through `lender_auth_clients`.** An incoming `requestorId` (the Encompass client ID) is looked up in `lender_auth_clients.client_id` to find the lender. On a miss with a known lender name, the system self-heals by upserting the lender and backfilling the mapping. See [lender resolution](/integrations/lender-resolution).
+- **Audit runs are lender-anchored.** `audit_runs.lender_id` is not null; `loan_id` is nullable. See [the audit run](/concepts/audit-run).
+
+Loan attribution never falls back to a null lender. If lender resolution cannot determine a lender, the orchestrator fails the request rather than writing a cross-tenant null-lender loan.

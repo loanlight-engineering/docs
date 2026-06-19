@@ -1,20 +1,56 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: LoanLight engineering documentation
+description: Internal knowledge base for the LoanLight automated underwriting system, its AI agents, integrations, and the Octy self-healing platform.
+icon: house
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+LoanLight is an AI-powered automated underwriting system (AUS) for mortgage loans. It ingests a loan package (a MISMO 3.4 XML application plus supporting PDF documents) from a loan origination system (Encompass) or directly through a Partner API, runs a battery of LangGraph AI agents over the documents and borrower data, and produces a structured audit that underwriters review. The audit surfaces issues: document health problems, PII inconsistencies, URLA (Form 1003) completeness gaps, property red flags, credit findings, and more.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+## Who these docs serve
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+These pages are the shared engineering knowledge base for two audiences:
+
+- **LoanLight engineers** who build, operate, and debug the AUS, the lender portal, the integrations, and the supporting infrastructure.
+- **The Octy AI agent (Oz)**, which reads this knowledge base through the Mintlify MCP server to investigate and fix reported audit bugs. This documentation set is intended to replace the large inline architecture section that Octy previously baked into the Oz prompt. See [using these docs and the MCP](/overview/using-these-docs).
+
+The code is always the source of truth. Where these docs note a contradiction with an older system prompt or README, they document the code and flag the misconception.
+
+## Start here
+
+<Columns cols={2}>
+  <Card title="System architecture" icon="network" href="/overview/system-architecture">
+    The repositories, services, data stores, and AI agents, and how they fit together.
+  </Card>
+  <Card title="Audit pipeline" icon="workflow" href="/pipeline/overview">
+    How a loan package becomes a completed audit, stage by stage.
+  </Card>
+  <Card title="Agent platform" icon="bot" href="/agents/platform-overview">
+    The catalog of LangGraph agents, the router, entitlements, and the runs ledger.
+  </Card>
+  <Card title="Partner API" icon="plug" href="/partner-api/overview">
+    The direct REST surface lenders and LOS vendors use to submit loans and audits.
+  </Card>
+  <Card title="Octy" icon="octagon" href="/octy/overview">
+    LoanLight's self-healing AI command center and the Oz run lifecycle.
+  </Card>
+  <Card title="Glossary" icon="book" href="/overview/glossary">
+    Key LoanLight terms and acronyms in one place.
+  </Card>
+</Columns>
+
+## The big picture
+
+<CardGroup cols={2}>
+  <Card title="Four repositories" icon="folder-tree" href="/overview/repositories">
+    `loanlight-api` (AUS backend + portal), `loanlight-integrations` (Encompass bridge), `loanlight-shared` (npm packages), and `octy`.
+  </Card>
+  <Card title="Two observability planes" icon="telescope" href="/ops/observability">
+    LangSmith is the source of truth for agent reasoning; Datadog is the source of truth for system behavior around the agents.
+  </Card>
+  <Card title="The audit run" icon="play" href="/concepts/audit-run">
+    The central unit of work: lender-anchored, loan-optional, and the parent of every per-agent result table.
+  </Card>
+  <Card title="Identity and auth" icon="key" href="/concepts/identity-and-auth">
+    WorkOS AuthKit for humans, `sk_*` partner keys, the internal API key, and FusionAuth authorizer lambdas.
+  </Card>
+</CardGroup>

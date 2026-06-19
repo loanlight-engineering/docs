@@ -1,0 +1,130 @@
+---
+title: Oz tool API
+description: The /api/oz/tools/* data tools, auth headers, and token refresh.
+icon: plug
+---
+
+The Oz tool API is the callback surface a running Oz agent uses to fetch audit data, read the loan's S3 objects, fetch on-demand instructions, refresh its token, and signal completion. The catalog lives in `src/lib/oz-tools-registry.ts` (`OZ_TOOL_REGISTRY`), which is the single source of truth: it generates the prompt's tool reference and powers the self-correcting 404/400 error payloads.
+
+<Warning>
+All of `/api/oz/tools/*` is **excluded from WorkOS middleware**. These routes are protected solely by the run's per-run bearer token — not a session. See [auth and access](/octy/auth-and-access) and the token model in [the Oz run lifecycle](/octy/oz-run-lifecycle).
+</Warning>
+
+## Auth headers
+
+Data and completion tools require two headers:
+
+```http
+Authorization: Bearer <access_token>
+X-Oz-Run-Id: <run_id>
+```
+
+Token refresh uses a different pair:
+
+```http
+X-Oz-Run-Id: <run_id>
+X-Oz-Refresh-Token: <refresh_token>
+```
+
+`validateOzToken` resolves the run, hashes the bearer token and compares it to `webhook_token`, checks expiry, and checks that the token has not been consumed. The agent never passes an `audit_run_id`: the server derives it from the run's parent issue via `resolveAuditRunId(run)`, so every result is scoped to the issue's audit run automatically.
+
+## Data tools — `GET /api/oz/tools/[dataset]`
+
+Handlers live in `src/lib/oz-tool-handlers.ts`. The flow is: validate token, resolve the audit run id from the parent issue, switch on `dataset`, and return a result. Scoping is automatic — child tables join through their parent, loan-scoped tools resolve `loan_id` via `resolveLoanId`, and lender tools via `resolveLenderId`.
+
+### Response shape
+
+```json
+{
+  "table": "doc_expiration_results",
+  "data": [ { "...": "..." } ],
+  "filter": { "...": "..." }
+}
+```
+
+`table` is the underlying table name (or a synthetic name for computed datasets), `data` is the rows, and `filter` (when present) echoes the applied query parameters.
+
+<Info>
+Result handlers cap rows at `MAX_ROWS = 200`. Two exceptions: `loan-documents` caps at 500, and `loan-s3-folder` caps at 500 objects per source. Most endpoints take no query parameters because scoping is derived server-side.
+</Info>
+
+### Catalog by category
+
+The registry groups tools into categories. The dataset id is the `[dataset]` path segment.
+
+<AccordionGroup>
+  <Accordion title="Classify-Split">
+    | dataset | `table` | scope / params |
+    |---|---|---|
+    | `split-categories` | `split_categories` | global, active rows |
+    | `classify-rules` | `classify_rules` | global; `?category_code=` |
+    | `classify-split-segments` | `document_classifications` | loan-scoped (latest per segment, active docs, complete/partial runs) |
+    | `pii-field-doc-type-rules` | `pii_field_doc_type_rules` | global; `?field_key=`, `?loan_purpose=` |
+  </Accordion>
+  <Accordion title="Document Health">
+    | dataset | `table` | scope |
+    |---|---|---|
+    | `doc-expiration-results` | `doc_expiration_results` | audit-run |
+    | `doc-expiration-evidence` | `doc_expiration_evidence` | via parent `result_id` |
+    | `doc-signature-results` | `doc_signature_verification_results` | audit-run |
+    | `doc-signature-evidence` | `doc_signature_verification_evidence` | via parent |
+    | `doc-completeness-results` | `doc_completeness_results` | audit-run |
+  </Accordion>
+  <Accordion title="PII Validation">
+    | dataset | `table` | scope / params |
+    |---|---|---|
+    | `pii-validation-results` | `pii_validation_results` | audit-run |
+    | `pii-document-validations` | `pii_document_validations` | via parent `validation_result_id` |
+    | `pii-scoping-decision` | `pii_scoping_decision` (synthetic) | loan-scoped; **required** `?field_key=`; optional `?loan_purpose=PURCHASE\|REFINANCE` |
+
+    The `pii-scoping-decision` tool is a pure reimplementation of loanlight-api's PII scoping (`computePiiScoping`), letting the agent replay how a field's document scope was derived. `field_key` is one of the nine `PII_FIELD_KEYS`: `FullName`, `DateOfBirth`, `SocialSecurityNumber`, `ITIN`, `MailingAddress`, `PropertyAddress`, `MaritalStatus`, `EmployerName`, `EmployerAddress`. It returns one of two terminal states: `scoped` or `full_fallback`. See the [PII scoping debug runbook](/runbooks/pii-scoping-debug).
+  </Accordion>
+  <Accordion title="Property Data / Red Flags / URLA / Run Meta">
+    | dataset | `table` | scope |
+    |---|---|---|
+    | `property-data-runs` | `property_data_runs` | audit-run |
+    | `property-data-raw` | `property_data_raw` | audit-run |
+    | `property-data-results` | `property_data_results` | audit-run |
+    | `urla-extraction-results` | `urla_extraction_results` | audit-run (one row) |
+    | `urla-rules-engine-results` | `urla_rules_engine_results` | audit-run (per borrower) |
+    | `urla-rules-findings` | `urla_rules_findings` | via parent `rules_engine_result_id` |
+    | `red-flag-results` | `red_flag_results` | audit-run |
+    | `audit-errors` | `audit_errors` | audit-run (newest first) |
+  </Accordion>
+  <Accordion title="Lender Configuration & Loan Documents / S3">
+    | dataset | `table` | scope / params |
+    |---|---|---|
+    | `lender-yaml-config` | `lender_yaml_configs` | lender-scoped; `?config_section=document_expiration\|red_flags\|urla_completeness_rules`; **404 `NO_LENDER`** when the loan has no lender |
+    | `loan-documents` | `loan_documents` | loan-scoped; active + inactive, newest first, cap 500 |
+    | `loan-s3-folder` | `loan_s3_folder` (synthetic) | loan-scoped; `?path=` (no `..`); lists EPC and/or partner sources, cap 500 objects/source |
+    | `loan-s3-object` | `loan_s3_object` (synthetic) | loan-scoped; **required** `?key=`; returns a presigned URL valid for `PRESIGNED_URL_TTL_SECONDS = 300` |
+
+    S3 scoping (`resolveLoanS3Scope`) resolves `loan_id`, `encompass_loan_id`, and `lender_id` from the audit run, then computes the EPC prefix and the partner prefix. `readLoanS3Object` rejects keys outside the loan's prefixes (`OUT_OF_SCOPE` → 403), buckets not in the allowlist (`BUCKET_NOT_ALLOWED` → 403), and missing objects (`NOT_FOUND` → 404). The bucket allowlist is fail-closed (`getAllowedBuckets()` over the three S3 bucket env vars). See [environment variables](/octy/environment-variables).
+  </Accordion>
+</AccordionGroup>
+
+An unknown dataset returns 404 with `unknownDatasetError`, which embeds the full tool directory so the agent can read back the correct path and retry.
+
+## Token refresh — `POST /api/oz/tools/token-refresh`
+
+Exchange a valid refresh token for a new access token. Send `X-Oz-Run-Id` and `X-Oz-Refresh-Token`. On success it returns `{ access_token, expires_at }`. It returns 408 if the refresh token expired, 410 if the run already completed, and 401 if invalid. The refresh token is non-rotating — reusable until it expires or the run completes.
+
+## On-demand instructions — `POST /api/oz/tools/fetch-instructions`
+
+Token-auth plus a body `{ type }`. The only supported type today is `prompt-tuning`, which returns `{ type, instructions }`. An unsupported type returns 400 with `supported_types`. See [Oz skills](/octy/oz-skills).
+
+## Completion — `POST /api/oz/tools/octy-run-complete`
+
+The single call that closes a run. Documented in full in the [completion webhook contract](/octy/completion-webhook).
+
+## Self-correcting error contract
+
+Because the agent self-corrects from response bodies, every error status carries actionable detail (`buildSelfCorrectionSection` + `src/lib/oz-tool-errors.ts`):
+
+| Status | Meaning | Agent action |
+|---|---|---|
+| **400** | Malformed payload (completion tool only) | Body has `field_errors` and `completion_tool_spec`. Fix and retry. The token is **not** consumed on a 400. |
+| **404** | Unknown tool path | Body has `available_data_tools` (every valid dataset and path) and `completion_tool`. Find the correct path and retry. |
+| **408** | Access token expired | Call `token-refresh`, update the `Authorization` header, retry the original call. |
+| **410** | Run already completed | The completion tool already ran. Do not retry anything. |
+| **401** | Invalid credentials | Token or run id is wrong. Do not retry. |

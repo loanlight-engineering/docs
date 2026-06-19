@@ -1,0 +1,93 @@
+---
+title: EPC integration service overview
+description: The loanlight-epc-integration NestJS/Fargate service in loanlight-integrations.
+icon: plug
+---
+
+The `loanlight-integrations` repo bridges the LoanLight AUS (`loanlight-api`) to third-party loan origination systems. Today that means one system: **ICE Mortgage Technology / Ellie Mae Encompass**, reached through the **Encompass Partner Connect (EPC) Partner API**.
+
+The repo is a pnpm workspace monorepo (`pnpm@10.33.0`, Node >= 20) with these packages under `packages/`:
+
+| Package dir | npm name | What it is | Status |
+|---|---|---|---|
+| `encompass/` | `loanlight-epc-integration` | NestJS backend — the EPC integration service. The heart of the repo. | Live / primary |
+| `audit-pdf/` | `audit-pdf` | Pure TypeScript library that renders the AUS Report PDF from audit results. | Live / shared lib |
+| `frontend/` | `frontend` | Next.js 16 app (port 8000) — the Encompass plug-in UI loan officers see inside Encompass. | Live / active frontend |
+| `web-app/` | (none) | The deprecated legacy frontend. | Deleted (LOA-649) |
+
+<Warning>
+`web-app` was removed in commit `5b65c1b` (LOA-649, PR #365). `git ls-files packages/web-app` returns nothing; only stale build artifacts remain on disk. `frontend/` is the one and only live frontend. See [Encompass plug-in frontend](/integrations/frontend-plugin).
+</Warning>
+
+<Note>
+The root `README.md` still describes the structure as `packages/integrations/` + `packages/frontend/`. That is stale — the actual backend directory is `packages/encompass/` (npm name `loanlight-epc-integration`). `CLAUDE.md` is the accurate orientation.
+</Note>
+
+## The encompass service
+
+`loanlight-epc-integration` is a NestJS 11 + Express service. It uses Pino (`nestjs-pino`) for logging, `@ssut/nestjs-sqs` for SQS consumers and producers, `@nestjs/schedule` for cron, `pg` for Postgres, `cockatiel` for circuit breaking, `class-validator` / `class-transformer` for DTOs, `zod` v4 for runtime schemas, `pdf-lib` plus the workspace `audit-pdf` dependency for PDFs, and `@fusionauth/typescript-client` for service-to-service auth.
+
+### Responsibilities
+
+<CardGroup cols={2}>
+<Card title="Ingest Encompass webhooks" icon="webhook">
+Receive signed transaction and event webhooks when a loan officer presses "Run LoanLight AUS", persist loans and transactions, and download the loan package.
+</Card>
+<Card title="Stage documents to S3" icon="upload">
+Filter the EPC resource list into MISMO XML plus supported documents, deduplicate by content hash, and upload to S3 for the AUS to read.
+</Card>
+<Card title="Hand off to the AUS" icon="arrow-right">
+Publish an "Audit Requested" EventBridge event carrying the correlation id, requestor, S3 location, loan metadata, and document list.
+</Card>
+<Card title="Deliver results to Encompass" icon="file-text">
+Consume AUS progress and result events, render the AUS Report PDF, and PATCH it back into the Encompass transaction.
+</Card>
+</CardGroup>
+
+See [Audit lifecycle](/integrations/audit-lifecycle) for the full end-to-end flow, [Messaging](/integrations/messaging) for the queues and events, and the [HTTP API](/integrations/http-api) for the endpoints.
+
+### Bootstrap (`src/main.ts`)
+
+- `dd-trace/init` is imported as the very first line.
+- Loads `.env` then `.env.local` (override).
+- Global `ValidationPipe`.
+- CORS: dev allows all; prod uses `ALLOWED_ORIGIN_PATTERNS` (comma-split, wildcard suffix match). Allowed families include `*.elliemae.io`, `*.ice.com`, `*.redpalmsolutions.com`, `*.app.int.loanlight.com`, `*.ngrok-free.app`. Datadog trace headers (`x-datadog-*`, `traceparent`) and custom headers `x-origin-id`, `x-partner-access-token`, `x-is-uat` are forwarded.
+- A global bearer-auth middleware (`createRequireBearerAuth`) is applied to every request **except** paths starting with `/integrations/webhooks`, `/integrations/v1/health`, `/auth/encompass`, and `/integrations/images`.
+- Port comes from `PORT` (default 3000; 3001 locally via Docker).
+
+Config validation in `app.module.ts` fails boot fast if any of `LOANLIGHT_API_URL`, `JWT_SECRET`, `JWT_ISSUER`, `JWT_AUDIENCE`, or any SQS queue URL/name env is missing.
+
+Modules wired in `AppModule`: Webhooks, Token, Epc, Http, Loanlight, EpcOrigin, Auth, Health, Messaging, EpcTransaction, AuditDetails, Documents, Images, ResultsAccess, Common.
+
+## Relationship to loanlight-api
+
+The encompass service talks to the AUS over two channels:
+
+1. **Async (EventBridge)** — encompass publishes "Audit Requested" (Source `loanlight.encompass`) and `workflow:error` (Source `loanlight.aus`), and consumes `loanlight.aus` events. See [Messaging](/integrations/messaging).
+2. **Sync (HTTP, server-to-server)** — `LOANLIGHT_API_URL` (in CDK, `https://api.<env-domain>`). Auth is a FusionAuth client-credentials token minted per `requestorId` (`FusionAuthTokenService.getTokenForClientId`); the request also carries the `X-Requestor-ID` header. This path pulls audit results for the PDF and mints external results URLs. See [Results access](/integrations/results-access).
+
+<Warning>
+`LoanlightService` (`src/loanlight/loanlight.service.ts`) is a **mock** — it returns fake `ClientSettings` after a 150 ms sleep. Real loanlight-api integration happens via EventBridge plus the fetch-based `AuditResultsFetcherService` and `ResultsAccessService`, not this class. Do not assume `LoanlightService` calls the API.
+</Warning>
+
+## No global route prefix
+
+There is no global API prefix. All HTTP paths are literal: `/integrations/...`, `/auth/encompass`. The [HTTP API](/integrations/http-api) page documents every route.
+
+## Datadog naming (the service-name split)
+
+Naming for this repo is split across three layers. A prompt or runbook that says "service: encompass" for the whole repo is imprecise.
+
+| Layer | Datadog service name |
+|---|---|
+| CDK standard tags (umbrella) | `LLIntegrations` (log tag `llintegrations`) |
+| ECS Fargate Nest app (`application-stack.ts`) | `loanlight-integrations` |
+| Lambdas | `encompass-auth`, `encompass-epc-auth`, `encompass-db-init`, `encompass-db-migrate` |
+
+See [Integrations infrastructure](/integrations/infrastructure) and [Observability](/ops/observability) for more.
+
+## Local development
+
+`pnpm run local:start` runs the backend (`docker:dev`) and frontend (`dev`) together via `concurrently`. Pre/post hooks set up Docker networks, a Caddy proxy, a tunnel (ngrok/cloudflare/tailscale) for inbound Encompass webhooks, LocalStack, and Postgres.
+
+Local endpoints: backend API `http://localhost:3001`, frontend `http://localhost:8000`, LocalStack `http://localhost:4566`, Postgres `localhost:5433`. Key `.env.local` flags: `USE_LOCALSTACK`, `USE_LOCAL_AUTH` (bypass bearer auth and enable the local token endpoint), `PUBLISH_EVENTS_LOCALLY`, `JWT_SECRET`, `SIGNING_KEY` (webhook HMAC), `EPC_API_CLIENT_SECRET`, `TUNNEL_DOMAIN`.

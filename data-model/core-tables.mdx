@@ -1,0 +1,80 @@
+---
+title: Core tables
+description: lenders, loans, loan_documents, and audit_runs.
+icon: table
+---
+
+The four core tables anchor everything else. `lenders` is the tenant root, `loans` is the central loan record, `loan_documents` is the modern document record, and `audit_runs` is the audit pipeline run ledger.
+
+## lenders
+
+The tenant root (`loans.ts`). PK `id` uuid. Nearly every other table FKs to `lenders.id` — usually `ON DELETE CASCADE` for config and data, `ON DELETE RESTRICT` for the run ledgers (audit / credit / appraisal / income runs, feedback, `portal_audit_log`).
+
+<ParamField path="name" type="text NOT NULL">Unique lender name.</ParamField>
+<ParamField path="config_profile" type="text">The lender's config code. Used to resolve YAML config and overrides.</ParamField>
+<ParamField path="classification_split_mode" type="text NOT NULL">Default `per_segment`. CHECK: `per_segment | majority_bucket | two_pass`. Mirrors the per-run `classify_split_runs.classification_mode`.</ParamField>
+<ParamField path="slug" type="text">Unique (partial index).</ParamField>
+<ParamField path="status" type="text">Default `active`.</ParamField>
+<ParamField path="is_internal" type="boolean">Default `false`. A partial unique index allows only one internal lender.</ParamField>
+<ParamField path="workos_organization_id" type="text">Unique (partial index). WorkOS organization mapping.</ParamField>
+
+Other columns: `contact_email`, `contact_name`, `notes`, `logo_url`, `phone`, `address`, `website`, `created_at`, `updated_at`.
+
+<Warning>
+There is **no `lenders.lender_code` column.** A lender's config code is `lenders.config_profile`. Code or prompts referencing `lender_code` are stale.
+</Warning>
+
+## loans
+
+The central loan record (`loans.ts`). PK `id` uuid, `lender_id` → `lenders.id`.
+
+<ParamField path="loan_number" type="text NOT NULL">The lender's loan number.</ParamField>
+<ParamField path="latest_version" type="integer">Default `1`.</ParamField>
+<ParamField path="llc_pipeline_id" type="text">The loan's 1:1 LlamaCloud pipeline id.</ParamField>
+<ParamField path="encompass_loan_id" type="text">Unique where not null.</ParamField>
+<ParamField path="los_provider" type="text">Default `encompass`.</ParamField>
+<ParamField path="processing_status" type="text">Default `ready`. CHECK `loans_processing_status_check`: `processing | ready_for_audit | ready | error`.</ParamField>
+<ParamField path="loan_type" type="text">Plain text (not the `loan_type` pgEnum). `loan_program_name` is also stored.</ParamField>
+
+The table also carries many MISMO/Encompass loan attributes: `ltv`, `combined_ltv`, `hcltv_htltv`, `closing_date`, `estimated_closing_date`, `milestone_stage`, `nonqm_doc_type`, `ob_doc_type`, `property_appraised_value_amount`, `transaction_id`, foreign-address booleans (borrower / coborrower / employment / REO), and `borrower_country_of_citizenship` / `coborrower_country_of_citizenship`.
+
+Indexes: `idx_loans_lender_id`, `idx_loans_loan_number`, `idx_loans_processing_status`, `idx_loans_loan_type`. Partial uniques: `(loan_number, lender_id)` where lender not null, `(loan_number)` where lender null, and `encompass_loan_id` where not null.
+
+`borrowers` (`loans.ts`) is a child: PK `id`, `loan_id` → `loans.id` (cascade), `borrower_index`, `first_name`, `last_name`, `created_at`.
+
+## loan_documents
+
+The modern per-loan document record (`classify-split.ts`), replacing `documents` for new pipelines. PK `id`, `loan_id` → `loans.id` (cascade, NOT NULL).
+
+<ParamField path="file_name / file_size / mime_type / storage_path / content_hash" type="various">Core file identity. `file_size` is bigint.</ParamField>
+<ParamField path="superseded_by" type="uuid (self-FK)">Versioning pointer. The active row has `superseded_by IS NULL`.</ParamField>
+<ParamField path="deleted_at" type="timestamptz">Soft-delete tombstone.</ParamField>
+<ParamField path="llama_cloud_file_id / llama_pipeline_id / llama_ingested_at / llama_ingestion_status" type="various">LlamaCloud ingestion state.</ParamField>
+
+Plus Encompass source fields and `partner_s3_key`. Three partial unique "identity" indexes (free upload / Encompass / partner) are all gated `superseded_by IS NULL AND deleted_at IS NULL`. CHECK `loan_documents_source_check` enforces that a row is Encompass-only, partner-only, or neither (mutually exclusive sources).
+
+<Note>
+The legacy document tables (`documents`, `document_attachments`, in `documents.ts`) still exist for LOS-era blobs and LlamaCloud ingestion via `processing_jobs`. New pipelines (classify-split, income) use `loan_documents`. See the [overview](/data-model/overview) for the two-document-table split.
+</Note>
+
+## audit_runs
+
+The audit pipeline run ledger (`audit-runs.ts`), and the parent for nearly every per-agent [result table](/data-model/result-tables). PK `id` uuid.
+
+<ParamField path="lender_id" type="uuid NOT NULL → lenders (restrict)">Tightened to `NOT NULL` in migration `0179`. The run is lender-anchored.</ParamField>
+<ParamField path="loan_id" type="uuid → loans (set null)">Optional. Loanless runs are valid since migration `0176`.</ParamField>
+<ParamField path="loan_program_id" type="uuid → loan_programs (set null)">Optional.</ParamField>
+<ParamField path="run_number" type="integer">`NULL` only when `loan_id` is `NULL` (CHECK `audit_runs_run_number_requires_loan`).</ParamField>
+<ParamField path="trigger_source" type="varchar(32) NOT NULL">CHECK allowlist: `epc | los | partner | portal | admin_rerun | shadow`.</ParamField>
+<ParamField path="status" type="varchar(20) NOT NULL">Default `pending`. CHECK: `pending | processing | complete | failed`.</ParamField>
+<ParamField path="requestor_id" type="text NOT NULL">Who requested the run.</ParamField>
+<ParamField path="agent_config" type="jsonb">Per-run agent toggles. A compatibility bridge for the agent platform.</ParamField>
+<ParamField path="mismo_xml_hash" type="text">Dedup / idempotency.</ParamField>
+<ParamField path="is_shadow" type="boolean NOT NULL">Default `false`. Shadow (parity) runs.</ParamField>
+<ParamField path="shadow_of_correlation_id" type="uuid">Links a shadow run to its real counterpart.</ParamField>
+
+Timestamps: `started_at`, `completed_at`, `document_posted_at`. Other columns: `encompass_document_id`, `expected_closing_date`.
+
+The partial unique on `(loan_id, run_number)` applies only where `loan_id IS NOT NULL`. Indexes cover status, lender, MISMO hash, and shadow partials.
+
+`audit_errors` (also `audit-runs.ts`) records per-agent failures without failing the run: PK `id`, `audit_run_id` → `audit_runs` (cascade, NOT NULL), `agent_name`, `error_type` (NOT NULL; CHECK `transient | permanent | validation`), `error_message` (NOT NULL), `error_details` jsonb, `retryable` bool, `occurred_at`. It is documented in detail with the other [result tables](/data-model/result-tables).

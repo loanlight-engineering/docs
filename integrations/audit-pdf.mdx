@@ -1,0 +1,80 @@
+---
+title: audit-pdf library
+description: The shared PDF rendering library used to build AUS reports.
+icon: file-text
+---
+
+`audit-pdf` (workspace package `audit-pdf`, in `packages/audit-pdf/`) is a pure TypeScript library that renders the **AUS Report PDF** and per-property detail PDFs from audit results. It has no NestJS dependency and is imported by the encompass service's `AuditReportPdfService`.
+
+It uses `pdfmake` for document layout and `pdf-lib` for merging.
+
+<Note>
+This is a different PDF path from the one in loanlight-api. The loanlight-api [audit report PDF](/storage/pdf-reports) renders per-agent reports with Handlebars + Puppeteer and pushes them to the LOS. The `audit-pdf` library here renders the consolidated AUS Report that the EPC integration delivers into the Encompass transaction. They are separate engines.
+</Note>
+
+## Public API
+
+The package exports from `src/index.ts`:
+
+| Function | Purpose |
+|---|---|
+| `generateAuditPdfV2(input: GenerateAuditPdfV2Input)` | Render the main AUS report. |
+| `generatePropertyPdf(input: GeneratePropertyPdfInput)` | Render one property's detail pages (subject + related + comparables) from `GetPropertyDataResponse`. |
+| `combinePdfs(...)` | Merge audit + property PDFs (used in the combined-delivery path). |
+
+Exported types: `AuditState`, `AuditErrorDetails`, `AuditSectionsInput`, `GenerateAuditPdfV2Input`, `GeneratePropertyPdfInput`.
+
+### generateAuditPdfV2
+
+The main entry point. Input shape:
+
+```ts
+interface GenerateAuditPdfV2Input {
+  auditState: AuditState;            // Processing | Complete | Failed | Error
+  sections: AuditSectionsInput;      // see below
+  errorDetails?: AuditErrorDetails;
+}
+```
+
+`AuditSectionsInput` carries the five report sections:
+
+```ts
+interface AuditSectionsInput {
+  summary;
+  dataConsistency;
+  documentHealth;
+  check1003;
+  propertiesCheck;
+}
+```
+
+When the audit state is not `Complete`, or sections are missing, the encompass service passes the data through so the library renders a status / NULL_SECTIONS PDF rather than a full report.
+
+## Source modules
+
+| Module | Contents |
+|---|---|
+| `audit/` | `build-audit-doc`, `audit-content`, `audit-column-widths` |
+| `property/` | `build-property-doc`, `property-content` |
+| `combine` | PDF merge logic |
+| `page-break`, `logo`, `types` | layout helpers and shared types |
+
+The package has unit tests (`*.spec.ts`) and a `generate-test-pdfs` script for visual checks.
+
+## How encompass consumes it
+
+The encompass `AuditReportPdfService.generate(...)` orchestrates the render:
+
+<Steps>
+<Step title="Fetch the sections">
+`AuditResultsFetcherService.fetchV2Inputs(auditRunId, requestorId, token)` pulls the five sections from loanlight-api via three endpoints (results, urla_completeness, property_data), with retry/backoff. See [Results access](/integrations/results-access).
+</Step>
+<Step title="Render">
+The assembled `AuditSectionsInput` plus `auditState` are passed to `generateAuditPdfV2`. For split delivery, `generatePropertyPdf` is called once per property and the outputs are stored individually (or merged via `combinePdfs` for the combined path).
+</Step>
+<Step title="Deliver">
+The encompass service uploads the rendered bytes to Encompass and PATCHes the transaction. See [Audit lifecycle](/integrations/audit-lifecycle).
+</Step>
+</Steps>
+
+For where the rendered PDFs land in S3 (split-delivery and shadow paths), see [S3 layout](/storage/s3-layout) and [Shadow audits](/integrations/shadow-audits).

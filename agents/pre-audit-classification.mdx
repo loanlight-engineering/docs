@@ -1,0 +1,185 @@
+---
+title: Pre-Audit-Classification agent
+description: The Phase 1 agent that splits, classifies, and extracts metadata from loan PDFs.
+icon: file-stack
+---
+
+The Pre-Audit-Classification agent is the LangGraph agent that runs in the [pre-audit stage](/pipeline/pre-audit-stage) (Phase 1) of an audit. It splits each uploaded PDF into segments, classifies every segment into a document bucket and subtype, resolves ambiguous labels (asset vs income bank statements), and fans out lightweight metadata extractors. It writes one `document_classifications` row per segment, which every downstream consumer reads to know what each page actually is.
+
+Source root: `loanlight-api/packages/api/src/langgraph/agents/preAuditClassification/`.
+
+| Property | Value |
+|---|---|
+| LangGraph run name | `Pre-Audit-Classification-Loan-<loanId>`, tags `pre-audit-classification`, `audit`, `langgraph` (from `createAgentConfig`). The separate LangGraph Studio graph uses run name `Pre-Audit Classification Pipeline` with tags `pre-audit`, `classification`, `studio`. |
+| Ledger / phase-0 agent key | `preAuditClassification` (some `audit_errors` rows terminalize it as `classifySplit`) |
+| Entry method | `LangGraphService.runPreAuditClassification(input)` |
+| Dry-run variant | `LangGraphService.runPreAuditClassificationDryRun(input, opts)` (streamed for Octy) |
+| Production caller | `PreAuditStageService.executePreAuditStage` (Phase 1 branch C) |
+
+<Note>
+The document **split** happens inside this agent (the `splitDocuments` node), not as a separate orchestrator pre-step. An older description that says split runs before the classification agent is stale.
+</Note>
+
+This agent wraps the [classify-split subsystem](/subsystems/classify-split). For the two-phase split/classify pipeline, the per-lender modes, and the LlamaCloud split/classify jobs that back it, read that page. This page documents the agent graph that drives it.
+
+## What triggers it
+
+`PreAuditStageService` calls the agent only when `classifySplitPersistence.shouldReclassify(...)` returns `needsClassification = true`, then hands it the buffer-carrying documents. It runs in parallel with [URLA extraction](/agents/urla-extraction) and LlamaCloud indexing as the three branches of Phase 1.
+
+The input is `PreAuditClassificationInput`:
+
+<ParamField path="context" type="ClassifyContext" required>
+Discriminated union keyed by `triggeredBy`: `epc_audit_run` (carries `auditRunId`, `loanId`), `partner_create_loan`, `partner_upload_documents`, or `income_run` (each carries `loanId`).
+</ParamField>
+
+<ParamField path="loanContext" type="LoanClassificationContext" required>
+`lenderCode`, `lenderId`, `loanProgramName`, `obDocType`, `nonQmDocType`, `loanType`, and `resolvedLoanProgram` — the canonical alias-resolved program code that is the single source of truth for asset-vs-income bank-statement bucketing.
+</ParamField>
+
+<ParamField path="documents" type="ClassifyDocument[]" required>
+The raw PDF buffers. These never enter graph state — see the buffer-drop invariant below.
+</ParamField>
+
+<ParamField path="forceReclassify" type="boolean">
+Resets or resumes an existing classify-split run.
+</ParamField>
+
+The output is `PreAuditClassificationOutput`:
+
+```ts
+{ classifySplitRunId: string | null,
+  status: "complete" | "partial" | "failed" | "skipped",
+  classifications: SegmentClassification[],
+  resolutions: Record<string, ResolutionRecord>,
+  extractedMetadata: ExtractedMetadataEvent[],
+  errors: PreAuditClassificationError[] }
+```
+
+After classification settles, `DocumentsClassifiedEmitter.emitForLoan` fires the best-effort `documents.classified` event so integrations can carve and push doc types and filenames back to Encompass. [Document-Health](/agents/document-health) and the classify-split response API also read the rows.
+
+<Warning>
+**Buffer-drop invariant (load-bearing).** Raw PDF buffers are not a graph state channel. `runPreAuditClassification` passes them via `buildGraph({ splitInput: { documents } })`, where the `SplitDocumentsNode` instance captures them in a per-invocation closure (`this.documents`). Node's `Buffer.toJSON()` inflates buffers roughly 280x in LangSmith trace payloads, so the buffers are deliberately kept out of every channel and out of traces. After `splitDocuments`, only the buffer-free `SplitStageResult` flows through state.
+</Warning>
+
+## Graph topology
+
+The compiled `StateGraph` (`buildGraph.ts`) runs split, then classify, then resolve, then a conditional metadata extractor fan-out, then cleanup and finalize:
+
+```text
+__start__ → splitDocuments → documentClassification → classificationResolution
+  → [conditional: buildExtractFanout]
+      → extractBankStatementMetadata ─┐
+      → extractPropertyAddressMetadata ┤
+      → extractW2Metadata             ─┼→ cleanupStagingFiles → finalizePreAudit → __end__
+      → extractPaystubMetadata        ─┘
+      (or directly → cleanupStagingFiles when nothing matches)
+```
+
+`buildNodesFromDependencies` requires `{ db, classifySplitPersistence, classifySplitService, llamaExtract, splitInput }` unless explicit `nodes` are supplied (used by Studio and tests). The four metadata nodes are all instances of the generic `MetadataExtractionNode`, one per extractor module.
+
+### State channels
+
+`PreAuditClassificationStateSchema` (`Annotation.Root`):
+
+| Channel | Reducer | Default |
+|---|---|---|
+| `context` | last-write | — |
+| `loanContext` | last-write | — |
+| `splitStage` (`SplitStageResult`) | replace | `EMPTY_SPLIT_STAGE` (buffer-free) |
+| `classifySplitRunId` | last-write | — |
+| `status` | replace | `"complete"` |
+| `classifications` (`SegmentClassification[]`) | replace | `[]` |
+| `stagingFileIdsByDocId` (`Record<string,string>`) | replace (cleanup clears by returning `{}`) | `{}` |
+| `extractMetadata` (`boolean`) | replace | `true` |
+| `resolutions` (`Record<string,ResolutionRecord>`) | shallow-merge | `{}` |
+| `extractedMetadata` (`ExtractedMetadataEvent[]`) | concat | `[]` |
+| `errors` (`PreAuditClassificationError[]`) | concat | `[]` |
+
+## Nodes
+
+<Steps>
+<Step title="splitDocuments">
+Class `SplitDocumentsNode`. Phase 1 of classify-split. Calls `classifySplitPersistence.splitAndStage(context, this.documents, forceReclassify, { isDryRun, mode: modeOverride })` — uploads each PDF to LlamaCloud, splits it into segments, and persists split-only rows. Returns `{ splitStage, classifySplitRunId }`. Zero-doc input returns an empty buffer-free stage (skip path). `modeOverride` (Octy dry-run only) forces the `ClassificationMode` and bypasses the lender's `classification_split_mode` column.
+</Step>
+<Step title="documentClassification">
+Class `DocumentClassificationNode`. Phase 2: `classifySplitPersistence.classifyStagedSegments(state.splitStage)` runs the LLM classify per segment and finalizes the run. Returns `{ classifySplitRunId, status, classifications, stagingFileIdsByDocId }`. If `splitStage.documents.length === 0` it returns `status: "skipped"`. This is the only node that **throws** on failure; the orchestrator catches it and terminalizes the ledger row as `failed`.
+</Step>
+<Step title="classificationResolution">
+Class `ClassificationResolutionNode`. `RESOLVERS = [BankStatementResolver]`. For each classification it computes `rawClassification = llmRawClassification ?? classificationType`, finds the first resolver whose `supports(ctx)` is true (otherwise a passthrough), and persists to `document_classifications` (`llm_raw_classification`, `classification_type` = resolved label, `classification_resolution_context`). It mutates the in-memory `classificationType` to the resolved value so downstream fan-out predicates see the resolved label. Per-classification failures are caught, pushed to `errors`, and downgrade status to `"partial"`.
+</Step>
+<Step title="extract{BankStatement,PropertyAddress,W2,Paystub}Metadata">
+Generic class `MetadataExtractionNode<TSchema>`, one instance per extractor. Receives a `MetadataExtractionPayload` (`{ classification, stagingFileId }`) via `Send`. Computes a 1-indexed inclusive `pageRange` from `classification.pageStart`/`pageEnd` and calls `llamaExtract.extract({ fileInput: stagingFileId, schema, systemPrompt, pageRange })`. Persists to `document_classifications.extracted_metadata` with a JSONB merge so multiple extractors accumulate into one column. On failure it logs a warning and returns `{ errors, status: "partial" }` — extraction failure never aborts the audit.
+</Step>
+<Step title="cleanupStagingFiles">
+Class `CleanupStagingFilesNode`. Deletes the LlamaCloud staging files (`classifySplitService.cleanupStagingFile`) that were kept alive across classification, resolution, and the extractor fan-out so extractors could reuse the `file_id` without re-upload. Uses `Promise.allSettled` (failures swallowed) and returns `{ stagingFileIdsByDocId: {} }` to drain the channel.
+</Step>
+<Step title="finalizePreAudit">
+Class `FinalizePreAuditNode`. Terminal. The only downgrade is `complete → partial` when `errors.length > 0`; all other statuses pass through.
+</Step>
+</Steps>
+
+## The extractMetadata gate
+
+`buildExtractFanout(state)` returns either a list of `Send` instructions or the literal `"cleanupStagingFiles"`. It short-circuits straight to cleanup when any of:
+
+- `extractMetadata === false` (Octy can run a resolution-only dry-run by unchecking "Extract metadata"),
+- `status === "skipped"`, or
+- `classifications.length === 0`.
+
+Otherwise, for each classification that has a known `stagingFileIdsByDocId[loanDocumentId]`, it emits one `Send` per extractor whose `supports(classification)` predicate matches. A single document can fan out to multiple extractors.
+
+## Extractors
+
+`ExtractorModule<TSchema>` contract (`extractor.types.ts`): `{ name, schema, systemPrompt?, supports(classification): boolean }`. `name` becomes the key in `extracted_metadata`. `supports` matches the resolved `classificationType` first, then falls back to the raw label.
+
+<AccordionGroup>
+<Accordion title="bank-statement (BankStatementExtractor)">
+Fields: `institution`, `account_last_4` (last-4 of every account), `statement_period_start`, `statement_period_end` (ISO dates). Matches when `splitType === "BANK_STATEMENT"`, or the resolved/raw label `endsWith("_bank_statement")`, or `startsWith("bank_statement_")`.
+</Accordion>
+<Accordion title="property-address (PropertyAddressExtractor)">
+Fields: `street`, `city`, `state` (2-letter), `zip` (5-digit). Matches when the `classificationType`/raw/`splitType` haystack includes any of: `property`, `mortgage_statement`, `appraisal`, `title`, `deed`, `insurance`, `homeowners`, `tax_bill`, `hoa`, `trust`.
+</Accordion>
+<Accordion title="w2 (W2Extractor)">
+Fields: `employer_name` (Box c), `tax_year`, `employee_name` (Box e), `box1_wages` (Box 1), `state_code` (Box 15). Matches when the resolved/raw label is exactly `w2` or `w-2`.
+</Accordion>
+<Accordion title="paystub (PaystubExtractor)">
+Fields: `employer_name`, `employee_name`, `pay_period_start`, `pay_period_end` (ISO), `pay_frequency` (`weekly`/`biweekly`/`semimonthly`/`monthly`), `gross_pay_period`. Matches when the resolved/raw label is exactly `paystub` or `pay_stub`.
+</Accordion>
+</AccordionGroup>
+
+<Note>
+W-2 and paystub extractors are easy to miss: the fan-out has **four** extractors, not two. Their field names intentionally mirror (but do not share code with) the production wage-earner extractors in `modules/portal-income/extractors/wage-earner/`. `employer_name` + `tax_year` (W-2) and `employer_name` + `pay_period_end` (paystub) are the exact fields the EPC `resourceContainers` and filename generator bind to — keep the names exact.
+</Note>
+
+`extracted-metadata.schema.ts` defines a documentation/contract Zod schema `ExtractedMetadataSchema` (`.partial()`, one key per extractor, each value `{ fields, confidences }`). It is not parsed at write time; the DB column stays plain `jsonb`.
+
+## Bank-statement resolution
+
+`BankStatementResolver` (`bank-statement-resolver`) is the only registered resolver. It exists because per-bank raw labels (`chase_bank_statement`, `wells_fargo_bank_statement`, and so on) must collapse into an asset or income usage so PII and income agents know how to treat them.
+
+- `supports`: `splitType === "BANK_STATEMENT"`, or raw `endsWith("_bank_statement")`, or raw in the legacy set `{bank_statement_personal, bank_statement_business, bank_statement_income}`.
+- `resolve`: reads `loanContext.resolvedLoanProgram` **only** (never re-derives from raw lender fields), normalizes it (`trim().toLowerCase()`, spaces/dashes → `_`), and decides usage. `INCOME_PROGRAMS = {"bank_statement"}`; a trailing `_<N>mo` suffix is stripped first (so `bank_statement_12mo`/`_24mo` resolve to income). Usage is `income` for income programs, otherwise `asset` (the safe default for `asset_qualifier`, `full_doc`, `unknown`, or unresolved programs).
+- The resolved label is `"<rawClassification>_<usage>"`, for example `chase_bank_statement_asset`. Bank-brand granularity stays in `llm_raw_classification` and the extractor's `institution` field.
+
+The provenance snapshot (`ResolutionContext`) records `resolverName`, `loanId`, `auditRunId`, `lenderCode`, `lenderId`, `resolvedProgram`, `normalizedProgram`, `rawClassification`, `splitType`, and `defaultedToAsset`.
+
+## Tables written
+
+This agent persists to the classify-split schema (`database/schema/classify-split.ts`). See [core tables](/data-model/core-tables) and [result tables](/data-model/result-tables) for the full schema.
+
+- **`classify_split_runs`** — one run row (`status` defaults `pending`; `classification_mode` defaults `per_segment`; `is_dry_run` filters Octy dry-runs out of every loan-level read).
+- **`loan_documents`** — source-of-truth doc rows (includes `llama_cloud_file_id`, `llama_pipeline_id`, `llama_ingestion_status`).
+- **`document_classifications`** — one row per segment. Key columns: `split_type`, `classification_type`, `llm_raw_classification`, `classification_resolution_context` (jsonb), `extracted_metadata` (jsonb), `classification_decision` (jsonb), `page_start`, `page_end`, `requires_review`, `classification_status` (`split` → `classified` → `classification_failed`). Unique on `(classify_split_run_id, loan_document_id, segment_index)`.
+
+## Metadata extraction client
+
+`LlamaExtractClient` (`llama/llama-extract.client.ts`) is a thin wrapper over the LlamaCloud v2 async Extract API. Notable behavior:
+
+- `POST /api/v2/extract` creates a job; `GET /api/v2/extract/{id}?expand=extract_metadata` polls every 3s (5-minute timeout).
+- Per-extractor `target_pages` must be a **top-level**, comma-separated, 1-based field — nesting it under `parsing_configuration` silently disabled the page filter and returned the dominant statement's values for every segment.
+- `confidence_scores: true`; confidences come from `extract_metadata.field_confidence`.
+- `sanitizeLlamaError` redacts Bearer tokens, `llx-*` keys, and `dfl-`/`pjb-`/`ejb-` ids before logging.
+
+## Dry-run (Octy)
+
+`runPreAuditClassificationDryRun` runs the real graph but marks the `classify_split_runs` row `is_dry_run = true` and deletes the run plus its `document_classifications` in a `finally`. Options: `dryRunId`, `runId` (pins the LangSmith root run id), `extractMetadata`, `classificationMode` (override), `onUpdate`. The dry-run uses `triggeredBy: "partner_upload_documents"` and is streamed by `dry-run/dry-run.service.ts` over SSE (`trace`, `result`, `done`/`error`). See [Octy classify-split config](/octy/classify-split-config).

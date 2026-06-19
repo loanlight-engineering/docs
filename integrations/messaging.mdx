@@ -1,0 +1,115 @@
+---
+title: "Messaging: SQS queues and EventBridge events"
+description: The queues and events between the integration service and the AUS.
+icon: send
+---
+
+The encompass service is event-driven. Inbound webhooks fan out to SQS; the handoff to the AUS and the return of progress and results travel over EventBridge, routed back into SQS by rules. This page documents every queue, rule, and event.
+
+## SQS queues
+
+Defined in `constants/queue-names.ts` and provisioned by `worker-stack.ts`. Consumers use `batchSize: 1`, and SQS handler errors re-throw to trigger the DLQ.
+
+| Logical | Queue name | Visibility timeout | Consumer | Producer / source |
+|---|---|---|---|---|
+| Health check | `health-check` | 30 s | `handleHealthCheck` (SELECT 1) | `WorkerService.enqueueHealthCheck` |
+| Transaction events | `transaction-event-handling` | 900 s | `handleTransactionEvent` | `WorkerService` (from webhook) |
+| AUS updates | `handle-aus-updates` | 30 s | `handleAusUpdate` | EventBridge `AusUpdateRule` |
+| Document push | `document-push` | 900 s | `handleDocumentPush` | EventBridge `DocumentPushRule` |
+| EPC delivery (FIFO) | `epc-delivery.fifo` | 120 s | scaffold (not live) | — |
+
+Queue config env vars are validated at boot: `SQS_{HEALTH_CHECK,TRANSACTION_EVENT,AUS_UPDATE,DOCUMENT_PUSH,EPC_DELIVERY}_QUEUE_{URL,NAME}` plus `AWS_REGION`.
+
+The `WORKER_TYPES` enum (`messaging/constants.ts`) names the job types carried in messages: `handle-health-check`, `handle-transaction-created-event`, `handle-transaction-updated-event`, `handle-aus-updates`.
+
+<Warning>
+The `epc-delivery.fifo` queue (with `epc-delivery-dlq.fifo`, `maxReceiveCount` 5) is **B-track scaffolding** (LOA-946/948/949/989). It is provisioned but not yet driving deliveries. Current delivery is the synchronous single/split path inside `AusUpdateService` — see [Audit lifecycle](/integrations/audit-lifecycle). The `epc_delivery_records` table backs the same scaffold; see [Integrations database schema](/integrations/database-schema).
+</Warning>
+
+## EventBridge rules
+
+Two rules (`worker-stack.ts`) route external events into SQS.
+
+### AusUpdateRule
+
+Matches source `["loanlight.aus"]` and a fixed allow-list of detail-types, routing to the `handle-aus-updates` queue:
+
+```text
+workflow:start
+workflow:complete
+workflow:error
+document_processing:initialization
+document_processing:downloading
+document_processing:uploading_to_ai
+document_processing:pipeline_monitoring
+document_processing:documents_ready
+agent:pii_validation_{start|analyzing|complete}
+agent:document_expiration_*
+agent:credit_evaluation_*
+agent:liabilities_assessment_*
+```
+
+`QueueConsumerService.handleAusUpdate` parses both nested (`detail.data.*`) and flat (`detail.*`) formats, extracts `correlationId` (falling back to `auditRunId`), and dispatches:
+
+- `workflow:complete` → `AusUpdateService.handleAusUpdate({ auditState: Complete })`.
+- `workflow:error` → `auditState: Error` (recoverable); `DUPLICATE_AUDIT` is ignored; skipped if already in a final state.
+- `workflow:start` → reset `audit_details` to `Processing` and PATCH Encompass to `Processing`; shadow runs are skipped entirely.
+- progress / `document_processing:*` / `agent:*` → `updateAuditProgress(correlationId, eventType, message, percent)`. API-supplied message/percent are preferred; otherwise fallback maps in `getProgressMessage` / `getProgressPercent` apply. Agent event names parse as `agent:{name}_{start|analyzing|complete}`.
+
+### DocumentPushRule
+
+Matches source `["loanlight.api"]`, detail-type `["loanlight.documents.classified"]`, routing to the `document-push` queue. This drives the optional document-push pipeline (gated by `DOCUMENT_PUSH_ENABLED=true`), where loanlight-api asks encompass to attach classified documents back into Encompass. `handleDocumentPush` validates with `DocumentsClassifiedEventSchema` and calls `DocumentPushService.push`.
+
+## Events published by encompass
+
+`EventPublishingService` uses `publishEventToEventBridge` from `@loanlight-engineering/shared-cdk`, gated by `DEPLOYED_ENVIRONMENT` plus `PUBLISH_EVENTS_LOCALLY`.
+
+### Audit Requested
+
+The handoff to the AUS. See [Audit lifecycle](/integrations/audit-lifecycle).
+
+```json
+{
+  "Source": "loanlight.encompass",
+  "DetailType": "Audit Requested",
+  "Detail": {
+    "correlationId": "...",
+    "requestorId": "...",
+    "environment": "...",
+    "s3Bucket": "...",
+    "s3Prefix": "...",
+    "loanMetadata": {},
+    "requestingParty": {},
+    "documents": [],
+    "additionalData": {},
+    "timestamp": "..."
+  }
+}
+```
+
+<Info>
+On the loanlight-api side, this event lands on the AUS's own `audit-requested-events` SQS queue, which `IntegrationOrchestrationService.processAuditRequest` drains. The `Audit Requested` detail-type and `audit-requested-events` queue are the canonical production entry path into the audit pipeline.
+</Info>
+
+### workflow:error
+
+Published by encompass (not only the AUS) when `processTransaction` fails after the `transactionStateId` is set, so the UI reflects the failure.
+
+```json
+{
+  "Source": "loanlight.aus",
+  "DetailType": "workflow:error",
+  "Detail": {
+    "correlationId": "...",
+    "auditRunId": "...",
+    "environment": "...",
+    "error": "...",
+    "errorCode": "TRANSACTION_PROCESSING_FAILED",
+    "errorStep": "transaction_processing",
+    "errorTimestamp": "...",
+    "timestamp": "..."
+  }
+}
+```
+
+For the consuming side and the audit flow these events drive, see [Audit lifecycle](/integrations/audit-lifecycle) and [Orchestration pipeline](/integrations/orchestration-pipeline).

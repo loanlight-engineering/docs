@@ -1,0 +1,121 @@
+---
+title: Integration audit request schema
+description: The SQS message contract that drives an audit.
+icon: braces
+---
+
+The EPC audit pipeline is driven by a single message contract: `IntegrationAuditRequestSchema`,
+a Zod schema in `integration-events/dto/integration-event.dto.ts`. The production transport is
+the SQS queue `audit-requested-events`. The same schema validates the internal test shim
+`POST /api/v1/integration-events/process`.
+
+## How the message arrives
+
+The `loanlight-integrations` plug-in publishes an EventBridge event whose `detail` envelope
+holds the request fields. `QueueConsumerService.handleAuditRequested`:
+
+<Steps>
+  <Step title="Parse the envelope">
+    `JSON.parse(message.Body).detail` holds the fields (EventBridge envelope shape:
+    `{ detail, "detail-type", source }`).
+  </Step>
+  <Step title="Reassemble the request">
+    The consumer explicitly enumerates the schema fields from `detail`
+    (`correlationId, requestorId, environment, s3Prefix, loanMetadata, requestingParty,
+    documents, forceReclassify, additionalData`) and resolves the bucket with
+    `resolveIntegrationAuditS3Bucket(detail.s3Bucket, configService)`.
+  </Step>
+  <Step title="Validate and dispatch">
+    `IntegrationAuditRequestSchema.parse(...)` validates the request, then
+    `orchestration.processAuditRequest(validated)` runs the audit.
+  </Step>
+</Steps>
+
+On any error the consumer logs and **re-throws to trigger the SQS DLQ**. The queue is drained
+one message at a time (the `@SqsMessageHandler` batch flag is `false`), so a thrown error
+redelivers that single message until `maxReceiveCount` sends it to the DLQ.
+
+<Warning>
+The consumer enumerates schema fields by hand when reassembling the request from `detail`.
+Adding a new optional field to `IntegrationAuditRequestSchema` without also updating this
+assembler will silently drop the field for SQS-delivered messages.
+</Warning>
+
+## Schema fields
+
+<ParamField path="correlationId" type="string (uuid)" required>
+  Used as `audit_runs.id` — the audit run id. On the EPC path it is also used as `loans.id`.
+</ParamField>
+<ParamField path="requestorId" type="string (min 1)" required>
+  The Encompass client id. Primary key for lender attribution (matched against
+  `lender_auth_clients.client_id`) and stored on `audit_runs.requestor_id`. See
+  [Lender resolution](/integrations/lender-resolution).
+</ParamField>
+<ParamField path="environment" type="string" required>
+  Origin environment, used for logging and event filtering. Should match the S3 bucket suffix.
+</ParamField>
+<ParamField path="s3Bucket" type="string (min 1)" required>
+  The bucket holding the loan files. Validated against the integration-audit bucket allowlist
+  via `.refine(...)`; a non-allowlisted bucket DLQs the message before orchestration.
+</ParamField>
+<ParamField path="s3Prefix" type="string" >
+  Folder path. Regex `^[a-zA-Z0-9][a-zA-Z0-9._\-/]{0,199}\/?$`, rejecting `..` segments and a
+  leading `/`. This is a path-traversal guard (an unvalidated prefix would be a cross-tenant
+  S3 read primitive). Falls back to `correlationId` when absent.
+</ParamField>
+<ParamField path="loanMetadata" type="loanMetadataSchema" required>
+  Loan number, program, closing dates, ratios, citizenship, `lenderCode`, and other loan
+  fields (shared schema).
+</ParamField>
+<ParamField path="documents[]" type="array (passthrough)">
+  Optional document manifest. Each entry:
+  `{ docId?, docMapType?, fileName?, originalName?, s3Key?, mimeType?, isMismo?, fileHash?,
+  isNew? }`. `fileHash` is a per-file SHA-256 used for change detection and reclassification.
+</ParamField>
+<ParamField path="forceReclassify" type="boolean">
+  Force re-classification even when documents are unchanged.
+</ParamField>
+<ParamField path="requestingParty" type="object">
+  Lender info from Encompass:
+  `{ name (min 1), address?, city?, state?, postalCode?, pointOfContact?{name,email,phone} }`.
+  `name` is the **fallback** lender key when `requestorId` does not resolve.
+</ParamField>
+<ParamField path="additionalData" type="object (partial, passthrough)">
+  Shadow-audit routing metadata (LOA-731):
+  `{ isShadowAudit?, shadowOfTransactionId?, shadowAuditLenderName?, ... }`. Opaque otherwise.
+</ParamField>
+
+## Internal test endpoint
+
+<ParamField path="POST /api/v1/integration-events/process" type="HTTP">
+  Internal/test-only. Guarded by `InternalApiKeyGuard`, returns HTTP 202.
+</ParamField>
+
+`IntegrationEventsController.processAuditRequest` validates the same Zod schema, fires
+`processAuditRequest` fire-and-forget (its `.catch` only logs), and returns
+`{ success, message: "Processing started", correlationId }`.
+
+`InternalApiKeyGuard` (`common/guards/internal-api-key.guard.ts`):
+
+- Reads `INTERNAL_API_KEY` (trimmed). **Fail-closed**: unset or blank → 401 even with a
+  matching header.
+- Header `x-internal-api-key`. Array-valued or blank → 401 `"Missing internal API key"`.
+- Compares with `crypto.timingSafeEqual`; length or value mismatch → 401 `"Invalid internal
+  API key"`.
+
+<Note>
+This endpoint is internal/test-only and is slated for removal under LOA-174. Production
+ingestion is the SQS queue `audit-requested-events`. The guard reads `INTERNAL_API_KEY`
+exactly — not `OCTY_INTERNAL_API_KEY`, despite some historical manifests.
+</Note>
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Orchestration pipeline" href="/integrations/orchestration-pipeline" icon="workflow">
+    What processAuditRequest does with the validated request.
+  </Card>
+  <Card title="S3 layout" href="/storage/s3-layout" icon="folder">
+    Where the loan files live in S3.
+  </Card>
+</Columns>

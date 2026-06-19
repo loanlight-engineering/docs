@@ -1,0 +1,99 @@
+---
+title: Environment variables
+description: Octy's configuration via environment variables.
+icon: settings
+---
+
+Octy is configured entirely through environment variables. The values below were verified against `.env.example`, the CDK `application-stack.ts`, and the code. In deployed environments most are injected by CDK; secrets come from Secrets Manager (see [Infrastructure and deployment](/octy/infrastructure)).
+
+## Core / runtime
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres connection string. In ECS, supplied instead as `DB_HOST` / `DB_PORT` / `DB_NAME` plus `DB_USERNAME` / `DB_PASSWORD` secrets. |
+| `DEPLOYED_ENVIRONMENT` | `int` or `prod`. Drives prod-only behaviour (DB Studio 404, local-auth lockout, Datadog env tag). |
+| `IS_DEPLOYED` | Marks a deployed (vs local) runtime; affects SSL resolution. |
+| `RDS_CA_CERT_PATH` | Path to the RDS CA bundle for TLS to Aurora. |
+| `NEXT_PUBLIC_APP_URL` | Public base URL of the app. |
+
+## Auth (WorkOS)
+
+| Variable | Purpose |
+|---|---|
+| `WORKOS_API_KEY` | WorkOS API key. |
+| `WORKOS_CLIENT_ID` | WorkOS client id. |
+| `WORKOS_COOKIE_PASSWORD` | AuthKit cookie encryption secret (≥32 chars). |
+| `NEXT_PUBLIC_WORKOS_REDIRECT_URI` | OAuth redirect, inlined at build (also a Docker build-arg). |
+| `WORKOS_REDIRECT_URI` | Runtime fallback redirect. |
+| `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` | Next.js server-actions encryption key. |
+| `USE_LOCAL_AUTH` | Local dev bypass. Only honored when `DEPLOYED_ENVIRONMENT !== "prod"`. |
+| `AUTH_LOCAL_EMAIL` | Email for the local-auth user. |
+
+See [Authentication and access control](/octy/auth-and-access).
+
+## Oz / Warp
+
+| Variable | Purpose |
+|---|---|
+| `WARP_API_KEY` | Authenticates the Warp Oz Agent SDK client (`src/lib/oz.ts`). |
+| `WARP_ENVIRONMENT_ID` | Passed as `config.environment_id` when launching a run. |
+| `OCTY_WEBHOOK_BASE_URL` | Base URL baked into the agent prompt; the completion webhook is `<base>/api/oz/tools/octy-run-complete`. Required to launch a run. |
+| `NEXT_PUBLIC_OCTY_WEBHOOK_BASE_URL` | Client-visible copy of the above. |
+
+## LangSmith
+
+| Variable | Purpose |
+|---|---|
+| `LANGSMITH_API_KEY` (or `LANGCHAIN_API_KEY`) | Server-side run lookups; one of the two is required to launch a run. |
+| `LANGSMITH_PROJECT` / `LANGCHAIN_PROJECT` | Trace project, `loanlight-aus`. |
+| `LANGSMITH_ORG_ID` | Org id for building UI links. |
+| `LANGSMITH_ENDPOINT` | LangSmith API endpoint. |
+| `LANGSMITH_UI_BASE_URL` | Base for trace deep-links. |
+
+## Datadog (MCP)
+
+| Variable | Purpose |
+|---|---|
+| `OCTY_DATADOG_API_KEY` | Datadog API key. |
+| `OCTY_DATADOG_APPLICATION_KEY` | Datadog application key. |
+
+Both are required to attach the Datadog MCP server to a run. They are mapped to the `DD_API_KEY` / `DD_APPLICATION_KEY` headers on the MCP config. If either is missing, the run launches without Datadog access.
+
+## S3 allowlist
+
+| Variable | Purpose |
+|---|---|
+| `S3_INTEGRATION_FILES_BUCKET` | EPC/integration loan files bucket. |
+| `S3_PORTAL_UPLOAD_BUCKET` | Portal upload bucket. |
+| `S3_PARTNER_FILES_BUCKET` | Partner loan files bucket. |
+| `AWS_REGION` | AWS region. |
+| `AWS_ENDPOINT` | Optional, for LocalStack. |
+
+These three buckets form the fail-closed allowlist (`getAllowedBuckets()`); the Oz tool API rejects any S3 key outside them.
+
+## LoanLight internal API
+
+| Variable | Purpose |
+|---|---|
+| `LOANLIGHT_API_URL` | Base URL for the loanlight-api internal API (classify-split dry-run, audit results). |
+| `OCTY_INTERNAL_API_KEY` | Shared secret; must match loanlight-api's `InternalApiKeyGuard`. Sent as `x-internal-api-key`. |
+
+See [Classify and Split config](/octy/classify-split-config).
+
+## LlamaCloud
+
+| Variable | Purpose |
+|---|---|
+| `LAMA_CLOUD_PROJECT_ID` | LlamaCloud project id. |
+| `LLC_ORG_ID` | LlamaCloud org id. |
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Infrastructure and deployment" href="/octy/infrastructure" icon="server">
+How CDK injects these values.
+</Card>
+<Card title="Authentication and access control" href="/octy/auth-and-access" icon="lock">
+The auth variables in context.
+</Card>
+</Columns>

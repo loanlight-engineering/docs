@@ -1,0 +1,74 @@
+---
+title: Database schema overview
+description: The ~95-table Drizzle/Postgres schema, organized by domain.
+icon: database
+---
+
+LoanLight stores all persistent state in a single PostgreSQL database modeled with [Drizzle ORM](https://orm.drizzle.team). The schema lives in `loanlight-api/packages/api/src/database/schema/` as roughly 95 tables spread across one file per table (or tightly-related group), all re-exported from a single barrel.
+
+## Source of truth
+
+| Path | What it is |
+|---|---|
+| `src/database/schema/*.ts` | One file per table (or related group). Column declarations, indexes, CHECKs, FKs. |
+| `src/database/schema/index.ts` | The barrel. Re-exports every table file plus `enums.ts` and `relations.ts`. |
+| `src/database/schema/enums.ts` | The Postgres native `pgEnum` definitions. See [Enums and status values](/data-model/enums-reference). |
+| `src/database/schema/relations.ts` | Drizzle `relations()` for query-builder JOINs. Independent of DB foreign keys; both must agree. |
+| `src/database/schema/CLAUDE.md` | Drift trap-doors and authoring intent. |
+| `db/migrations/` | The numbered SQL migrations (`0000_…` through `0179_…`). See [Migration workflow](/data-model/migrations). |
+
+The Drizzle client is provided through NestJS DI (`database.provider.ts`, token `DRIZZLE_CLIENT`) over a raw `pg.Pool`.
+
+<Note>
+Column naming is mixed. Older tables use `snake_case` JS keys (`audit_runs.audit_run_id`); newer tables use `camelCase` JS keys mapped to `snake_case` DB columns (`agentRuns.auditRunId` → `audit_run_id`). The DB column name (the second argument to each column builder) is always `snake_case`. Throughout these docs, columns are named by their **DB name**.
+</Note>
+
+## The two central run ledgers
+
+Two facts shape almost everything else in the schema:
+
+- **`audit_runs`** is the parent for the audit pipeline. It is **lender-anchored and loan-optional**: `lender_id` and `trigger_source` are `NOT NULL`, while `loan_id`, `run_number`, and `loan_program_id` are nullable (migrations `0176`/`0179`). Nearly every per-agent result table FKs to `audit_runs.id` with `ON DELETE CASCADE`.
+- **The standalone run ledgers** — `appraisal_runs`, `credit_runs`, `income_runs` — each own their own results, rule engines, and recovery columns. They run independently from the portal, or attach to a parent audit run through a nullable `audit_run_id` column.
+
+<Warning>
+An older description that says "every audit run belongs to a loan" is stale. Since `0176`, loanless audit runs are valid, and `run_number` is `NULL` exactly when `loan_id` is `NULL` (enforced by CHECK `audit_runs_run_number_requires_loan`). The unique index on `(loan_id, run_number)` is partial: `WHERE loan_id IS NOT NULL`.
+</Warning>
+
+## Two pairs you must not conflate
+
+<AccordionGroup>
+<Accordion title="Two document tables">
+The legacy `documents` / `document_attachments` tables hold LOS-era blobs. The modern, versioned, multi-source, LlamaCloud-aware record is **`loan_documents`** (with `superseded_by` versioning and a mutually-exclusive Encompass/partner source CHECK). New pipelines write `loan_documents`; the classify-split and income subsystems key off it. See [Core tables](/data-model/core-tables).
+</Accordion>
+<Accordion title="Two income systems">
+The newer **`income_runs`** family (a module-pipeline income agent, 12 `income_*` tables) is distinct from the older bank-statement family rooted at **`borrower_files`** → `bank_statements` → `transactions`. They do not share tables. See [Financial data model](/data-model/financial-data-model).
+</Accordion>
+</AccordionGroup>
+
+## Domains
+
+<Columns cols={2}>
+<Card title="Core tables" icon="table" href="/data-model/core-tables">
+`lenders`, `loans`, `loan_documents`, `audit_runs`, and the legacy document tables.
+</Card>
+<Card title="Audit result tables" icon="clipboard-check" href="/data-model/result-tables">
+The per-agent result tables FK'd to `audit_runs`: PII, document health, property data, red flags, errors.
+</Card>
+<Card title="URLA data model" icon="file-text" href="/data-model/urla-data-model">
+`urla_extraction_results` and the URLA rules engine tables.
+</Card>
+<Card title="Agent platform schema" icon="boxes" href="/data-model/agent-platform-schema">
+`agents`, `agent_dependencies`, `agent_runs`, `lender_agent_entitlements`.
+</Card>
+<Card title="Financial data model" icon="dollar-sign" href="/data-model/financial-data-model">
+Credit, income, and appraisal run ledgers and their rule engines.
+</Card>
+<Card title="Enums and status values" icon="list" href="/data-model/enums-reference">
+`pgEnum` definitions and CHECK-constrained status vocabularies.
+</Card>
+<Card title="Migration workflow" icon="git-branch" href="/data-model/migrations">
+Authoring and applying Drizzle migrations, and the drift canaries.
+</Card>
+</Columns>
+
+Beyond these domains, the schema also covers classify-split config, lender config (YAML, flags, deny lists, loan programs), portal/auth, key-field review, shadow/parity observability, and the Octy issue tracker. Those are documented in their own subsystem sections.

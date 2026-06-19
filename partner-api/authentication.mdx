@@ -1,0 +1,119 @@
+---
+title: Authentication
+description: x-api-key auth — WorkOS sk_* keys and legacy hashed keys.
+icon: key
+---
+
+Every Partner API request authenticates with a single header. The `PartnerAuthInterceptor` (`interceptors/authentication.interceptor.ts`) reads it before any controller logic runs, validates it, and attaches the resolved lender context to the request.
+
+<ParamField header="x-api-key" type="string" required>
+The partner's API key. Either a WorkOS key (prefix `sk_`) or a legacy key. Read raw from the request as `request.headers["x-api-key"]`.
+</ParamField>
+
+## What the interceptor enforces
+
+The interceptor rejects the request with `401 UnauthorizedException("Missing API key")` when the header is missing, empty, whitespace-only, or sent more than once. Fastify yields an array when a header is duplicated, and the interceptor treats an array as empty: `Array.isArray(raw) ? "" : (raw ?? "").trim()`. On any of these reject paths `validateApiKey` is never called.
+
+On success, the interceptor attaches an `AuthenticatedRequest` with these fields:
+
+| Field | Type | Source |
+| --- | --- | --- |
+| `lenderId` | string (uuid) | resolved lender |
+| `lenderCode` | string | `lenders.config_profile` or `"default"` |
+| `scopes` | string[] | key metadata (legacy keys only) |
+| `rateLimitPerMinute` | number | key metadata, coalesced to `100` |
+
+<Warning>
+**Scopes are fetched but never enforced.** No guard or decorator inspects `scopes`. Any valid key can call any partner endpoint regardless of its scope list. Treat scope values as documentation only — never as access control.
+</Warning>
+
+## Two validation paths
+
+`PartnerAuthService.validateApiKey(apiKey)` (`services/authentication.service.ts`) returns `ValidatedPartnerAuth { lenderId, lenderCode, scopes, rateLimitPerMinute }`. It branches on the key prefix as part of the WorkOS migration.
+
+<Tabs>
+  <Tab title="WorkOS keys (sk_*)">
+    Keys with the `sk_` prefix are validated by `validateWorkosApiKey()`:
+
+    <Steps>
+      <Step title="Validate against WorkOS">
+        `ApiAuthService.validateApiKey(apiKey)` (from `@loanlight-engineering/shared-api-auth`) validates the key with WorkOS.
+      </Step>
+      <Step title="Require an organization owner">
+        The key owner must be `type === "organization"`. User-scoped keys are rejected with `401`.
+      </Step>
+      <Step title="Map the org to a lender">
+        Look up `lender_auth_clients WHERE client_id = orgId` (joined to `lenders` for `config_profile`). A missing row is `401` and logs `"WorkOS API key validated but no lender_auth_clients row for org X — provisioning gap"`.
+      </Step>
+    </Steps>
+
+    WorkOS keys carry no scope or rate-limit metadata, so the result is `scopes: []` and `rateLimitPerMinute: 100` (`DEFAULT_RATE_LIMIT_PER_MINUTE`). `lenderCode = config_profile || "default"`.
+
+    <Note>
+    `lender_auth_clients` rows with `source='workos'` are auto-provisioned by `PortalLendersService.createLenderFromWorkosOrg` and idempotently healed by `ensureWorkosOrgAndMapping`, which runs on every `generateApiKey` call.
+    </Note>
+  </Tab>
+  <Tab title="Legacy keys (SHA-256)">
+    Keys without the `sk_` prefix are looked up by SHA-256 hash:
+
+    <Steps>
+      <Step title="Hash the key">
+        `keyHash = createHash("sha256").update(apiKey).digest("hex")`.
+      </Step>
+      <Step title="Look up the row">
+        `SELECT ... FROM partner_api_keys INNER JOIN lenders ON lender_id WHERE key_hash = keyHash`. Not found is `401 "Invalid API key"`.
+      </Step>
+      <Step title="Check lifecycle">
+        `revoked_at` set is `401 "API key has been revoked"`. `expires_at < now()` is `401 "API key has expired"`.
+      </Step>
+    </Steps>
+
+    The result carries `lenderId`, `lenderCode = config_profile || "default"`, `scopes` from the row, and `rateLimitPerMinute = rate_limit_per_minute ?? 100`.
+
+    Any non-`UnauthorizedException` database error is caught, logged as `"Database error during API key validation"`, and rethrown as a generic `401`.
+  </Tab>
+</Tabs>
+
+<Warning>
+**Nullable rate limit, coalesced to 100.** `partner_api_keys.rate_limit_per_minute` is nullable; its `.default(100)` only applies to new inserts. A `NULL` value is coalesced to `DEFAULT_RATE_LIMIT_PER_MINUTE` (100) here. Without that coalesce a `NULL` would flow into the rate-limit SQL function and produce `allowed=NULL`, causing the interceptor to throw `429` on every request — a silent outage. See [rate limits](/partner-api/rate-limits-and-errors).
+</Warning>
+
+## Production edge auth
+
+In production the API sits behind an API Gateway with two layers: a JWT that proves the request is authenticated, and the `x-api-key` that identifies the partner (re-validated by the NestJS interceptor above).
+
+The legacy partner-auth Lambda (`infra/lambda/auth/partner.ts`) exposes `POST /auth/partner` (throttled at the gateway). It reads `x-api-key`, validates `Origin` against `ALLOWED_ORIGIN_PATTERNS` (server-to-server requests with no `Origin` are allowed; a mismatched `Origin` is `403`), and exchanges credentials for a JWT.
+
+<Warning>
+**`POST /auth/partner` is deprecated for `sk_*` keys.** When the Lambda sees an `sk_` key it short-circuits and returns `200` without calling FusionAuth:
+
+```json
+{
+  "auth_type": "workos_api_key",
+  "message": "...send x-api-key directly to /api/v1/partner/* — /auth/partner is deprecated for these keys."
+}
+```
+
+WorkOS keys are validated per request at the gateway authorizer via `@loanlight-engineering/shared-lambda-auth` (which sets `X-Requestor-ID = orgId`). Partners using `sk_*` keys should send `x-api-key` directly to `/api/v1/partner/*`.
+</Warning>
+
+For non-`sk_` keys the Lambda checks `partner_api_keys` (for `expires_at` / `revoked_at`), then exchanges LoanLight's FusionAuth client credentials for a JWT via `getAuthToken(authDomain, clientId, clientSecret, targetAudience)`. Lambda error codes: `401 unauthorized`, `400 missing_api_key`, `403 forbidden`, `500 server_error`, plus pass-through FusionAuth `token_error`. Lambda env vars: `PARTNER_API_CREDENTIALS_ARN`, `AUTH_DOMAIN`, `TARGET_AUDIENCE`, `DATABASE_URL_SECRET_ARN`, `ALLOWED_ORIGIN_PATTERNS`.
+
+## The partner_api_keys table
+
+Legacy keys live in `partner_api_keys` (`database/schema/partner.ts`):
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | `defaultRandom()` |
+| `lender_id` | uuid NOT NULL | FK to `lenders.id` |
+| `key_hash` | text NOT NULL UNIQUE | SHA-256 hex of the raw key |
+| `name` | text NOT NULL | |
+| `scopes` | text[] NOT NULL | default `['loans:write','loans:read','audits:write','audits:read']` — **not enforced** |
+| `rate_limit_per_minute` | integer | nullable, default 100 |
+| `created_at` | timestamptz | defaultNow |
+| `expires_at` | timestamptz | nullable; checked at auth |
+| `revoked_at` | timestamptz | nullable; checked at auth |
+| `created_by` | text NOT NULL | |
+
+Indexes: `idx_partner_api_keys_lender_id`, and a partial `idx_partner_api_keys_key_hash` WHERE `revoked_at IS NULL`.

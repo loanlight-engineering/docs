@@ -1,0 +1,225 @@
+---
+title: Appraisal-Evaluation agent
+description: The 12-node appraisal agent and its processor-side rule evaluation.
+icon: house
+---
+
+The Appraisal-Evaluation agent (`appraisalEvaluation`) is a fully implemented, 12-node compiled
+LangGraph that extracts and enriches appraisal data. Unlike
+[Credit-Evaluation](/agents/credit-evaluation), rule evaluation does **not** run inside the
+graph — it runs in the processor, after the graph returns.
+
+<Note>
+The graph performs extraction and enrichment only. Its output type
+(`AppraisalEvaluationGraphOutput`) carries no `complianceResults`. The processor
+(`appraisal.processor.ts`) re-runs `evaluateWithCustomRules` with its dependency-injected DB and
+persists results. `LangGraphService.createAppraisalEvaluationGraph` does **not** persist
+`appraisal_runs` — the processor does. This is a deliberate divergence from the credit agent,
+whose `aggregate` node persists.
+</Note>
+
+## How it runs
+
+Runs are created via `POST /api/v1/portal/appraisals/run` (`PortalAppraisalController`, base
+path `api/v1/portal/appraisals`). The DTO `CreateRunDto` carries `s3Key` (required), optional
+`xmlS3Key`, `loanProgramId`, `loanNumber`, and `agencySources?` (in `fannie_mae | freddie_mac`,
+max 2). The processor (`@Processor("appraisal-extraction")`) claims the run with a heartbeat and
+`claimToken` (the same recovery pattern as credit), calls
+`LangGraphService.createAppraisalEvaluationGraph`, persists the graph-returned `enrichmentData`,
+then runs the rules and findings (see below).
+
+`LangGraphService.createAppraisalEvaluationGraph` takes an options object, returns the
+extraction result plus the graph-owned `enrichmentData`, and races the graph against
+`APPRAISAL_GRAPH_DEADLINE_MS`. The builder `buildAppraisalEvaluationGraph` closes over
+`pdfBytes`, optional `xmlCandidates`, `onPartial`, `onIteration`, and `inputFilename` — these
+stay closure-delivered and are never placed in graph state or serialized progress.
+
+## The graph
+
+```text
+__start__ → prepare → classify → detectScanned
+  → (routeExtractionStrategy) → ocr? → reductoExtract
+  → spatialGenerate → resolveFields → normalizeAdapter → computeCoverage
+  → (attomGate) → attomFetch? → (routeAttomReplay) → validateProject
+  → aggregate → __end__
+```
+
+Routing:
+
+- `routeExtractionStrategy(detectScanned)`: `scannedPdf === true ? "ocr" : "reductoExtract"`;
+  `ocr → reductoExtract`.
+- `attomGate(computeCoverage)`: route to `attomFetch` only when **not** in `enrichmentPass`,
+  `ENABLE_ATTOM_ENRICHMENT === "true"`, the second pass fits the lock budget
+  (`attomSecondPassExceedsLockBudget`), and `hasAttomAddressInputs`; otherwise go straight to
+  `validateProject`.
+- `routeAttomReplay(attomFetch)`: when `hasReplayableEnrichmentData` (any of `avmDetail`,
+  `attomAvmDetail`, `avmHistory`, `comparableSales`, `salesTrend`), back-edge to `detectScanned`
+  for a second extraction pass; otherwise go to `validateProject`.
+
+Every node is wrapped by `instrumentNode`, which emits `node:<name>` started / complete / failed
+milestones.
+
+<AccordionGroup>
+<Accordion title="prepare">
+Seeds XML candidates.
+</Accordion>
+<Accordion title="classify">
+Detects the appraisal form type from the PDF bytes.
+</Accordion>
+<Accordion title="detectScanned">
+Decides digital vs scanned to pick the extraction strategy.
+</Accordion>
+<Accordion title="ocr — inert">
+Inert except for an inert `boostScannedLlamaExtractCandidates`. The `ocrmypdf` preprocessing was
+removed (LOA-1101); Reducto OCRs scanned PDFs natively.
+</Accordion>
+<Accordion title="reductoExtract">
+Reducto deep extraction. Forwards `enrichmentData` and a cached `_reductoResult` on ATTOM
+replay, and preserves the canonical form type (`1025` vs `1004` schema).
+</Accordion>
+<Accordion title="spatialGenerate">
+pdfjs spatial candidates; a no-op on scanned PDFs.
+</Accordion>
+<Accordion title="resolveFields">
+Merges candidate sources. XML priority 100 wins; seeds pseudo-candidates at `priority_override`
+0 when the Reducto map is empty.
+</Accordion>
+<Accordion title="normalizeAdapter">
+Syncs `formType` to the normalized `extractedData.form_type` before the coverage and ATTOM
+gates — recovers `1025`/`1073`/`1075`/`2055`.
+</Accordion>
+<Accordion title="computeCoverage">
+Coverage percent plus the missing mandatory fields.
+</Accordion>
+<Accordion title="attomFetch">
+ATTOM property enrichment, ceiling 2 minutes.
+</Accordion>
+<Accordion title="validateProject">
+Project / condo validations.
+</Accordion>
+<Accordion title="aggregate">
+Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-pass warnings.
+</Accordion>
+</AccordionGroup>
+
+### agenticRefine is intentionally unwired
+
+The `agenticRefine` node factory exists but is **not** wired into the graph. It OOM-killed a
+production worker on scanned multi-page documents (run `803ada7d`, 2026-06-09). The factory is
+retained for a future reseed; do not re-wire it without addressing the memory profile.
+
+### ATTOM budgeting and deadlines
+
+`APPRAISAL_GRAPH_DEADLINE_MS` defaults to 88 minutes (`envMinutesMs`) and sits strictly between
+the legitimate split + ATTOM floor (`SUBSCHEMA_OVERALL_CEILING_MS` + 2 min ATTOM) and the worker
+lock (`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, about 90 minutes).
+`ATTOM_SECOND_PASS_CEILING_MS = SINGLE_CALL_DXT_CEILING_MS + SINGLE_CALL_DXF_TIMEOUT_MS`.
+`attomSecondPassExceedsLockBudget` budgets against elapsed time since `graphStartedAt` (a missing
+value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`, `APPRAISAL_GRAPH_DEADLINE_MS`.
+
+<Warning>
+LangGraph appraisal runs own ATTOM replay state. The processor must **not** perform legacy ATTOM
+reruns — that is a trap door called out in the agent's `CLAUDE.md`.
+</Warning>
+
+## Processor-side rule evaluation
+
+After the graph returns, `appraisal.processor.ts`:
+
+<Steps>
+<Step title="Persist enrichment">
+Writes the graph-returned `enrichmentData`.
+</Step>
+<Step title="Evaluate rules">
+Runs `evaluateWithCustomRules` (`lib/appraisal-pipeline/rules/evaluator.ts`) with the
+processor's DI'd DB.
+</Step>
+<Step title="Generate findings">
+`AppraisalFindingsService.generateFindings`.
+</Step>
+<Step title="Write the run">
+Writes `appraisal_runs` with `extractedData`, `complianceResults`, `findings`, coverage fields,
+and the field maps.
+</Step>
+</Steps>
+
+### Appraisal rules
+
+The rule definitions live in `lib/appraisal-pipeline/rules/definitions` (registry
+`rule-registry.ts`) and span roughly 65 rules across many prefixes: `SUBJ_` (15), `SITE_` (8),
+`EXH_` (6), `NEIGH_` (6), `CONT_` (5), `COMP_` (5), `IMP_` (5), `APPR_` (3), `CONDO_` (3),
+`REC_` (3), `INCOME_` (2), `RENT_` (2), `GEN_` (1), `UNIT_` (1). The rules are agency-aware
+(`AgencySource`: `fannie_mae`, `freddie_mac`), support compound conditions (`compound-walker`,
+`condition-schema`), and use `feature-gates`.
+
+The `appraisal_rules.operator` CHECK (`appraisal_rules_operator_check`) is the **16-value** union,
+which — unlike credit's 14-value union — adds `abs_less_than` and `abs_less_than_or_equal`. This union is drift-pinned by
+`operator-check-drift.spec.ts`; the Drizzle schema must mirror the latest migration SQL.
+
+## Data model
+
+The tables live in `database/schema/appraisal-*.ts`. See
+[the financial data model](/data-model/financial-data-model) for the full catalog.
+
+<ResponseField name="appraisal_runs" type="table">
+A large run ledger. `lenderId` (restrict), `userId`, `loanId`, `parentRunId` (self-FK for
+revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status`,
+`inputFilename`/`inputS3Key`, `xmlS3Key`, `xmlVersion`, `outputSnapshot`, `differenceSummary`,
+`agentVersion`, `modelVersion`, `langsmithUrl`, recovery columns (`lastHeartbeatAt`,
+`recoveryAttempts`, `claimToken`), extraction outputs (`extractedData`, `fieldConfidenceMap`,
+`fieldStatusMap`, `fieldSourceLocationMap`, `coverageResult`, `coveragePercent`,
+`commentSummary`/`commentKeywords`, `extractionCost`, `extractionStep`, `errorCategory`,
+`isScanned`), `complianceResults`, `enrichmentData`, `findings`, `parentSnapshotData`,
+`photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`, and
+`selectedAgencySources[]`.
+</ResponseField>
+
+<ResponseField name="rules, overrides, corrections" type="tables">
+`appraisal_rule_sets`, `appraisal_rules`, `appraisal_rule_templates` (the platform-owned shared
+template catalog with no `lenderId`, `module` in `appraisal | credit | income`),
+`appraisal_rule_overrides`, `appraisal_corrections`, `appraisal_run_partials`,
+`appraisal_field_metrics`, and `appraisal_ssr_documents` (Fannie/Freddie SSR findings).
+</ResponseField>
+
+## HTTP endpoints
+
+All under `api/v1/portal/appraisals` (`PortalAppraisalController`). Selected routes:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | List runs |
+| POST | `/run` | Create a run |
+| GET | `/loan-lookup` | Loan lookup |
+| GET | `/metrics`, `/executive-metrics` | Metrics |
+| GET / PATCH | `/settings/review-threshold` | Review threshold |
+| GET | `/:id` | Get a run |
+| GET | `/:id/status` | Poll status |
+| GET | `/:id/rules` | Rule outcomes |
+| GET | `/:id/review-fields` | Review fields |
+| POST | `/:id/re-extract`, `/:id/retry-extraction` | Re-run extraction |
+| POST | `/:id/updated-run` | Create an updated run |
+| GET | `/:id/comparison` | Compare revisions |
+| DELETE | `/:id` | Delete a run |
+| GET | `/:id/pdf`, `/:id/pdf-url` | Source PDF |
+| GET | `/:id/photos`, `/:id/pages/:pageNumber/image`, `/:id/photos/:photoId/image` | Images |
+| GET / POST / DELETE | `/:id/corrections[/:correctionId]` | Corrections |
+| POST | `/:id/mark-reviewed`, `/:id/revert-approval` | Review state |
+| GET | `/:id/audit-events` | Run audit trail |
+| GET / POST / DELETE | `/:id/rule-overrides[/:ruleCode]` | Rule overrides |
+| GET / PATCH | `/:id/key-field-reviews[/:fieldId]` | Key-field reviews |
+
+Separate modules handle related concerns: `portal-appraisal-rules`,
+`portal-appraisal-comments`, and `portal-appraisal-ssr`.
+
+## Reliability and recovery
+
+The appraisal processor uses the same heartbeat / `claimToken` / bounded-recovery pattern as
+credit, with an in-process graph deadline below the BullMQ lock. The
+`sweepOrphanedRuns` reaper recovers stale `pending`/`running` runs, re-enqueues them up to
+`APPRAISAL_MAX_RECOVERY_ATTEMPTS`, then terminally fails them — the same shape as the credit
+orphan sweep.
+
+<Tip>
+Investigating an appraisal run that stalled or failed? See
+[Investigating a failed run](/runbooks/investigating-a-failed-run).
+</Tip>

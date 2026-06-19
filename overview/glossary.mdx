@@ -1,0 +1,40 @@
+---
+title: Glossary
+description: Key LoanLight terms and acronyms.
+icon: book-a
+---
+
+Terms and acronyms used across the LoanLight documentation. Where a term has a dedicated page, the definition links to it.
+
+| Term | Definition |
+|---|---|
+| AUS | Automated underwriting system. LoanLight's core product: it runs AI agents over a loan package and produces an audit. |
+| MISMO | Mortgage Industry Standards Maintenance Organization. LoanLight ingests MISMO 3.4 XML loan applications. |
+| URLA / Form 1003 | Uniform Residential Loan Application (Fannie Mae Form 1003). The borrower application; extracted from MISMO XML into structured JSON. See [URLA extraction](/agents/urla-extraction). |
+| LOS | Loan origination system. The lender-side system that originates loans (for LoanLight, primarily Encompass). |
+| Encompass | ICE / Ellie Mae's LOS. LoanLight integrates with it via Encompass Partner Connect. |
+| EPC | Encompass Partner Connect. The production integration path that pushes loan packages to S3 and signals audit requests over EventBridge/SQS. See [Encompass overview](/integrations/encompass-overview). |
+| Audit run | The central unit of work. A lender-anchored, loan-optional record (`audit_runs`) that parents every per-agent result table. See [the audit run](/concepts/audit-run). |
+| Agent | A LangGraph workflow that analyzes part of a loan package (PII, document health, property, credit, and so on). See [agent catalog](/agents/catalog-and-dependencies). |
+| classify-split | The two-phase document classification pipeline: split a PDF into segments (`split_type`), then classify each segment (`classification_type`). See [classify-split](/subsystems/classify-split). |
+| split_type | The coarse category assigned to a PDF segment in classify-split phase 1. |
+| classification_type | The fine document type assigned to a segment in classify-split phase 2. |
+| config_profile | A lender's configuration code (`lenders.config_profile`). Selects which YAML config and rules apply. There is no `lenders.lender_code` column. See [loans and lenders](/concepts/loans-and-lenders). |
+| LlamaCloud pipeline | The managed document index for a loan. Each loan maps 1:1 to one pipeline (`loans.llc_pipeline_id`); agents query it with hybrid retrieval. See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval). |
+| lender_yaml_configs | The DB store of per-lender YAML config in three sections: `document_expiration`, `red_flags`, `urla_completeness_rules`. See [YAML config](/lender-config/yaml-config). |
+| Agent platform | The DB-backed agent registry (`agents`), dependency DAG (`agent_dependencies`), router, and run ledger (`agent_runs`). See [agent platform overview](/agents/platform-overview). |
+| Observer mode | The default rollout state of the agent platform: the `agent_runs` ledger backfills rows over the legacy "run all" fan-out without owning selection. See [feature flags and rollout](/agents/feature-flags-and-rollout). |
+| Shadow audit | A parity audit run (`is_shadow = true`) that mirrors a real audit for QA comparison. See [shadow audits](/integrations/shadow-audits). |
+| Partner API | The direct REST surface lenders/LOS vendors use to submit loans and request audits, authenticated with `sk_*` keys. See [Partner API overview](/partner-api/overview). |
+| Portal | The lender-facing Next.js app where staff run and review audits and configure rules. See [portal overview](/portal/overview). |
+| LangSmith | The observability plane for agent reasoning (prompts, model I/O, node state). Project `loanlight-aus`. See [LangSmith](/ops/langsmith). |
+| Datadog | The observability plane for system behavior (HTTP, errors, infra, third-party calls). See [Datadog](/ops/datadog). |
+| Octy | LoanLight's internal self-healing AI command center. See [Octy overview](/octy/overview). |
+| Oz | The autonomous coding agent (run on Warp's Oz Agent SDK) that Octy launches to investigate and fix issues. See [Oz run lifecycle](/octy/oz-run-lifecycle). |
+| RCA | Root cause analysis. One of Octy's three Oz skills, alongside `rca-fix-and-pr` and `ad-hoc`. See [Oz skills](/octy/oz-skills). |
+| WorkOS | The identity provider behind AuthKit, used for human portal and Octy login and for `sk_*` partner keys. See [identity and auth](/concepts/identity-and-auth). |
+| FusionAuth | A secondary identity provider still used by some Encompass/partner authorizer lambdas. See [identity and auth](/concepts/identity-and-auth). |
+| MCP | Model Context Protocol. The Mintlify MCP server serves these docs to Oz; a Datadog MCP server is attached to Oz runs for read-side Datadog access. |
+| BFF | Backend-For-Frontend. The portal's architecture: Next.js route handlers proxy to the NestJS backend. See [portal architecture](/portal/architecture-bff). |
+| correlationId | On the EPC path, the unique identifier that becomes both `loans.id` and `audit_runs.id` (the dedup key). |
+| trigger_source | How an audit run was created: `epc`, `los`, `partner`, `portal`, `admin_rerun`, or `shadow`. |

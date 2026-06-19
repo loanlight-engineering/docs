@@ -1,0 +1,113 @@
+---
+title: "Portal API: internal admin and observability"
+description: Audit log, YAML viewer, shadow-audit diffs, cache invalidation, and feedback.
+icon: gauge
+---
+
+These modules back the internal-admin and observability surface: the tenant audit log, the lender YAML config viewer, the shadow-audit divergence monitor, lender-config cache invalidation, per-finding feedback, and JIT provisioning through the WorkOS webhook. Most are super-admin only and use [`PortalAuthGuard`](/portal/api-auth); the WorkOS webhook is signature-verified instead.
+
+## portal-feedback
+
+Controller: `portal-feedback/portal-feedback.controller.ts` at `api/v1/portal/feedback`. `@UseGuards(PortalAuthGuard)`. Captures per-finding feedback from reviewers.
+
+### POST /api/v1/portal/feedback
+
+Record feedback on a finding. Returns HTTP 201. Uniqueness is keyed including `audit_run_id`.
+
+<ParamField body="auditRunId" type="uuid" required>The audit run.</ParamField>
+<ParamField body="findingId" type="string" required>The finding within the run.</ParamField>
+<ParamField body="findingType" type="string" required>
+One of `pii_validation`, `doc_expiration`, `doc_completeness`, `property_data`, `red_flag`, `urla_rules`, `appraisal`.
+</ParamField>
+<ParamField body="verdict" type="string" required>`correct` or `incorrect`.</ParamField>
+<ParamField body="reason" type="string">
+One of `missing_data`, `wrong_rule`, `reasoning_error`, `false_positive`.
+</ParamField>
+<ParamField body="comment" type="string">Free text, ≤500 characters.</ParamField>
+
+### GET /api/v1/portal/feedback?audit_run_id=&lt;uuid&gt;
+
+List feedback for a run. `audit_run_id` requires `ParseUUIDPipe`. Ordered `created_at, id`.
+
+## portal-audit-log
+
+Controller: `portal-audit-log/portal-audit-log.controller.ts` at `api/v1/portal/audit-log`. Class-level `@Roles("super_admin")`.
+
+### GET /api/v1/portal/audit-log
+
+Paginated log for the effective lender.
+
+<ParamField query="action" type="string">Filter by action.</ParamField>
+<ParamField query="startDate" type="string">`YYYY-MM-DD` or full ISO with `Z`/offset; normalized to UTC bounds.</ParamField>
+<ParamField query="endDate" type="string">Same format as `startDate`.</ParamField>
+<ParamField query="page" type="integer">Page number.</ParamField>
+<ParamField query="limit" type="integer">Page size.</ParamField>
+
+Results are ordered `desc(createdAt), desc(id)`.
+
+<Warning>
+`portal-audit-log` is read-only by design — there is intentionally no write route. Writes happen only internally via `PortalAuditLogService.create()`, called by other modules. Its `VALID_ACTIONS` includes `agency_adoption.enabled` / `.disabled`, `audit.shadow_diff_viewed`, `audit.shadow_diff_replay`, plus currently-unused `rule.toggled`, `feature_flag.toggled`, and `admin.client_created`.
+</Warning>
+
+## yaml-viewer
+
+Controller: `yaml-viewer/yaml-viewer.controller.ts` at `api/v1/internal-admin/yaml-configs`. Class-level `@Roles("super_admin")`. Sections are validated against `{ document_expiration, red_flags, urla_completeness_rules }`. See [YAML config](/lender-config/yaml-config).
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/internal-admin/yaml-configs/:lenderId/:section` | Active config (relies on a partial unique index for determinism) |
+| `GET /api/v1/internal-admin/yaml-configs/:lenderId/:section/history` | Version history (ordered `desc(updatedAt), desc(version), desc(id)`) |
+| `GET /api/v1/internal-admin/yaml-configs/:lenderId/:section/versions/:version` | A specific version (`ParseIntPipe`) |
+
+## shadow-audit-diff
+
+Controller: `shadow-audit-diff/shadow-audit-diff.controller.ts` at `api/v1/portal/admin/shadow-audit-diffs`. All `@Roles("super_admin")`. This monitors divergence between real and shadow audit runs.
+
+| Method / path | Query / body | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/admin/shadow-audit-diffs` | `page, limit, diverged(true\|false), correlationId, lenderId, section, asymmetry` | List diff records |
+| `GET /api/v1/portal/admin/shadow-audit-diffs/:id` | — | Diff detail; writes `audit.shadow_diff_viewed` to the audit log; 404 if missing |
+| `POST /api/v1/portal/admin/shadow-audit-diffs/replay` | `{ since, until }` (ISO, ≤7 days, `until > since`) | Re-run diffs over a window → `{ ok: true }` (HTTP 200); writes `audit.shadow_diff_replay` |
+
+`shadow-audit-diff.service.ts` runs a watermark-driven tick that compares real vs shadow runs section by section using outcome-only normalizers (`normalizers/urla-completeness-rules.ts`, `red-flags.ts`, `document-expiration.ts`, `NORMALIZER_VERSION v2`) and canonical hashing (`lib/canonical-hash.ts`). Watermark advance is capped to avoid dropping tied or pending rows.
+
+## admin/cache-invalidation
+
+Controller: `admin/cache-invalidation.controller.ts` at `api/v1/internal-admin`. Class-level `@Roles("super_admin")`.
+
+### POST /api/v1/internal-admin/clear-cache
+
+Clears lender-config caches. Returns HTTP 200 `{ cleared: true }`. It clears both the DI `LenderConfigLoaderService` cache and the module-level `sharedLenderConfigLoader` singleton — the singleton is what the propertyRedFlags and documentHealth agents use.
+
+## workos-webhook: JIT provisioning
+
+Controller: `portal-lenders/workos-webhook.controller.ts` at `api/v1/workos/webhooks`. Not auth-guarded; it verifies the `workos-signature` header via `ApiAuthService.constructWebhookEvent` (missing signature → 401) and returns `{ received: true }`.
+
+The webhook is the just-in-time provisioning path: WorkOS organization and user lifecycle events create and update lenders and users without an explicit portal action.
+
+| Event | Handler | Effect |
+|-------|---------|--------|
+| `organization.created` | `createLenderFromWorkosOrg` | Provision a lender from a new WorkOS org |
+| `organization.updated` | `updateLenderWorkosOrgName` | Sync the lender name |
+| `user.created` | `linkWorkosUser` | Link a WorkOS user to a portal user |
+| `user.updated` | `updateLastSignIn` | Record last sign-in |
+| `organization_membership.created` / `.deleted` | membership handlers | Add/remove tenant membership |
+
+See [lenders, users, and programs](/portal/api-lenders-users-programs) for the full webhook table and the user-management endpoints it complements.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="YAML config" icon="file-code" href="/lender-config/yaml-config">
+    The config sections the YAML viewer exposes.
+  </Card>
+  <Card title="Shadow audits" icon="copy" href="/integrations/shadow-audits">
+    How shadow runs are produced.
+  </Card>
+  <Card title="Observability (ops)" icon="gauge" href="/ops/observability">
+    LangSmith and Datadog planes.
+  </Card>
+  <Card title="Authentication and authorization" icon="shield-check" href="/portal/api-auth">
+    The super-admin role and the WorkOS webhook.
+  </Card>
+</Columns>

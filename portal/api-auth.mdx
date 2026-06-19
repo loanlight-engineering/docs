@@ -1,0 +1,130 @@
+---
+title: "Portal API: authentication and authorization"
+description: PortalAuthGuard, roles, WorkOS tokens, and tenant scoping.
+icon: shield-check
+---
+
+The lender portal backend is a set of NestJS controllers mounted under `api/v1/portal/*`, plus a small internal surface under `api/v1/internal-admin/*` and the WorkOS webhook under `api/v1/workos/*`. The portal app (`packages/app`) calls these endpoints either directly or through Next.js proxy route handlers. Almost every controller depends on the shared authentication and authorization model described here.
+
+There are two distinct guards:
+
+- `PortalAuthGuard` — the standard guard for nearly all portal endpoints. It verifies a WorkOS access token and builds a `PortalContext`.
+- `PortalAuditsAuthGuard` — a separate multi-arm guard used only by the per-audit detail sections. It additionally accepts partner and EPC HS256 view tokens. See [audit results and detail sections](/portal/api-audit-results).
+
+## PortalAuthGuard
+
+Source: `portal-auth/guards/portal-auth.guard.ts`.
+
+<Steps>
+  <Step title="Read the bearer token">
+    The guard reads the `Authorization: Bearer <token>` header. A missing or non-bearer header returns `401 Missing Bearer token`.
+  </Step>
+  <Step title="Verify the WorkOS access token">
+    Verification is delegated to `WorkOSTokenVerifier.verify()` (`portal-auth/services/workos-token-verifier.service.ts`). The WorkOS access token is an RS256 JWT verified against a JWKS keyset held as a module-level singleton. `jwtVerify` pins `algorithms: ['RS256']`.
+  </Step>
+  <Step title="Build the PortalContext">
+    On success the guard builds a `PortalContext` and attaches it as `request.portalContext`. Handlers read it through the `@PortalUser()` parameter decorator (`portal-auth/decorators/portal-user.decorator.ts`).
+  </Step>
+  <Step title="Enforce roles">
+    The guard reads `@Roles(...)` metadata (`portal-auth/decorators/roles.decorator.ts`, metadata key `portal_roles`) via the Reflector and matches each required role with `satisfiesRole(userRole, requiredRole)`.
+  </Step>
+</Steps>
+
+## PortalContext
+
+Source: `portal-auth/interfaces/portal-context.interface.ts`.
+
+```ts
+{
+  user:   { id, email, name, role, lenderId, status }
+  lender: { id, name, slug | null, status, isInternal }
+  effectiveLenderId: string      // use this for tenant-scoped reads/writes
+  effectiveLenderName: string
+  session: {
+    id,                           // WorkOS user sub
+    workosSessionId,              // sid
+    impersonatingLenderId | null,
+    impersonatedBy | null,
+    impersonationStartedAt | null
+  }
+  isImpersonating: boolean
+}
+```
+
+<Warning>
+Tenant-scoped data access must use `ctx.effectiveLenderId` (resolved by `services/resolve-effective-lender.ts`), never `ctx.user.lenderId`. During super-admin impersonation `effectiveLenderId` is the target tenant, while `ctx.user.lenderId` / `ctx.lender.id` remain the super-admin's own internal lender. `getMe` and `isInternal` must be `false` while impersonating. See [impersonation](/portal/impersonation).
+</Warning>
+
+## Roles and the role hierarchy
+
+The portal has four roles. Three are ranked; `read_only` is intentionally unranked.
+
+| Role | Rank | Notes |
+|------|------|-------|
+| `client_user` | 1 | normal lender user |
+| `client_admin` | 2 | lender admin (manages users, rules, programs) |
+| `super_admin` | 3 | LoanLight internal staff |
+| `read_only` | unranked | matched by exact string only; never satisfied by a hierarchy floor (LOA-1030 / LOA-1055). Do not add it to `ROLE_RANK`. |
+
+`satisfiesRole` works as follows: if both the user role and the required role are ranked, it passes when `userRank >= requiredRank`; otherwise it requires exact string equality. So `@Roles("client_user")` is satisfied by `client_admin` and `super_admin`, while `@Roles("read_only")` is satisfied only by `read_only`.
+
+<Note>
+`read_only` is not in the role hierarchy. Do not assume `client_admin` or `super_admin` inherit `read_only`-gated routes through rank. They satisfy such routes only when `read_only` is not the sole listed role, or when those roles are explicitly listed in `@Roles`.
+</Note>
+
+## WorkOS rejection codes
+
+`WorkOSTokenVerifier` returns a `WorkOSRejectCode` of `"invalid_token"`, `"expired_token"`, `"lender_mismatch"`, or `"account_setup_pending"`. The guard translates these:
+
+| Reject code | HTTP response |
+|-------------|---------------|
+| `lender_mismatch` | `403 "Super-admin role requires internal lender"` |
+| `account_setup_pending` | `401 { message, reason: "account_setup_pending" }` — the app's shared-auth `getUser` redirects to `/login?error=account_setup_pending` |
+| anything else | `401 "Invalid or expired token"` |
+
+## Dev/test bearer carve-out
+
+Source: `portal-auth/carve-outs/dev-test-bearer.ts`. `isDevTestBearerEnvAllowed()` is the single source of truth — a positive allowlist of `NODE_ENV ∈ {development, test}` (not `!== "production"`). In `mockAuthMode` the raw bearer string is treated directly as a `workos_user_id`: JWKS verification is skipped, but the DB lookup still runs. It activates when `NODE_ENV=test`, or when `NODE_ENV=development && E2E_MOCK_AUTH=true`. The carve-out is shared by `WorkOSTokenVerifier`, the partner/EPC audit guard, and `internal/e2e-mock-fixtures.controller.ts`.
+
+## Throttling
+
+Two throttler guards are in use: the standard `@nestjs/throttler` `ThrottlerGuard` and a portal-specific `PortalThrottlerGuard` (`common/throttler/portal-throttler.guard.ts`). The common class-level default is `{ limit: 100, ttl: 60000 }` (100 requests/minute). Expensive endpoints — run creation, exports, and NL parse — override this down to 5–30/minute.
+
+## Feature gating
+
+Several controllers gate on per-lender feature flags in `lender_feature_flags`:
+
+- **DSCR agent** — flag `dscr_agent`, enforced by controller-level `assertDscrAgentEnabled`. See [bank statement and DSCR](/portal/api-bank-statement-dscr).
+- **Guideline uploads** — flag `guidelineUploads`; the service `assertEnabled()` throws `404` (not an empty list) when disabled.
+- **Compound rules** — `isCompoundRulesEnabled(lenderId)` is default-enabled (returns `true` when the flag row is absent). See [rules authoring](/portal/api-rules-authoring).
+- **Updated-appraisal-run flow** — an appraisal feature flag gates child run creation, mutation, and reads; all four endpoints throw `ForbiddenException` when off.
+
+## PortalAuditsAuthGuard (per-audit sections)
+
+The per-audit detail endpoints under `api/v1/portal/audits/:auditId/*` use `PortalAuditsAuthGuard` instead of `PortalAuthGuard`. It is multi-arm: it inspects an unverified `purpose` JWT claim (via `jose.decodeJwt`) for routing only, then verifies with the matching arm.
+
+| `purpose` claim | Arm | Token |
+|-----------------|-----|-------|
+| `partner-results-view` | partner | HS256 view token (`loanId, lenderCode, auditRunId`) |
+| `epc-results-view` | EPC | HS256 view token (same fields) |
+| `undefined` | WorkOS session | RS256/JWKS (`userId, auditRunId`; no `loanId`/`lenderCode`) |
+| anything else | rejected | `401 unsupported_purpose` |
+
+The guard never reads `x-lender-id` from headers. After verification it calls `getAuditRunByLender(auditId, derivedLenderId)`; a null result returns `404 audit_not_found`. Full detail and section list are on [audit results and detail sections](/portal/api-audit-results).
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Auth and roles (portal app)" icon="users" href="/portal/auth-and-roles">
+    How the BFF acquires and forwards WorkOS tokens.
+  </Card>
+  <Card title="Impersonation" icon="user-cog" href="/portal/impersonation">
+    Super-admin impersonation and effective-lender resolution.
+  </Card>
+  <Card title="Lenders, users, and programs" icon="building" href="/portal/api-lenders-users-programs">
+    User management and the WorkOS webhook.
+  </Card>
+  <Card title="Identity and auth (system)" icon="key" href="/concepts/identity-and-auth">
+    WorkOS, partner keys, and the wider identity model.
+  </Card>
+</Columns>

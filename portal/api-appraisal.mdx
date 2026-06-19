@@ -1,0 +1,144 @@
+---
+title: "Portal API: appraisal audit runs"
+description: Appraisal run, rules, SSR, and comments endpoints.
+icon: house
+---
+
+`portal-appraisal` is the largest portal agent module. An appraisal run follows the common agent-run shape: `POST .../run` enqueues a BullMQ extraction job (the run row is inserted before `queue.add()` and deleted on enqueue failure), `appraisal.processor.ts` extracts data and evaluates rules, and the read endpoints serve detail, status, rules, corrections, overrides, and key-field reviews. All endpoints use [`PortalAuthGuard`](/portal/api-auth).
+
+This page covers the appraisal run controller, its SSR sibling, and the AI comments controller. Rule authoring (rule sets, NL parse, templates) lives in [rules authoring](/portal/api-rules-authoring).
+
+<Info>
+`POST /api/v1/portal/appraisal-rules` (the legacy single-rule create endpoint) returns **HTTP 410 Gone**. Create rules through `POST /rule-sets/:setId/rules` instead. `appraisal_custom_rules` is no longer read and is being dropped; the sole custom-rule writer is `rule-sets.service.ts::addCustomRule`. The `use_client_rule_sets` subsystem was fully removed (LOA-820 T3), and USPAP rules were removed from active sets (LOA-726).
+</Info>
+
+## portal-appraisal
+
+Controller: `portal-appraisal/portal-appraisal.controller.ts` at `api/v1/portal/appraisals`. UUID and integer params use `ParseUUIDPipe` / `ParseIntPipe`; `:ruleCode` is intentionally unpiped.
+
+### Run lifecycle and lists
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/appraisals` | client_admin, client_user | List runs (top-level only) |
+| `POST /api/v1/portal/appraisals/run` | client_admin, client_user | Enqueue a run (HTTP 201) |
+| `GET /api/v1/portal/appraisals/loan-lookup` | client_admin, client_user | Resolve a loan number → loan/program |
+| `GET /api/v1/portal/appraisals/metrics` | client_admin, client_user, super_admin | Field-level extraction metrics |
+| `GET /api/v1/portal/appraisals/executive-metrics` | client_admin, client_user, super_admin | Portfolio KPIs (`executive-metrics.types.ts`) |
+| `GET /api/v1/portal/appraisals/settings/review-threshold` | auth | Read review threshold |
+| `PATCH /api/v1/portal/appraisals/settings/review-threshold` | client_admin, super_admin | `UpdateReviewThresholdDto` |
+| `GET /api/v1/portal/appraisals/:id` | auth | Run detail (partial-fallback merges `appraisal_run_partials`; section F fields snake_case) |
+| `GET /api/v1/portal/appraisals/:id/status` | auth | Poll status |
+| `GET /api/v1/portal/appraisals/:id/rules` | auth | Compliance results |
+| `GET /api/v1/portal/appraisals/:id/review-fields` | auth | Fields flagged for review |
+
+#### POST /api/v1/portal/appraisals/run
+
+Enqueue an appraisal extraction run. Returns HTTP 201.
+
+<ParamField body="s3Key" type="string" required>
+S3 key of the source PDF. Validated against a safe-key regex that rejects `..` path traversal. A 200MB ceiling applies.
+</ParamField>
+<ParamField body="xmlS3Key" type="string">
+Optional MISMO XML key.
+</ParamField>
+<ParamField body="loanProgramId" type="string">
+Optional loan program to associate.
+</ParamField>
+<ParamField body="loanNumber" type="string">
+Optional loan number.
+</ParamField>
+<ParamField body="agencySources" type="string[]">
+Optional agency rule packs: `fannie_mae` and/or `freddie_mac`.
+</ParamField>
+
+### Re-extraction and updated (child) runs
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `POST /api/v1/portal/appraisals/:id/re-extract` | client_admin, client_user | CAS-guarded re-extraction (HTTP 200) |
+| `POST /api/v1/portal/appraisals/:id/updated-run` | client_admin, client_user | Create an updated child run (`CreateUpdatedRunDto { inputFilename, ... }`, HTTP 201). Feature-flag gated |
+| `GET /api/v1/portal/appraisals/:id/comparison` | read+ | Parent ↔ child comparison snapshot |
+| `POST /api/v1/portal/appraisals/:id/retry-extraction` | client_admin, client_user | Retry a failed child (HTTP 200) |
+| `DELETE /api/v1/portal/appraisals/:id` | client_admin | Delete a child run (CAS on `status="failed"`, HTTP 204) |
+
+<Note>
+The updated-run flow is gated by an appraisal feature flag. When it is off, all four child-run endpoints (create, mutate, read, delete) throw `ForbiddenException`.
+</Note>
+
+### PDF, photos, and page images
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/appraisals/:id/pdf` | Stream the source PDF inline (200MB ceiling; PDF-vs-XML invariant; sanitized `Content-Disposition`) |
+| `GET /api/v1/portal/appraisals/:id/pdf-url` | Signed URL |
+| `GET /api/v1/portal/appraisals/:id/photos` | Photo list (`Cache-Control: no-store`) |
+| `GET /api/v1/portal/appraisals/:id/pages/:pageNumber/image` | Rendered page image (`ParseIntPipe`) |
+| `GET /api/v1/portal/appraisals/:id/photos/:photoId/image` | Photo image |
+
+### Corrections, review, rule overrides, key-field reviews
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/appraisals/:id/corrections` | client_admin, client_user | List manual corrections |
+| `POST /api/v1/portal/appraisals/:id/corrections` | client_admin, client_user | `CreateCorrectionDto { fieldName, ... }` (HTTP 201). Scalar-field + schema + date validation; strictly-increasing microsecond `createdAt` |
+| `DELETE /api/v1/portal/appraisals/:id/corrections/:correctionId` | client_admin | Revert a correction (resolves the chain to the latest remaining) |
+| `POST /api/v1/portal/appraisals/:id/mark-reviewed` | client_admin, client_user | Mark reviewed (HTTP 200) |
+| `POST /api/v1/portal/appraisals/:id/revert-approval` | client_admin | Revert approval (HTTP 200) |
+| `GET /api/v1/portal/appraisals/:id/audit-events` | read+ | Run audit-event history |
+| `GET /api/v1/portal/appraisals/:id/rule-overrides` | read+ | Active overrides |
+| `POST /api/v1/portal/appraisals/:id/rule-overrides` | client_admin | `CreateRuleOverrideDto` (HTTP 201). Layered override history with `xmin` tiebreak |
+| `DELETE /api/v1/portal/appraisals/:id/rule-overrides/:ruleCode` | client_admin | Revert override (HTTP 204) |
+| `GET /api/v1/portal/appraisals/:id/key-field-reviews` | read+ | Key-field reviews |
+| `PATCH /api/v1/portal/appraisals/:id/key-field-reviews/:fieldId` | client_admin, client_user | Patch a review |
+
+### Processing and the orphan sweep
+
+`appraisal.processor.ts` drives the BullMQ extraction queue. After the first extraction pass it runs ATTOM enrichment, then re-runs the pipeline with `enrichmentData`. Because delivery is at-least-once, the processor claims work with a CAS transition `pending → running`.
+
+The only appraisal orphan reaper is `sweepOrphanedRuns` in the processor. It runs at boot and on `APPRAISAL_ORPHAN_SWEEP_INTERVAL_MS`, keys off `started_at`, consults Bull live jobs before reaping, and emits an `appraisal.orphan_runs_reaped` event.
+
+<Note>
+The old `lib/appraisal-pipeline/stale-cleanup.ts` reaper was deleted in LOA-1052. `sweepOrphanedRuns` is the single source of truth for reaping stuck appraisal runs.
+</Note>
+
+Supporting services: `appraisal-findings.service.ts`, `image-extraction.service.ts`, `photo-classifier.service.ts`, `reducto-figure.service.ts`, `appraisal-pdf-size.ts`.
+
+## portal-appraisal-ssr
+
+Controller: `portal-appraisal-ssr/portal-appraisal-ssr.controller.ts` at `api/v1/portal/appraisals`. SSR (Submission Summary Report) attachments are subject/sales support documents attached to a run. It has its own `appraisal-ssr.processor.ts`.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `POST /api/v1/portal/appraisals/:id/ssr` | client_admin, client_user | `AttachSsrDto { s3Keys }` (HTTP 201) |
+| `GET /api/v1/portal/appraisals/:id/ssr` | read+ | List SSRs for the run |
+| `DELETE /api/v1/portal/appraisals/:id/ssr/:ssrId` | client_admin | Detach (HTTP 204) |
+
+## portal-appraisal-comments
+
+Controller: `portal-appraisal-comments/portal-appraisal-comments.controller.ts` at `api/v1/portal/appraisal/:runId`. Class throttle 10/min. This module produces an AI comment summary and a chat experience over the appraisal's comments.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/appraisal/:runId/comment-summary` | AI-generated comment summary; returns a `ConflictException` payload (with `status`) if not yet ready |
+| `POST /api/v1/portal/appraisal/:runId/comment-chat/turn` | Create a chat turn (free-form `unknown` body); returns the turn id |
+| `GET /api/v1/portal/appraisal/:runId/comment-chat/turn/:turnId/stream` | SSE stream (`text/event-stream`) |
+
+The stream sends a 15-second heartbeat (`COMMENT_STREAM_HEARTBEAT_INTERVAL_MS`), aborts via `AbortController` on client close, and terminates with `data: [DONE]`. Pre-stream errors return JSON; a `403` ends silently. Supporting modules: `budget-guard.service.ts`, `citation-validator.ts`, `context-window-guard.ts`, `keyword-extractor.ts`, `risk-terms.ts`, `comment-chat.prompts.ts`, `comment-summary.prompts.ts`, `comment-field-registry.ts`.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Rules authoring" icon="scale" href="/portal/api-rules-authoring">
+    Appraisal rule sets, NL parse, and split drafts.
+  </Card>
+  <Card title="Appraisal evaluation agent" icon="house" href="/agents/appraisal-evaluation">
+    The pipeline agent behind audit-driven appraisal runs.
+  </Card>
+  <Card title="Credit and income runs" icon="credit-card" href="/portal/api-credit-income">
+    Sibling agent-run modules.
+  </Card>
+  <Card title="Per-lender configuration" icon="sliders-horizontal" href="/portal/api-config">
+    Appraiser deny lists and key-field config.
+  </Card>
+</Columns>

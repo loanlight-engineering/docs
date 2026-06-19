@@ -1,0 +1,205 @@
+---
+title: Integration guide
+description: End-to-end — from creating a loan to reading results.
+icon: route
+---
+
+This guide walks a partner integration through one full audit, from registering a loan to reading the findings, with runnable curl examples. For field-level detail, follow the links to the [Loans API](/partner-api/loans), [Audits API](/partner-api/audits), and [Results and access URLs](/partner-api/results-and-access-urls) reference pages.
+
+## Before you start
+
+- Obtain a WorkOS API key (prefix `sk_`). Send it as the `x-api-key` header on every request. See [authentication](/partner-api/authentication).
+- The base path is `/api/v1/partner`. Examples below use `https://api.loanlight.example` as the host placeholder.
+- All calls are subject to the [100 req/min per-lender rate limit](/partner-api/rate-limits-and-errors). Watch the `X-RateLimit-Remaining` header.
+
+<Note>
+The base64 payloads below are abbreviated. Encode the raw MISMO 3.4 XML and each PDF as base64 before placing them in the JSON body.
+</Note>
+
+## Step 1 — Create a loan
+
+Register the loan with its MISMO XML and supporting documents. This returns `202` and starts asynchronous classification + indexing; it does not run an audit.
+
+```bash
+curl -sS -X POST https://api.loanlight.example/api/v1/partner/loans \
+  -H "x-api-key: sk_live_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "loanNumber": "LN-2026-1001",
+    "mismoXml": "PD94bWwgdmVyc2lvbj0i...",
+    "metadata": {
+      "estimatedClosingDate": "2026-07-15",
+      "loanType": "bank_statement_12mo",
+      "loanProgramName": "Bank Statement - 12 Month"
+    },
+    "documents": [
+      { "fileName": "paystub.pdf", "content": "JVBERi0xLjQK...", "mimeType": "application/pdf" },
+      { "fileName": "bank_statement.pdf", "content": "JVBERi0xLjQK..." }
+    ]
+  }'
+```
+
+Response (`202`):
+
+```json
+{
+  "loanId": "a1b2c3d4-0000-4000-8000-000000000001",
+  "status": "processing",
+  "pipelineId": "llama-pipeline-id",
+  "documents": [
+    { "documentId": "uuid", "fileName": "paystub.pdf", "status": "new" },
+    { "documentId": "uuid", "fileName": "bank_statement.pdf", "status": "new" }
+  ],
+  "createdAt": "2026-06-19T18:00:00.000Z"
+}
+```
+
+Capture `loanId`. The `status` is always `"processing"` at this point — the loan is not yet audit-ready.
+
+## Step 2 — Poll until the loan is ready
+
+Poll the lightweight status endpoint until `status` is `ready_for_audit` (or `ready`) and `classification.status` is no longer `running`.
+
+```bash
+curl -sS https://api.loanlight.example/api/v1/partner/loans/a1b2c3d4-0000-4000-8000-000000000001/status \
+  -H "x-api-key: sk_live_xxx"
+```
+
+```json
+{
+  "status": "ready_for_audit",
+  "pipelineSyncStatus": "success",
+  "classification": {
+    "status": "complete",
+    "triggeredBy": "partner_create_loan",
+    "startedAt": "2026-06-19T18:00:05.000Z",
+    "completedAt": "2026-06-19T18:01:10.000Z"
+  }
+}
+```
+
+<Tip>
+Poll on a backoff (for example every 5–10 seconds). Triggering an audit too early returns `409` ("not ready" or "classification still in progress").
+</Tip>
+
+## Step 3 — Trigger an audit
+
+Create an audit run for the ready loan. Omit `agents` to run all available agents, or pass an allow-list.
+
+```bash
+curl -sS -X POST https://api.loanlight.example/api/v1/partner/audits \
+  -H "x-api-key: sk_live_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "loanId": "a1b2c3d4-0000-4000-8000-000000000001",
+    "agents": ["piiValidation", "documentHealth", "propertyData", "creditEvaluation"]
+  }'
+```
+
+Response (`202`):
+
+```json
+{
+  "auditId": "b2c3d4e5-0000-4000-8000-000000000002",
+  "loanId": "a1b2c3d4-0000-4000-8000-000000000001",
+  "status": "pending",
+  "agents": ["piiValidation", "documentHealth", "propertyData", "creditEvaluation"],
+  "startedAt": "2026-06-19T18:05:00.000Z",
+  "progressUrl": "/api/v1/partner/audits/b2c3d4e5-0000-4000-8000-000000000002/progress"
+}
+```
+
+Capture `auditId`.
+
+<Warning>
+Ignore `progressUrl` — there is no `/progress` endpoint. Poll `GET /audits/:auditId` (next step). If the `PARTNER_VIA_ROUTER` flag is enabled for your organization and none of the requested agents are entitled, this call returns `403` — a standard `ForbiddenException` body (`statusCode`, `message`, `error`) with the denied agent names listed inline in `message`, not a `denied[]` array. The `denied[]` array appears only on a `202` when the router runs with some agents entitled. See [Audits API](/partner-api/audits).
+</Warning>
+
+## Step 4 — Poll the audit
+
+Poll until `status` is `complete`.
+
+```bash
+curl -sS https://api.loanlight.example/api/v1/partner/audits/b2c3d4e5-0000-4000-8000-000000000002 \
+  -H "x-api-key: sk_live_xxx"
+```
+
+```json
+{
+  "auditId": "b2c3d4e5-0000-4000-8000-000000000002",
+  "loanId": "a1b2c3d4-0000-4000-8000-000000000001",
+  "status": "complete",
+  "startedAt": "2026-06-19T18:05:00.000Z",
+  "completedAt": "2026-06-19T18:08:30.000Z",
+  "runNumber": 1
+}
+```
+
+## Step 5 — Read the results
+
+Fetch the structured findings.
+
+```bash
+curl -sS https://api.loanlight.example/api/v1/partner/audits/b2c3d4e5-0000-4000-8000-000000000002/results \
+  -H "x-api-key: sk_live_xxx"
+```
+
+```json
+{
+  "auditId": "b2c3d4e5-0000-4000-8000-000000000002",
+  "loanId": "a1b2c3d4-0000-4000-8000-000000000001",
+  "status": "complete",
+  "summary": { "totalIssues": 4, "criticalIssues": 1, "warnings": 3 },
+  "agents": {
+    "piiValidation": { "status": "completed", "results": [] },
+    "documentHealth": { "status": "completed", "results": [] },
+    "propertyData": { "status": "completed", "results": [], "properties": [] },
+    "creditEvaluations": []
+  }
+}
+```
+
+Credit data is the `agents.creditEvaluations` array — the [results page](/partner-api/results-and-access-urls) documents every field and the deliberately omitted ones.
+
+To inspect failures (agent errors do not fail the run), call `GET /audits/:auditId/errors`. For the document classification breakdown, call `GET /audits/:auditId/classifications`.
+
+## Step 6 — (Optional) Generate a portal viewer URL
+
+To hand a human a rendered view of the results, mint a short-lived, single-use portal link.
+
+```bash
+curl -sS -X POST https://api.loanlight.example/api/v1/partner/audits/b2c3d4e5-0000-4000-8000-000000000002/results/access-url \
+  -H "x-api-key: sk_live_xxx"
+```
+
+```json
+{
+  "url": "https://portal.loanlight.example/results/audits/b2c3d4e5-...?token=eyJhbGci...",
+  "expiresAt": "2026-06-19T19:08:30.000Z"
+}
+```
+
+The link is consumed once on open and expires after `PARTNER_RESULTS_TOKEN_TTL_MINUTES` (default 60). See [Results and access URLs](/partner-api/results-and-access-urls).
+
+## Adding documents to an existing loan
+
+If a borrower supplies more documents after the loan is created, upload them and re-poll readiness before re-auditing:
+
+```bash
+curl -sS -X POST https://api.loanlight.example/api/v1/partner/loans/a1b2c3d4-0000-4000-8000-000000000001/documents \
+  -H "x-api-key: sk_live_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{ "documents": [ { "fileName": "w2.pdf", "content": "JVBERi0xLjQK..." } ] }'
+```
+
+This resets the loan to `processing` and re-runs classification, so return to Step 2 before triggering the next audit.
+
+## Recap
+
+<Steps>
+  <Step title="Create the loan">[`POST /loans`](/partner-api/loans) → capture `loanId`.</Step>
+  <Step title="Wait for ready">Poll [`GET /loans/:id/status`](/partner-api/loans).</Step>
+  <Step title="Trigger the audit">[`POST /audits`](/partner-api/audits) → capture `auditId`.</Step>
+  <Step title="Wait for complete">Poll [`GET /audits/:id`](/partner-api/audits).</Step>
+  <Step title="Read results">[`GET /audits/:id/results`](/partner-api/results-and-access-urls) or mint an access URL.</Step>
+</Steps>

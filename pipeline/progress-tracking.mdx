@@ -1,0 +1,104 @@
+---
+title: Progress tracking
+description: SSE, polling, and EventBridge events that report audit progress.
+icon: activity
+---
+
+The pipeline reports progress through a single `emitEvent` call that dual-publishes: to an in-process stream for SSE and polling, and to EventBridge for cross-service consumers such as Encompass. This page covers the event catalog and the three delivery surfaces.
+
+## ProgressEventsService
+
+`ProgressEventsService` (`events/progress-events.service.ts`) holds an in-process RxJS `Subject<ProgressEvent>` (`stream`) plus a `recentEvents` ring buffer (max 50) for polling.
+
+`emitEvent(type, message, additionalData)` dual-publishes:
+
+- To EventBridge via `EventPublishingService.publishProgressEvent` (errors swallowed).
+- To the local `stream` for SSE and polling.
+
+### Event catalog
+
+`EVENTS` constants:
+
+<Tabs>
+  <Tab title="Workflow">
+    `WORKFLOW.{START, COMPLETE, ERROR}` → `workflow:start | workflow:complete | workflow:error`.
+  </Tab>
+  <Tab title="Document processing">
+    `DOCUMENT_PROCESSING.{INITIALIZATION, DOWNLOADING, UPLOADING_TO_AI, PIPELINE_MONITORING, DOCUMENTS_READY}` → `document_processing:...`.
+  </Tab>
+  <Tab title="Agent">
+    `AGENT.{PII_VALIDATION, DOCUMENT_EXPIRATION, DOCUMENT_HEALTH, CREDIT_EVALUATION, LIABILITIES_ASSESSMENT}.{START, ANALYZING, COMPLETE}` and `AGENT.APPRAISAL_REFINE.ITERATION` → `agent:...`.
+  </Tab>
+</Tabs>
+
+`ProgressEvent.data` fields: `loanId, correlationId, documentId, auditRunId, runId, pipelineId, requestorId, environment, message, langSmithTraceUrl, iteration, node, progress, status, isShadowAudit, shadowOfTransactionId, error, errorCode, errorType, errorStep, errorTimestamp`.
+
+### Progress integers (EPC path)
+
+The orchestrator emits an incrementing `progress` integer at each step:
+
+| Progress | Step |
+|---|---|
+| 5 | `WORKFLOW.START` |
+| 10 | downloading files |
+| 15 | creating loan |
+| 18 | classifying documents |
+| 20 | preparing pipeline |
+| 25 | uploading to AI |
+| 50 | documents ready |
+
+Agent-level granular progress is emitted from within the LangGraph agents.
+
+## SSE and polling — SseController
+
+`SseController` (`events/sse.controller.ts`, base `api/v1`) exposes two endpoints. Both require `loanId` for tenant isolation.
+
+### GET /api/v1/events
+
+<ParamField query="loanId" type="string" required>
+The loan to stream events for. Missing `loanId` returns `400`.
+</ParamField>
+
+An `@Sse` endpoint that streams `MessageEvent { type: event, data }` filtered by `loanId`. Events without a matching `loanId` are filtered out. The legacy LOS path hands clients `sseEndpoint: /api/v1/events?loanId=${loanId}`.
+
+### POST /api/v1/events/poll
+
+<ParamField body="loanId" type="string" required>
+The loan to poll events for. Missing `loanId` returns `400`.
+</ParamField>
+
+<ParamField body="limit" type="number" default="10">
+Maximum number of recent events to return.
+</ParamField>
+
+Returns `{ success, events, count }` from the recent-events ring buffer. This serves legacy clients that cannot hold an SSE connection.
+
+## EventBridge — EventPublishingService
+
+`EventPublishingService` (`events/event-publishing.service.ts`) publishes cross-service events.
+
+### Progress events (loanlight.aus)
+
+`publishProgressEvent(eventType, correlationId?, auditRunId?, environment?, additionalData)` emits an `EventBridgeEvent`:
+
+```json
+{
+  "Source": "loanlight.aus",
+  "DetailType": "<eventType>",
+  "Detail": { "event": "...", "data": { }, "timestamp": "..." }
+}
+```
+
+Encompass and the integrations service consume these to drive the spinner and correlate audit status.
+
+### Documents-classified events
+
+`publishDocumentsClassified(detail, env?)` emits with `DetailType = DOCUMENTS_CLASSIFIED_DETAIL_TYPE` (a shared-types const), where `Detail` is the raw event. It is fired from `PreAuditStageService.fireDocumentsClassified` via `DocumentsClassifiedEmitter.emitForLoan` (best-effort, never blocks the audit) so integrations can carve and push classified documents back to Encompass.
+
+### Local routing
+
+`dispatch(...)` routes by environment: deployed environments hit real EventBridge (`publishEventToEventBridge`); local and LocalStack send directly to SQS via `SQS_HANDLE_AUS_UPDATES_QUEUE_URL` or `SQS_AUS_UPDATE_QUEUE_URL`. `getEventEnvironment()` returns `DEPLOYED_ENVIRONMENT || "local"`.
+
+<Info>
+The partner audit create response also returns a `progressUrl` (`/api/v1/partner/audits/:auditId/progress`) for partners that prefer to poll the partner API rather than subscribe to SSE. See [Triggering an audit](/pipeline/triggers#partner-api-path).
+</Info>

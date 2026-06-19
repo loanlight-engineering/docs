@@ -1,0 +1,97 @@
+---
+title: Run lifecycle and deduplication
+description: audit_runs statuses, dedup, stale-run reset, and run numbering.
+icon: refresh-cw
+---
+
+An `audit_runs` row tracks the lifecycle of a single audit. This page covers its statuses, the guards that protect terminal states, the deduplication mechanisms, and how run numbers are assigned under concurrency. The schema lives in `database/schema/audit-runs.ts`; see also [Core tables](/data-model/core-tables).
+
+## Status lifecycle
+
+`AuditRunStatus = "pending" | "processing" | "complete" | "failed"`.
+
+```text
+pending ──▶ processing ──▶ complete   (terminal)
+                       └─▶ failed      (terminal)
+```
+
+The column defaults to `pending` at insert, but creation code inserts `processing` directly. Transitions are guarded:
+
+| Method | Effect | Guard |
+|---|---|---|
+| `completeAuditRun(id)` | sets `completed_at`, `status="complete"` | `WHERE id = ? AND status IN ('pending','processing')` |
+| `failAuditRun(id, step, msg)` | sets `completed_at`, `status="failed"` | `WHERE status IN ('pending','processing')` (idempotent) |
+| `markAuditAsInterrupted(id)` | unconditionally sets `failed` | server-restart cleanup |
+| `findIncompleteAudits(threshold=30)` | reads rows with `completed_at IS NULL AND started_at < threshold` | stuck-audit detection |
+
+<Note>
+`completeAuditRun` is guarded so a late success cannot overwrite a `failed` terminal state. This prevents a phantom success when an agent times out, the run is failed, and the agent then resolves late.
+</Note>
+
+`AuditProcessingStep` (reported in failure events) runs through: `initializing, downloading_files, creating_loan, creating_audit_run, classifying_documents, preparing_pipeline, uploading_documents, waiting_for_pipeline, executing_agents, completing_audit`.
+
+## Audit-run deduplication
+
+On the EPC path, the `correlationId` is the `audit_runs.id`, which makes the row itself the dedup key. `AuditService.createAuditRun` decides what to do when a row already exists:
+
+<AccordionGroup>
+  <Accordion title="status is complete or failed">
+    Returns `{ created: false, existingStatus }`. The request is rejected as a duplicate; the orchestrator emits `WORKFLOW.ERROR` with `errorCode: "DUPLICATE_AUDIT"` and returns early so Encompass resets its spinner.
+  </Accordion>
+  <Accordion title="status is processing, age < 55 min">
+    Returns `{ created: false }`. Another task is actively working the run.
+  </Accordion>
+  <Accordion title="status is processing, age >= 55 min (stale)">
+    Treated as orphaned. Atomically resets `started_at`, `status="processing"`, `completed_at=null`, and `mismo_xml_hash` (guarded `WHERE status='processing' AND completed_at IS NULL`) and returns `{ created: true }` for retry.
+  </Accordion>
+  <Accordion title="no existing row">
+    Calls `createAuditRunImplementation(correlationId, loanId, lenderId, "epc", {...})`.
+  </Accordion>
+</AccordionGroup>
+
+<Info>
+The 55-minute stale threshold (`STALE_PROCESSING_THRESHOLD_MINUTES`) is intentionally below the SQS 60-minute visibility timeout, so an orphaned run is reset before the message redelivers.
+</Info>
+
+There is also an in-memory `processingAudits = new Set<string>()` keyed by `correlationId`, but it is **warn-only** — it logs "Duplicate concurrent execution detected". The real duplicate guard is the DB unique constraint surfaced by `created === false`. The `finally` block deletes the key.
+
+## Run numbering and races
+
+`createAuditRunImplementation` assigns `run_number` per loan. `getNextRunNumber` is an unlocked `SELECT max(run_number)`, so it races. The unique constraint `audit_runs_loan_run_key` on `(loan_id, run_number)` (where `loan_id IS NOT NULL`) catches collisions:
+
+- On a `23505` unique violation matching `audit_runs_loan_run_key`, it retries up to `MAX_RUN_NUMBER_RETRIES = 3`, re-reading the max each time.
+- A primary-key race (same `id`) matched by `error.message.includes(auditRunId)` returns `{ created: false, existingStatus: "processing" }`.
+
+Loanless runs have a null `loan_id` and null `run_number`; the CHECK `audit_runs_run_number_requires_loan` enforces `loan_id IS NULL OR run_number IS NOT NULL`.
+
+## MISMO XML hash
+
+`computeMismoXmlHash(mismoXml)` (`common/utils/hash.util.ts`) is stored on `audit_runs.mismo_xml_hash`. It drives URLA-extraction reuse: `UrlaPreprocessingService.checkForCachedUrlaExtraction` finds a prior completed run for the same loan with a byte-identical hash and reuses its `urla_extraction_results`, avoiding re-extraction on reprocess. The partner path sets the hash post-creation via `updateMismoXmlHash`. See [Pre-audit stage](/pipeline/pre-audit-stage#mismo-hash-caching).
+
+## Per-document change detection
+
+`classifySplitPersistence.shouldReclassify(context, registrationResult, allClassifyDocs, forceReclassify)` decides which documents need (re)classification:
+
+- `forceReclassify` ⇒ classify all.
+- Otherwise it selects distinct `loan_document_id`s already classified (joined through `classify_split_runs` and `audit_runs`, `is_dry_run = false`, any prior status).
+- Classifies `newDocuments ∪ updatedDocuments` (from `DocumentRegistrationResult`, which compares source identity plus content hash) ∪ unchanged docs with no classification yet.
+- If nothing needs classification, it records a skipped run and returns `{ needsClassification: false }`.
+
+`hasInProgressRunsForLoan(loanId)` (pending/running, non-dry-run) gates partner audit creation with a `409`.
+
+## Legacy LOS change interceptor
+
+On the legacy path, `POST /api/v1/los/aus/webhook` uses `EncompassFieldChangeInterceptor` to decide whether the webhook represents a meaningful change before triggering an audit. The interceptor gates on the `CX.LLAUS` field so that unrelated Encompass field edits do not spawn audits. See [Triggering an audit](/pipeline/triggers#legacy-los-pull-path).
+
+{/* TODO: verify the exact CX.LLAUS field semantics in EncompassFieldChangeInterceptor */}
+
+## Creation entry points
+
+| Method | Path | `trigger_source` | Notes |
+|---|---|---|---|
+| `createAuditRun(correlationId, requestorId, loanId, mismoXmlHash?, shadowOptions?)` | EPC | `epc` | lender resolved from the loan |
+| `createAuditRunForPartner(lenderId, loanId, {agents?, mismoXmlHash?})` | Partner | `partner` | id = uuidv4 |
+| `createAuditRunDirect(auditRunId, loanId\|null, lenderId, triggerSource, {...})` | generic | any | |
+| `AuditRunFactory.create({...})` | generic | any | `epc` requires `correlationId` + `loanId` and delegates to `createAuditRun` |
+
+`CreateAuditRunResult = { auditRunId, created, runNumber: number|null, existingStatus?, startedAt? }`. `AuditTriggerSource = "epc" | "los" | "partner" | "portal" | "admin_rerun" | "shadow"`.

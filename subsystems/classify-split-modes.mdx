@@ -1,0 +1,127 @@
+---
+title: Classification split modes
+description: per_segment, majority_bucket, and two_pass modes.
+icon: git-branch
+---
+
+The per-lender column `lenders.classification_split_mode` (`text NOT NULL DEFAULT 'per_segment'`,
+CHECK ∈ `per_segment | majority_bucket | two_pass`) selects how [classify-split](/subsystems/classify-split)
+draws segment boundaries. `ClassificationModeService` is the only reader of that column; the mode the
+run actually used is copied to `classify_split_runs.classification_mode` for provenance.
+
+<Info>
+The mode seam is **Phase 1 only**. Phase 2 (classify) is uniform across all three modes — there is no
+per-mode branching once segments are staged. The historical `majority_bucket` Phase-2 refinements
+(near-tie union expansion, runner-up reclassify, filename-hint tiebreaker) were removed; do not
+reintroduce a `classifyMajoritySegment` branch.
+</Info>
+
+## Mode resolution precedence
+
+The mode is resolved once at Phase 1 (`resolveMode`) and pinned as `effectiveMode`:
+
+<Steps>
+  <Step title="Explicit override">
+    `options.mode` (the octy dry-run override) wins outright.
+  </Step>
+  <Step title="By lender">
+    A supplied `options.lenderId` key routes to `ClassificationModeService.resolveForLender` (the
+    income fast-path — used even when `lenderId` is `null`).
+  </Step>
+  <Step title="By loan">
+    Otherwise `resolveForLoan(loanId)` joins loan → lender. Resolution never throws; on any failure it
+    degrades to `per_segment` (`DEFAULT_MODE`).
+  </Step>
+</Steps>
+
+## per_segment (legacy identity)
+
+Runs the normal LlamaSplit job and keeps every returned segment exactly as-is (byte-identical to
+pre-LOA-905 behavior). One row per segment, `decision_path = per_segment`. Phase 2 runs with
+`documentLevel = false`, which **auto-flips** the bucket on a high-confidence subtype disagreement
+(legacy cross-bucket correction — see below).
+
+## majority_bucket (collapse unless a real bundle)
+
+Runs the split job, then `collapseToMajorityBucket(raw, totalPages)` computes per-bucket page
+**coverage** (pages per bucket ÷ total pages; summed as integer pages first, divided once, to avoid
+float drift). Thresholds: `dominant_coverage = 0.75` (collapse gate) and `minority_floor = 0.25`
+(bundle gate). There is no page-size gate. A first-match-wins state machine decides the outcome:
+
+| Stage | Condition | Action | `decision_path` | Review reason |
+|---|---|---|---|---|
+| guard | `raw.length ≤ 1` | keep as-is | `single_segment` | — |
+| guard | `totalPages ≤ 0` | degrade | `page_count_failed` | `page_count_failed` |
+| 2a | dominant bucket ≥ 75% | collapse to one whole-doc segment | `majority_collapse` | — |
+| 2b | ≥ 2 buckets each ≥ 25% | keep raw N segments | `majority_bundle` | `bundled_upload_detected` |
+| 2c tie | top-two coverages equal | keep raw N | `majority_tie` | `dominant_tie` |
+| 2c weak | no dominant, no 2nd ≥ 25% | keep raw N | `majority_weak_dominant` | `low_dominant_coverage` |
+
+Stage 2a is checked before 2b. On collapse, the emitted segment confidence is **discretized** from
+coverage via `getConfidenceLevel` to one of `{0.85, 0.6, 0}` so Phase 2's neighbor-expansion gate
+stays sound; the raw coverage floats live only in the decision blob.
+
+## two_pass (credit-saving, no split job)
+
+`resolveTwoPassSplit` never starts a LlamaSplit job — it saves the split credit by reusing the
+classify primitive:
+
+<Steps>
+  <Step title="Upload">
+    `uploadWholeDocument` uploads the PDF for classify (purpose `classify`).
+  </Step>
+  <Step title="Pass 1 is the split">
+    `discoverBucketByCategory` runs one whole-document `classify(fileId, categoryRules, [])` where
+    `categoryRules` has one rule per active split **category** (`type = categoryCode`,
+    `description = llamaSplitDescription` — not `llamaSplitName`). The winning `type` is the bucket.
+  </Step>
+  <Step title="Emit one segment">
+    Emit one whole-document segment over `[1..totalPages]` with that bucket, carrying the discretized
+    pass-1 confidence as the **split** confidence so Phase 2 hedges low-confidence buckets exactly
+    like `per_segment`.
+  </Step>
+  <Step title="Pass 2 is the uniform classify stage">
+    Phase 2 runs with `documentLevel = true`.
+  </Step>
+</Steps>
+
+<Warning>
+**Pass 1 has no confidence gate.** It assigns whatever bucket it finds at any confidence. The
+`two_pass_unresolved` path fires **only** when pass-1 returns `null` (failed/empty call) or an
+unmapped `type` — never on low confidence. This is a common misread.
+</Warning>
+
+| Outcome | When | `decision_path` |
+|---|---|---|
+| resolved | pass-1 returned a mapped bucket (any confidence) | `two_pass_resolved` |
+| unresolved | pass-1 `null` or unmapped `type` | `two_pass_unresolved` (one `UNKNOWN` segment + `two_pass_bucket_unresolved` review) |
+| page-count-failed | unreadable PDF; pass-1 never runs | `page_count_failed` |
+
+<Note>
+Page-ceiling caveat: pass-1 is a single whole-document classify with empty `target_pages`. If
+LlamaCloud caps whole-document classify on very long documents, pass-1 would need to be batched and
+vote-merged. It currently ships as one call (covered by a mocked 40-page test).
+</Note>
+
+## How Phase 2 uses the mode flag
+
+Phase 2 itself does not branch on the mode name, but it does consume one derived flag, `documentLevel`
+(`true` for `majority_bucket` and `two_pass`, `false` for `per_segment`), inside `resolveBucket`:
+
+- The chosen subtype belongs to a `correctBucket` (`classifyRules: subtype → splitCategoryCode`).
+- If `correctBucket ≠ originalBucket` and confidence ≥ `0.85`:
+  - `documentLevel = false` (`per_segment`) → **auto-flip** to `correctBucket`, recording
+    `originalBucket`.
+  - `documentLevel = true` (`majority_bucket` / `two_pass`) → **do not flip**; keep `originalBucket`,
+    set `suggestedBucket = correctBucket`, attach review reason `classify_suggested_different_bucket`.
+
+`requiresReview` trips on confidence below `0.85`, an auto-flip, or a suggestion. Thresholds:
+`AUTO_ACCEPT_THRESHOLD = 0.85`, `FLAG_REVIEW_THRESHOLD = 0.6`.
+
+## Degraded paths (never zero rows)
+
+Every non-`per_segment` mode emits exactly one `UNKNOWN` segment via `buildDegradedSegment` rather
+than producing zero rows. The reasons double as their own `decision_path`: `split_failed`
+(upload/split threw), `zero_segments` (split returned nothing), and `page_count_failed`
+(corrupt/encrypted PDF). `per_segment` keeps its historical behavior on a split throw: it bumps the
+fail counter and emits no row.

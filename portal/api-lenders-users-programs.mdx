@@ -1,0 +1,195 @@
+---
+title: "Portal API: lenders, users, and programs"
+description: Lender, user, and loan-program management endpoints.
+icon: building
+---
+
+These modules manage tenants (lenders), their users, and their loan programs. All endpoints are guarded by [`PortalAuthGuard`](/portal/api-auth) and scope tenant data by `ctx.effectiveLenderId`. The WorkOS webhook (`api/v1/workos/webhooks`) is the one exception — it is not auth-guarded and instead verifies a WorkOS signature.
+
+<Info>
+Rule-override CRUD on `portal-lenders` was removed in LOA-820 T3. The `lender_rule_overrides` table is being dropped, and the only honored include on `GET /lenders/:id` is `usage`. The appraisal rule set is now the single source of truth for rule customization — see [rules authoring](/portal/api-rules-authoring).
+</Info>
+
+## portal-lenders
+
+Controller: `portal-lenders/portal-lenders.controller.ts` at `api/v1/portal/lenders`. Class-level `@UseGuards(PortalAuthGuard, PortalThrottlerGuard)`, default `@Roles("super_admin")`, throttle 100/min. Many GET/PATCH methods override roles to also allow tenant roles so non-admin users can render read-only views.
+
+Two access helpers gate sensitive paths:
+
+- `requireInternal(ctx)` — super-admin / internal only.
+- `requireLenderAccess(ctx, lenderId)` — internal, or own-tenant; throws `403` on a foreign lender.
+
+### Lender CRUD
+
+#### GET /api/v1/portal/lenders
+
+List lenders. Query `ListLendersQueryDto`; ordered `asc(name), asc(id)`. Role: `super_admin`.
+
+#### POST /api/v1/portal/lenders
+
+Create a lender. Role: `super_admin`.
+
+<ParamField body="CreateLenderDto" type="object" required>
+Includes an `InitialAdminDto` for the first admin user. The initial admin role excludes `read_only`.
+</ParamField>
+
+#### GET /api/v1/portal/lenders/:id
+
+Get a lender. Role: `super_admin`. `?include=usage` is the only honored include.
+
+#### PATCH /api/v1/portal/lenders/:id
+
+Update a lender (`UpdateLenderDto`). Role: `super_admin`.
+
+#### POST /api/v1/portal/lenders/:id/logo
+
+Multipart logo upload (`FileInterceptor`). Filenames are sanitized to `[a-zA-Z0-9._-]`. Role: `super_admin`.
+
+### Feature flags and API keys
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/lenders/:id/feature-flags` | tenant roles + super_admin | Read flags |
+| `PUT /api/v1/portal/lenders/:id/feature-flags` | super_admin | Update (`UpdateFeatureFlagsDto`) |
+| `GET /api/v1/portal/lenders/:id/api-keys` | requireInternal | List partner API keys |
+| `POST /api/v1/portal/lenders/:id/api-keys` | requireInternal | Generate (`GenerateApiKeyDto { name }`) |
+| `DELETE /api/v1/portal/lenders/:id/api-keys/:keyId` | requireInternal | Revoke key |
+| `GET /api/v1/portal/lenders/:id/usage` | requireInternal | Usage metrics |
+
+See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements) for the flag catalog.
+
+### Agency adoptions (Fannie/Freddie rule packs)
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/lenders/:lenderId/agency-adoptions` | tenant + super_admin | Lazily materializes via `helpers/ensure-lender-agency-adoptions.ts` (idempotent `ON CONFLICT DO NOTHING`) |
+| `POST /api/v1/portal/lenders/:lenderId/agency-adoptions` | requireInternal | `CreateAgencyAdoptionDto { agencySource: fannie_mae \| freddie_mac, isEnabled? }`; pg `23505` → `ConflictException` |
+| `PATCH /api/v1/portal/lenders/:lenderId/agency-adoptions/:agencySource` | client_admin, super_admin | `UpdateAgencyAdoptionDto { isEnabled }` |
+
+The `PATCH` upserts while preserving the first `adoptedBy` (write-once) and runs inside a `db.transaction` that also writes a `portal_audit_log` row (`agency_adoption.enabled` / `.disabled`). Valid sources are `fannie_mae` and `freddie_mac`.
+
+### Lender-scoped admin mirror of rule sets
+
+These let a super-admin or read-only viewer inspect a specific lender's rules without deriving the tenant from the session. The lender is passed explicitly in the path.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/lenders/:lenderId/credit-rule-sets` | read+ | List credit rule sets |
+| `GET /api/v1/portal/lenders/:lenderId/credit-rule-sets/:ruleSetId` | read+ | Get one (404 on wrong tenant) |
+| `GET /api/v1/portal/lenders/:lenderId/rule-sets` | read+ | List appraisal rule sets |
+| `GET /api/v1/portal/lenders/:lenderId/rule-sets/:ruleSetId` | read+ | Get one |
+| `PATCH /api/v1/portal/lenders/:lenderId/rule-sets/:ruleSetId/rules/:ruleId` | client_admin, super_admin | Update an appraisal rule (`UpdateRuleDto`) |
+| `PATCH /api/v1/portal/lenders/:lenderId/rule-sets/:ruleSetId/rules` | client_admin, super_admin | Bulk update (`BulkUpdateRulesDto`) |
+| `POST /api/v1/portal/lenders/:lenderId/rule-sets/:ruleSetId/rules` | client_admin, super_admin | Add custom rule (`AddCustomRuleDto`) |
+| `DELETE /api/v1/portal/lenders/:lenderId/rule-sets/:ruleSetId/rules/:ruleId` | client_admin, super_admin | Delete rule (HTTP 200) |
+
+### Loan programs (lender-scoped)
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/lenders/:id/loan-programs` | read+ | Paginated (`?limit` cap 100 default 50, `?page`) |
+| `POST /api/v1/portal/lenders/:id/loan-programs` | client_admin, super_admin | `CreateLoanProgramDto` |
+| `PUT /api/v1/portal/lenders/:id/loan-programs/:programId` | client_admin, super_admin | `UpdateLoanProgramDto` |
+| `DELETE /api/v1/portal/lenders/:id/loan-programs/:programId` | client_admin, super_admin | Returns `orphanedRuleCount` (FK `ON DELETE SET NULL` scope-promotes rules) |
+| `GET /api/v1/portal/lenders/:id/loan-programs/:programId/documents` | read+ | List linked guideline docs |
+| `POST /api/v1/portal/lenders/:id/loan-programs/:programId/documents` | client_admin, super_admin | `LinkProgramDocumentDto { documentId }` |
+| `PATCH /api/v1/portal/lenders/:id/loan-programs/:programId/documents` | client_admin, super_admin | Replace linked document (HTTP 204) |
+
+### SSO and admin guideline mirror
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/lenders/:id/sso-portal-link` | read+ | WorkOS admin portal link |
+| `GET /api/v1/portal/lenders/:id/sso-connections` | read+ | List SSO connections |
+| `GET /api/v1/portal/lenders/:lenderId/lender-guideline-documents` | requireInternal | Admin list of a lender's guideline docs (super_admin only; feature-gated → 404 if `guidelineUploads` off) |
+
+## portal-auth: session identity
+
+Controller: `portal-auth/portal-auth.controller.ts` at `api/v1/portal/auth`.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/auth/me` | any authed | Returns `AuthMeResponse` (effective user + lender, `isInternal`, `isImpersonating`) |
+| `POST /api/v1/portal/auth/impersonate` | super_admin | `ImpersonateDto { lenderId }` → `ImpersonationResponse` |
+| `DELETE /api/v1/portal/auth/impersonate` | super_admin | End impersonation → `{ success }` |
+| `GET /api/v1/portal/auth/widget-token` | client_admin, super_admin | WorkOS widget token for the lender's WorkOS org; rejected during impersonation (`BadRequestException`) |
+
+`portal-auth.service.ts` also backs the users controller, the WorkOS webhook handlers (`linkWorkosUser`, `updateLastSignIn`, `handleOrgMembershipCreated/Deleted`), and password-history management (`resetPassword`, ordered `desc(created_at), desc(id)`). See [impersonation](/portal/impersonation).
+
+## portal-users: tenant user management
+
+Controller: `portal-auth/portal-users.controller.ts` at `api/v1/portal/users`. Class-level `@Roles("client_admin", "super_admin")`.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/users` | List users for `effectiveLenderId` |
+| `POST /api/v1/portal/users/invite` | `InviteUserDto { email, lenderId? }`; internal admins may target any `lenderId`, others are forced to the effective tenant; sends a WorkOS invite |
+| `PATCH /api/v1/portal/users/:id/role` | `ChangeRoleDto { role }`, validated against `VALID_ROLES` |
+| `POST /api/v1/portal/users/:id/deactivate` | Deactivate user |
+| `POST /api/v1/portal/users/:id/reactivate` | Reactivate user |
+| `DELETE /api/v1/portal/users/revoke-invite` | `RevokeInviteDto { email, lenderId? }`; revokes a pending WorkOS invite |
+
+`managementLenderId(ctx)` returns `undefined` for internal, non-impersonating admins (bypassing the tenant `lender_id` filter for cross-lender management); otherwise it returns `effectiveLenderId`.
+
+## portal-admin: super-admin dashboard and ops
+
+Controller: `portal-admin/portal-admin.controller.ts` at `api/v1/portal/admin`. Class-level `@Roles("super_admin")`.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/admin/users` | Cross-tenant user list (`ListUsersQueryDto`; `role` validated by `@IsIn`; cursor pagination — `decoded.id` UUID-validated, `decoded.createdAt` `Date.parse`-validated) |
+| `GET /api/v1/portal/admin/dashboard` | Admin dashboard; `recentActions` ordered `desc(createdAt), desc(id)` |
+| `GET /api/v1/portal/admin/rule-set-status` | Per-lender active rule-set status (`RuleSetStatusQueryDto`) |
+| `POST /api/v1/portal/admin/lenders` | Create lender (`CreateLenderDto`) — admin variant |
+| `GET /api/v1/portal/admin/appraisal-runs` | `ListAppraisalRunsQueryDto` → `PortalAppraisalService.adminListRuns` |
+| `POST /api/v1/portal/admin/appraisal-runs/:id/rerun` | `adminRerunRun(id, userId)` |
+
+Staged rule bundles also mount under `api/v1/portal/admin`; see [rules authoring](/portal/api-rules-authoring). Shadow-audit diffs and other internal-admin tools are documented in [internal admin and observability](/portal/api-admin-observability).
+
+## portal-loan-programs: session-scoped settings
+
+Controller: `portal-loan-programs/portal-loan-programs-settings.controller.ts` at `api/v1/portal/loan-programs`. Class throttle 100/min. These operate on the effective lender from the session rather than an explicit `:lenderId`.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/loan-programs` | auth | List programs for the effective lender (ordered `asc(createdAt), asc(id)`) |
+| `GET /api/v1/portal/loan-programs/:id` | auth | Get program |
+| `POST /api/v1/portal/loan-programs` | client_admin | Create |
+| `PUT /api/v1/portal/loan-programs/:id` | client_admin | Update (TOCTOU guard after `.returning()`) |
+| `DELETE /api/v1/portal/loan-programs/:id` | client_admin | Delete (scope-promotes custom rules) |
+| `PATCH /api/v1/portal/loan-programs/:id/documents` | client_admin | Replace linked document (HTTP 204) |
+
+## workos-webhook: inbound WorkOS events
+
+Controller: `portal-lenders/workos-webhook.controller.ts` at `api/v1/workos/webhooks`. Not auth-guarded.
+
+#### POST /api/v1/workos/webhooks
+
+Verifies the `workos-signature` header via `ApiAuthService.constructWebhookEvent`, then dispatches events. A missing signature returns `401`. The handler returns `{ received: true }`.
+
+| Event | Handler |
+|-------|---------|
+| `organization.created` | `createLenderFromWorkosOrg` |
+| `organization.updated` | `updateLenderWorkosOrgName` |
+| `user.created` | `linkWorkosUser` |
+| `user.updated` | `updateLastSignIn` |
+| `organization_membership.created` / `.deleted` | membership handlers |
+
+Just-in-time provisioning details are on [internal admin and observability](/portal/api-admin-observability).
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Authentication and authorization" icon="shield-check" href="/portal/api-auth">
+    Guards, roles, and tenant scoping.
+  </Card>
+  <Card title="Lenders and config (BFF)" icon="building" href="/portal/api-lenders-users-programs">
+    The portal app pages that consume these endpoints.
+  </Card>
+  <Card title="Rules authoring" icon="scale" href="/portal/api-rules-authoring">
+    Rule sets, templates, and staged bundles.
+  </Card>
+  <Card title="Lender config overview" icon="sliders-horizontal" href="/lender-config/overview">
+    YAML config, feature flags, and entitlements.
+  </Card>
+</Columns>

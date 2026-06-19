@@ -1,0 +1,166 @@
+---
+title: Infrastructure and CI/CD
+description: AWS CDK stacks, environments, and deploy pipelines across repos.
+icon: server
+---
+
+Every LoanLight repo provisions its AWS infrastructure with the AWS CDK, building
+on a common set of constructs from
+[`@loanlight-engineering/shared-cdk`](/ops/shared-packages). All services run in a
+single shared VPC, and each repo deploys through GitHub Actions to `int` and
+`prod`.
+
+## Environments
+
+Environment resolution lives in
+`loanlight-shared/packages/shared-cdk/src/environment/environment.ts`.
+
+- `Environment` = `{ INT: "int", PROD: "prod", DEV: "dev", DEVELOPMENT: "development" }`.
+- `parseEnvironment()` reads `DEPLOYED_ENVIRONMENT` (defaults to `int` for
+  historical reasons), and sets `isCI = CI === "true" || NODE_ENV === "test"`.
+
+<Warning>
+Deploying to `int` or `prod` **throws** unless `CI=true` or `NODE_ENV=test`. You
+cannot accidentally deploy int/prod from a laptop. For local work use `dev` (or
+`DEPLOYED_ENVIRONMENT=dev`).
+</Warning>
+
+### Standard tags
+
+`applyStandardTags(app, config, serviceName)`
+(`shared-cdk/src/common/tagging.util.ts`) stamps every stack with `Environment`,
+`Project=LoanLight`, `Service=<name>`, `ManagedBy=CDK`, and `DataDog=enabled`. The
+service names passed across repos are `LLApi`, `LLIntegrations`, `Octy`, and
+`WebApp`.
+
+## The shared VPC
+
+All services share one VPC, imported by `NetworkStack` from the
+`SharedInfrastructureStack` CFN exports. The CIDR map (from `bin/app.ts` comments):
+
+| Range | Service |
+|---|---|
+| `10.0.0-3` | shared infra |
+| `10.0.10-11` | LLApi (int/prod) |
+| `10.0.20-21` | LLIntegrations |
+| `10.0.30-31` | Portal |
+| `10.0.40-41` | Octy |
+| `10.0.50-51` | LLApi (dev) |
+
+## shared-cdk constructs
+
+Each repo's `infra/` app composes the same hardened building blocks, so every
+service gets identical, reviewed AWS resources. The construct families
+(`shared-cdk/src/`):
+
+- `base/` — `BaseStack` (resolves CF name `${serviceName}${id}`).
+- `compute/` — `FargateService`, `FargateTaskDefinition`,
+  `FargateTaskDefinitionWithDataDog`, `EcsSecurityGroup`.
+- `networking/` — `NetworkStack`, `NetworkLoadBalancer`.
+- `api-gateway/` — `LoanLightApiGateway`, `ApiGatewayDomain`, `ApiGatewayVpcLink`,
+  `AuthLambda`, CORS VTL/origin helpers.
+- `messaging/` — `SqsQueue`, EventBridge publishing.
+- `database/` — `DatabaseBastionHost`.
+
+See [Shared packages](/ops/shared-packages) for the full construct catalog and
+conventions.
+
+## Per-repo stacks
+
+<Tabs>
+  <Tab title="loanlight-api (LLApi)">
+    `packages/api/infra/bin/app.ts` deploys this stack graph (dev prefixes ids
+    with `Dev`):
+
+    ```text
+    EcrStack → DevDnsStack (dev only) → NetworkStack → WorkerStack (SQS) →
+    DatabaseStack (Aurora) → DatabaseAccessStack → RedisStack (BullMQ) →
+    ApplicationStack (ECS Fargate) → ApiGatewayStack → SsmExportsStack
+    ```
+
+    `ApplicationStack` runs the ECS service with task **cpu 2048, mem 8192 MiB**
+    (raised from 2 GB / 1 vCPU after the 2026-06-11 appraisal-worker OOM,
+    LOA-1101), image tag `${env}-latest`, `FargateService` desiredCount 2
+    (min 2, max 6), targetCpu 55%, targetMem 70%, graceful SIGTERM with
+    `StopTimeout=120`, and a deployment circuit breaker with rollback.
+
+    It also defines API infra lambdas under `packages/api/infra/lambda/`: the API
+    Gateway authorizer shims (`auth/index.ts`, `auth/encompass.ts`,
+    `auth/partner.ts`) and the DB lifecycle lambdas (`db-migration`, `db-init`,
+    `db-migrate`, `credit-audit-null-monitor`).
+  </Tab>
+  <Tab title="octy (Octy)">
+    `octy/infra/bin/app.ts` deploys `EcrStack → NetworkStack → ApplicationStack`.
+
+    The application stack is an internet-facing ALB (HTTPS 443, ACM cert) with a
+    `/api/health` health check, an ECS cluster, and a Fargate task at **cpu 512,
+    mem 1024**, `FargateService` desired 2 / min 2 / max 4 (targetCpu 60%,
+    targetMem 80%). DNS is `octy.<zone>` (Route53 A → ALB). It reaches
+    loanlight-api over `api-internal.<zone>` (the internal NLB, TLS 443) and
+    publishes its ECS security-group id to SSM so loanlight-api can open an
+    ingress rule.
+
+    <Note>
+    Octy uses the plain `FargateTaskDefinition` (no Datadog sidecar) and so emits
+    no APM. Its `OCTY_DATADOG_*` keys are read-side credentials for the Datadog
+    MCP. See [Datadog](/ops/datadog).
+    </Note>
+  </Tab>
+  <Tab title="loanlight-integrations">
+    Two CDK apps:
+
+    - `packages/encompass/infra/bin/app.ts` (serviceName `LLIntegrations`) — ECS
+      app (`DD_SERVICE=loanlight-integrations`), API Gateway with two authorizers
+      (`encompass-auth`, `encompass-epc-auth`), and a DB stack with migrate/init
+      lambdas.
+    - `packages/frontend/infra` (serviceName `WebApp`) — the Encompass plug-in
+      frontend (RUM service `frontend`).
+  </Tab>
+</Tabs>
+
+## Cross-stack exports
+
+Stacks communicate through CFN exports and SSM parameters:
+
+- CFN exports: `IntegrationFilesStack-IntegrationFilesBucketName` (and the KMS
+  alias/arn), `LLPortalStorageStack-UploadBucketName` / `-UploadKmsKeyArn`,
+  `LLApiDatabaseStack-ClusterEndpointHostname` / `-Port` / `-DatabaseName` /
+  `-DatabaseClientSecurityGroupId`, and `DatadogIntegration-DatadogForwarderArn`.
+- SSM params: `/loanlight/<env>/apiGatewayNlbDnsName`,
+  `/loanlight/<env>/octy/ecsSecurityGroupId`.
+
+## Per-environment context
+
+Account ids, domains, and auth config are pinned in
+`packages/api/infra/cdk.context.{int,prod,dev}.json`:
+
+| Key | int | prod |
+|---|---|---|
+| `authDomain` (FusionAuth) | `loanlight-dev.fusionauth.io` | `loanlight.fusionauth.io` |
+| `workOsIssuer` (AuthKit) | `https://reassuring-veil-31-int.authkit.app` | `https://grand-interest-90-staging.authkit.app` |
+| `partnerS3Bucket` | `partner-loan-files` | `partner-loan-files-prod` |
+| `partnerResultsBaseUrl` | `https://portal.int.loanlight.com/results` | `https://portal.loanlight.com/results` |
+| `shadowAuditLenderName` | `loanlight-shadow` | `loanlight-shadow` |
+
+<Note>
+The prod `workOsIssuer` string contains the word "staging"
+(`grand-interest-90-staging.authkit.app`) but is the canonical prod context value.
+The name is misleading; the value is correct.
+</Note>
+
+## CI/CD (GitHub Actions)
+
+Each repo deploys through its own workflows under `.github/workflows/`:
+
+- **loanlight-api** — `cd.yml` (prod; sets `DEPLOYED_ENVIRONMENT: prod`,
+  `GIT_COMMIT_SHA: ${{ github.sha }}`, and docker build-args including
+  `ENV_FILE=.env.prod`), `cd-int.yml`, `cd-app-int.yml`, `cd-app-prod.yml`,
+  `ci-api.yml`, `ci-app.yml`, `health-check.yml`, `partner-api-docs.yml`.
+- **octy** — `deploy-octy-int.yml`, `deploy-octy-prod.yml`.
+- **integrations** — `deploy-encompass-int/prod.yml`,
+  `deploy-web-app-v2-int/prod.yml`, `deploy-frontend-demo.yml`,
+  `ci-encompass.yml`, `ci-frontend.yml`.
+
+`GIT_COMMIT_SHA` flows through to the CDK `version` / `commit` Datadog tags,
+`DD_GIT_COMMIT_SHA`, and the RUM `version`. Frontends inline
+`NEXT_PUBLIC_GIT_COMMIT_SHA` at build time.

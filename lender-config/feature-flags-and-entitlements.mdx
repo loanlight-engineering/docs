@@ -1,0 +1,96 @@
+---
+title: Feature flags and agent entitlements
+description: lender_feature_flags and lender_agent_entitlements.
+icon: toggle-left
+---
+
+Two separate per-lender tables gate capabilities and agents. **Feature flags** (`lender_feature_flags`) turn whole capabilities on or off and carry tunable thresholds. **Agent entitlements** (`lender_agent_entitlements`) tell the agent router which agents a lender may run. They are unrelated tables read by different code paths.
+
+## Feature flags
+
+Table `lender_feature_flags` (`database/schema/lender-feature-flags.ts`):
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `lender_id` | uuid → `lenders.id` (cascade) |
+| `feature_key` | text |
+| `enabled` | boolean, default **false** |
+| `feature_value` | text (nullable) — optional string payload, used for thresholds |
+| `updated_by` | uuid → `portal_users.id` (set null) |
+| `created_at`, `updated_at` | timestamptz |
+
+Unique constraint `lender_feature_flags_lender_id_feature_key_unique` on `(lender_id, feature_key)`.
+
+### Keys are decentralized string constants
+
+<Warning>
+There is **no central enum or registry of feature keys**. Each consuming module defines its own key as a string constant. Most gates are opt-in and **fail closed**: an absent row resolves to disabled, and `agent-router-flags.ts` even catches DB errors to fail closed. A few gates in `lib/appraisal-pipeline/rules/feature-gates.ts` let DB errors propagate instead.
+</Warning>
+
+| `feature_key` | Default when absent | Gates | Defined in |
+|---|---|---|---|
+| `enable_guideline_uploads` | false | Guideline document upload/list/stream/delete | `lender-guideline-documents/feature-gate.ts` |
+| `appraisal` | false | Umbrella appraisal-review capability; also gates compound rules | `lib/appraisal-pipeline/rules/feature-gates.ts` |
+| `appraisal_agency_rules` | false (requires `appraisal` on) | Fannie/Freddie agency rules eval | feature-gates.ts |
+| `credit_review` | false | Credit review feature | feature-gates.ts |
+| `appraisal_bbox_citations` | false | Billable Reducto bbox citation capture + viewer overlay | feature-gates.ts |
+| `progressive_1025_loading_enabled` | false | §15 async 1025 loading pipeline | feature-gates.ts |
+| `agent_router_epc_enabled` | false (fail-closed each edge) | Agent-router ownership of the EPC/Encompass selection path | `langgraph/agents/agent-router-flags.ts` |
+| `agent_router_los_enabled` | false (fail-closed) | Agent-router ownership + ledger of the LOS doc-upload dispatcher | agent-router-flags.ts |
+| `dscr_agent` | gate in controller | DSCR agent portal endpoints | `portal-dscr-agent.controller.ts` |
+| `key_field_gate_enabled` | gate | Key-field review gating | `portal-key-field-reviews/key-field-reviews.service.ts` |
+| `UPDATED_APPRAISAL_ENABLED` | gate | Updated-appraisal flow | `portal-appraisal.service.ts` |
+| `APPRAISAL_VIA_ROUTER` | gate | Route appraisal via the agent router | `portal-appraisal.service.ts` |
+| `review_confidence_threshold` | stored value | Appraisal review confidence threshold (uses `feature_value`) | `portal-appraisal.service.ts` |
+| `income_review_confidence_threshold` | 0.85 | Income review confidence threshold (uses `feature_value`, parsed 0..1) | `portal-income/services/income-review.service.ts` |
+
+### Thresholds via `feature_value`
+
+Threshold flags store a numeric string in `feature_value` and set `enabled = true`. A `resolveThreshold` helper reads `feature_value`, `Number()`-parses it, clamps or validates it, and otherwise returns the default (e.g. `DEFAULT_INCOME_REVIEW_THRESHOLD = 0.85`). Writes use an upsert (`onConflictDoUpdate` on the unique `(lender_id, feature_key)`).
+
+### Endpoints
+
+On `PortalLendersController` (`/api/v1/portal/lenders`):
+
+<ParamField path="GET /:id/feature-flags" type="endpoint">
+  Roles `client_admin`, `client_user`, `read_only`, `super_admin`. A user may read their own lender's flags (`id === effectiveLenderId`); reading another lender requires internal. Returns all rows ordered by `feature_key`.
+</ParamField>
+
+<ParamField path="PUT /:id/feature-flags" type="endpoint">
+  Super-admin only (`requireInternal`). Body `UpdateFeatureFlagsDto { flags: [{ featureKey, enabled }] }`. Upserts each flag in a transaction and writes the audit log action `lender.feature_flags_updated`.
+</ParamField>
+
+`createLenderFromWorkosOrg` auto-seeds `enable_guideline_uploads = true` for WorkOS-provisioned lenders (also seeded in `portal-admin.service.ts`).
+
+## Agent entitlements
+
+Table `lender_agent_entitlements` (`database/schema/lender-agent-entitlements.ts`):
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `lender_id` | uuid → `lenders.id` (cascade) |
+| `agent_type` | varchar(64) → `agents.agent_type` (no action) |
+| `enabled` | boolean, default false |
+| `updated_by` | uuid → `portal_users.id` (set null) |
+| `created_at`, `updated_at` | timestamptz |
+
+Unique `lender_agent_entitlements_lender_id_agent_type_unique` on `(lender_id, agent_type)`. `agent_type` is a foreign key into the platform agent registry (`agents.agent_type`, varchar(64) PK; see [Catalog and dependencies](/agents/catalog-and-dependencies)).
+
+**Absence of a row means "not entitled"** in practice, because the router only reads `enabled = true` rows.
+
+### How entitlements gate agents
+
+`AgentRouterService` (`langgraph/agents/agent-router.service.ts`) reads entitlements to compute the plan:
+
+- `loadEnabledAgents(lenderId)` selects `agent_type` WHERE `lender_id = ? AND enabled = true` — the lender's explicitly enabled set.
+- `filterEntitled(input, enabledAgents)` computes `working = requested ∩ enabled` and `denied = requested − enabled` (denied agents drive 403 messaging). With no `requestedAgents`, it defaults to **all** enabled agents.
+- `buildPlan` entitlement-filters, then expands the required closure via `AgentRegistryService.requiredClosure` (pulling upstream dependencies as inputs even when not separately entitled) plus standalone agents. `buildFlatPlan` (LOS lane) uses the entitlement-filtered set verbatim with no closure.
+- `route(input)` mints the `audit_runs` container, writes `agent_runs` ledger rows, and writes `audit_runs.agent_config = plan` as a compatibility bridge so `AuditAgentsExecutor` honors selection.
+
+See [Router and entitlements](/agents/router-and-entitlements) for the full planner and the observer-vs-ownership rollout, and [Feature flags and rollout](/agents/feature-flags-and-rollout) for the `agent_router_epc_enabled` / `agent_router_los_enabled` flags above.
+
+<Note>
+There is **no portal CRUD endpoint for agent entitlements**. `PortalLendersController` does not expose them; the schema comment says rows are seeded by a later ticket (a migration/seed). The router reads them, but they are managed out of band — unlike feature flags, which have `GET`/`PUT` endpoints.
+</Note>

@@ -1,0 +1,64 @@
+---
+title: End-to-end data flow
+description: How a loan package becomes a completed audit, step by step.
+icon: route
+---
+
+This page walks a loan package from ingestion to delivery. It follows the production EPC path; the Partner API path differs mainly in how files arrive and how Phase 1 is scoped (noted where relevant). For the orchestration internals, see [pipeline overview](/pipeline/overview).
+
+<Steps>
+  <Step title="Ingest">
+    On the EPC path, the `loanlight-integrations` Encompass plug-in writes the MISMO XML and PDFs to S3 (`INTEGRATION_FILES_BUCKET_NAME`) and publishes an "Audit Requested" EventBridge event. The event lands on the SQS queue `audit-requested-events`, which `QueueConsumerService.handleAuditRequested` drains and validates (Zod) into an `IntegrationAuditRequest`, then calls `IntegrationOrchestrationService.processAuditRequest`.
+
+    On the Partner path, the caller has already uploaded files via `POST /api/v1/partner/loans` (to `PARTNER_S3_BUCKET`); `POST /api/v1/partner/audits` triggers `processAuditForPartner`. See [triggers](/pipeline/triggers).
+  </Step>
+
+  <Step title="Download from S3">
+    The orchestrator downloads the transaction files (`downloadTransactionFiles`) from the allowlisted bucket: the MISMO XML and each document. The S3 prefix is validated against a path-traversal guard.
+  </Step>
+
+  <Step title="Resolve lender and upsert the loan">
+    `resolveLender(requestorId, name)` maps the Encompass client ID to a lender via `lender_auth_clients`, self-healing on a miss. The loan is upserted with `id = correlationId`. See [lender resolution](/integrations/lender-resolution).
+  </Step>
+
+  <Step title="Create the audit run">
+    `computeMismoXmlHash` is stored on the run for reuse. `createAuditRun(correlationId, ...)` creates `audit_runs` with `id = correlationId`. If the run already exists in a terminal or fresh-processing state, the orchestrator emits a `DUPLICATE_AUDIT` event and returns early. See [lifecycle and dedup](/pipeline/lifecycle-and-dedup).
+  </Step>
+
+  <Step title="Register documents">
+    Each downloaded file is registered into `loan_documents` (source identity, content hash, Encompass IDs). This is what change detection and classification key off.
+  </Step>
+
+  <Step title="Phase 1 — pre-audit stage (three parallel branches)">
+    `PreAuditStageService.executePreAuditStage` runs three branches concurrently:
+
+    - **Classification** — the Pre-Audit-Classification agent splits and classifies the PDFs into `document_classifications` (classify-split). Split happens inside the agent's `splitDocuments` node. See [pre-audit classification](/agents/pre-audit-classification).
+    - **URLA preprocessing** — the MISMO XML is extracted into structured per-borrower JSON (`urla_extraction_results`), reused via `mismo_xml_hash` when unchanged. See [URLA extraction](/agents/urla-extraction).
+    - **LlamaCloud indexing** — the documents are ingested into the loan's pipeline (`loans.llc_pipeline_id`). See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
+  </Step>
+
+  <Step title="Phase 1 → Phase 2 barrier">
+    The stage awaits the LlamaCloud branch first, then enforces the barrier on classification: no audit agent runs until classification has settled. URLA preprocessing is awaited at the end and its output (transformed PII fields and property addresses) is passed forward. See [pre-audit stage](/pipeline/pre-audit-stage).
+  </Step>
+
+  <Step title="Phase 2/3 — audit agents">
+    `AuditAgentsExecutor.executeAuditAgents` runs the agents via `Promise.allSettled`. Phase 2 runs PII-Validation, Property-Data, and Credit-Evaluation in parallel; Phase 3 then runs Document-Health and Property-Red-Flags (which depend on Phase 2 output). Each agent writes its own result tables keyed by `audit_run_id`. See [audit agents stage](/pipeline/audit-agents-stage).
+
+    Per-agent failures are recorded in `audit_errors` and never fail the run.
+  </Step>
+
+  <Step title="Complete and persist results">
+    `completeAuditRun(correlationId)` flips the run to `complete` (guarded against late-success races), and the loan status is best-effort set to `ready`. See [results](/pipeline/results).
+  </Step>
+
+  <Step title="Deliver">
+    Progress and completion are surfaced two ways: an in-process SSE/polling stream (`GET /api/v1/events`, `POST /api/v1/events/poll`, filtered by `loanId`) for portal/UI clients, and EventBridge `loanlight.aus` events plus a `documents.classified` event back to Encompass to drive its spinner and carve documents. Partner callers poll `GET /api/v1/partner/audits/:auditId/results`. See [progress tracking](/pipeline/progress-tracking) and [results access](/integrations/results-access).
+  </Step>
+</Steps>
+
+## Where the data lives afterward
+
+- **Postgres** — the run (`audit_runs`), per-agent results, classifications, URLA extraction, and any `audit_errors`.
+- **S3** — the original loan files and rendered PDF reports. See [S3 layout](/storage/s3-layout) and [PDF reports](/storage/pdf-reports).
+- **LangSmith** — the agent reasoning traces, named `${agentType}-Loan-${loanId}`. See [LangSmith](/ops/langsmith).
+- **Datadog** — the HTTP, infra, and `langgraph.node` spans for the run. See [Datadog](/ops/datadog).

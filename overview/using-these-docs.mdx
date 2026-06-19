@@ -1,0 +1,49 @@
+---
+title: Using these docs and the MCP
+description: How engineers and the Octy AI agent consume this knowledge base.
+icon: book-open
+---
+
+This documentation set is the externalized knowledge base for LoanLight engineering. It has two consumers, and the second one shapes how the pages are written.
+
+## Two audiences
+
+- **Engineers** browse these pages to understand the system, find exact names, and follow runbooks.
+- **The Octy AI agent (Oz)** reads the same pages through the Mintlify MCP server during its investigations. This knowledge base is intended to replace the large inline "LoanLight System Architecture" section that Octy previously baked into the Oz base prompt. Instead of carrying a frozen copy of the architecture, Oz queries these living docs. See [Octy overview](/octy/overview) and the [Oz run lifecycle](/octy/oz-run-lifecycle).
+
+Because an autonomous agent acts on what it reads, precision matters more than prose. Exact endpoint paths, `table.column` names, service-class names, env vars, and enum values are load-bearing.
+
+## Conventions
+
+- **Code is the source of truth.** Where these docs note that the code contradicts an older system prompt or README, trust the code. Such contradictions are flagged inline with a callout.
+- **Sentence-case headings, second person, active voice.** No marketing language.
+- **Exact names.** Endpoints are written as `METHOD /path`. Database references use `table.column`. Enum values are quoted verbatim.
+- **Cross-links are root-relative without an extension**, for example [the audit run](/concepts/audit-run).
+- **Unverifiable claims are marked** with an inline `{/* TODO: verify ... */}` comment rather than guessed.
+
+## How to navigate
+
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="lightbulb" href="/concepts/audit-run">
+    The mental model: loans, lenders, the audit run, data flow, and identity.
+  </Card>
+  <Card title="Pipeline" icon="workflow" href="/pipeline/overview">
+    The end-to-end orchestration, stage by stage.
+  </Card>
+  <Card title="Agents" icon="bot" href="/agents/catalog-and-dependencies">
+    Every LangGraph agent, its type string, and its dependencies.
+  </Card>
+  <Card title="Data model" icon="database" href="/data-model/overview">
+    The Drizzle/Postgres schema, table by table.
+  </Card>
+  <Card title="Runbooks" icon="wrench" href="/runbooks/overview">
+    Step-by-step procedures for tracing bad fields and failed runs.
+  </Card>
+  <Card title="Glossary" icon="book" href="/overview/glossary">
+    Acronyms and terms used throughout.
+  </Card>
+</CardGroup>
+
+## For the agent specifically
+
+When Oz needs a concrete fact (an exact table name, an enum value, a service method), it should search these docs first, then confirm against the code. The doctrine codified in the Oz RCA skill is "exhaust LangSmith and the codebase first; only open Datadog for a specific concrete runtime question." These docs accelerate the codebase step by giving Oz a verified map before it reads source. See [tracing a bad field](/runbooks/tracing-a-bad-field) and [investigating a failed run](/runbooks/investigating-a-failed-run).

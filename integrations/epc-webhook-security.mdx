@@ -1,0 +1,137 @@
+---
+title: EPC webhook security
+description: HMAC-SHA256 signatures, the CX.LLAUS field gate, and rate limiting (legacy LOS endpoints).
+icon: shield-check
+---
+
+This page documents the interceptor chain that protects the legacy Encompass webhook endpoint
+`POST /api/v1/los/aus/webhook`.
+
+<Warning>
+These controls live on the **legacy LOS path**, not the production EPC path. The webhook routes
+to the Encompass `LosProvider`, whose data methods all throw `Not implemented`, so the path is
+effectively non-functional. Production EPC audit requests arrive via SQS
+(`audit-requested-events`) and never touch these interceptors. See
+[Legacy Dev Connect](/integrations/legacy-dev-connect) and the
+[Encompass and EPC overview](/integrations/encompass-overview). The security design is
+documented here because it remains wired and is the closest thing the repo has to "EPC webhook
+security."
+</Warning>
+
+## Interceptor chain
+
+`LosController.processAusWebhook` applies these interceptors in order. All live under
+`src/los/interceptors/`.
+
+<Steps>
+  <Step title="EncompassWebhookSignatureInterceptor — HMAC-SHA256">
+    Verifies the Elli signature.
+  </Step>
+  <Step title="WebhookRequestorIdInterceptor — local-dev header injection">
+    Injects a default `X-Requestor-ID` in local dev only.
+  </Step>
+  <Step title="EncompassFieldChangeInterceptor — CX.LLAUS gate">
+    Proceeds only when the `CX.LLAUS` field changed.
+  </Step>
+  <Step title="WebhookRateLimitInterceptor — per-requestor daily limit">
+    Enforces a hard-coded daily cap for one requestor.
+  </Step>
+</Steps>
+
+## HMAC-SHA256 signature verification
+
+`EncompassWebhookSignatureInterceptor` verifies the request came from Encompass.
+
+<ParamField header="Elli-Signature" type="string" required>
+  Base64 HMAC of the body. Missing this or `Elli-SubscriptionId` returns 401
+  `"Missing required webhook headers"`.
+</ParamField>
+<ParamField header="Elli-SubscriptionId" type="string" required>
+  Selects the signing key from `ENCOMPASS_WEBHOOK_KEYS`.
+</ParamField>
+
+The signing keys come from the env var `ENCOMPASS_WEBHOOK_KEYS`, a JSON string parsed into
+`{ [subscriptionId]: { instanceId, signingKey } }`.
+
+- Missing env var → 500 `"Webhook configuration not available"`.
+- Unparseable env var → 500 `"Invalid webhook configuration"`.
+- `subscriptionId` not in the map → 401 `"Invalid subscription ID"`.
+
+The algorithm is:
+
+```text
+calculatedSignature = base64( HMAC_SHA256( JSON.stringify(body), signingKey ) )
+```
+
+This is functionally equivalent to `CryptoJS.HmacSHA256(body, signingKey)`. The matched
+subscription's `instanceId` is the Encompass tenant identifier carried downstream.
+
+<Warning>
+The comparison is a plain `calculatedSignature !== encompassSignature`, which is **not
+constant-time**. This is a potential timing side channel. By contrast,
+[InternalApiKeyGuard](/integrations/audit-request-schema) uses `crypto.timingSafeEqual`.
+</Warning>
+
+**Local bypass:** if `LOCAL` is truthy and `DD_ENV` is falsy, the signature check is skipped
+entirely.
+
+## CX.LLAUS field gate
+
+`EncompassFieldChangeInterceptor` decides whether a field-change webhook represents a real
+audit request. It is a **gate**, not a hash-based dedup.
+
+<Note>
+A stale prompt may describe this as a "field-change dedup." It is a filter keyed on a single
+field path. It does not hash payloads.
+</Note>
+
+It reads `body.meta.fieldsChanged` (an array of changed Encompass field paths) and:
+
+- Proceeds (`next.handle()`) only if `fieldsChanged.includes("/fields/CX.LLAUS")`. `CX.LLAUS`
+  is the custom Encompass field LoanLight watches to know an audit was requested.
+- If `CX.LLAUS` did not change → returns HTTP 200 `{ success: true, message: "CX.LLAUS not
+  changed, skipping" }` with no processing.
+- If `meta.fieldsChanged` is missing → returns success with `"Invalid webhook payload: missing
+  fieldsChanged, skipping"`.
+- Any thrown error is swallowed and returns success
+  (`"Unexpected error, skipping webhook processing"`).
+
+Returning 200 in every non-matching, invalid, or error case is deliberate: it suppresses
+Encompass retries so internal faults never cause a retry storm.
+
+## Rate limiting
+
+`WebhookRateLimitInterceptor` enforces a per-requestor daily limit.
+
+- Requires `X-Requestor-ID` / `x-requestor-id`; missing → 400 `"Missing X-Requestor-ID
+  header"`.
+- The limit map is **hard-coded**: `webhookRequestLimits = { TEBE11175850: 20 }`. Requestors
+  not in the map are unlimited.
+- It counts `audit_runs` rows where `requestor_id = X` and `started_at` falls within UTC day
+  bounds (`getUtcDayBounds` uses `Date.UTC(...)`).
+- At or above the limit → HTTP 429 with `{ success: false, message: "Rate limit exceeded...",
+  retryAfter: "24 hours", currentCount, limit, requestorId, timestamp }`.
+- A DB error during the count → 503 `"Service unavailable. Please try again later."`.
+
+<Note>
+The limit is a single hard-coded requestor (`TEBE11175850`, 20 per day), not config-driven.
+The UTC day boundary means a non-UTC server would miscount around midnight.
+</Note>
+
+## Local-dev requestor injection
+
+`WebhookRequestorIdInterceptor` only acts when `LOCAL` is truthy and `DD_ENV` is falsy. If
+`X-Requestor-ID` is absent it sets it to the first key of the JSON env var
+`DEVCONNECT_RESOURCE_OWNER_CREDENTIALS` (throwing if that env var is missing). It is a no-op in
+real AWS environments.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Legacy Dev Connect" href="/integrations/legacy-dev-connect" icon="ban">
+    The deprecated LOS endpoints and stub provider.
+  </Card>
+  <Card title="Lender resolution" href="/integrations/lender-resolution" icon="building">
+    How requestor IDs map to lenders.
+  </Card>
+</Columns>

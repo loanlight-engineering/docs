@@ -1,0 +1,121 @@
+---
+title: LangGraph observability
+description: Node-level span instrumentation, the stall watchdog, and the LangSmith PII anonymizer.
+icon: activity
+---
+
+Every LangGraph node across every agent is wrapped in a Datadog span with zero per-agent code, has a stall watchdog, and emits a structured terminal-failure event on error. Separately, every LangSmith trace is PII-scrubbed before it leaves the process. This page covers the instrumentation in `langgraph/observability/` and the anonymizer in `langgraph/utils/`. For the broader two-plane doctrine see [Datadog](/ops/datadog) and [LangSmith](/ops/langsmith).
+
+## Central node instrumentation
+
+`langgraph/observability/instrument-langgraph.ts` exports `instrumentLangGraphNodes()`, which monkey-patches `StateGraph.prototype.addNode` exactly once. It is idempotent via `Symbol.for("loanlight.ddNodeInstrumented")` and is called at module load in `langgraph.module.ts` (line 26), before any agent builds its graph — graphs build lazily at request time. So every node across every agent inherits a dd-trace span without any per-agent wiring.
+
+It handles all three `addNode` forms: a string key, a map `{ name: action }`, and an array `[[key, action]]`. Only **plain function** actions are wrapped; Runnables and other shapes pass through untouched. The function returns `true` when it applied the patch.
+
+## traceNode — the span wrapper
+
+`langgraph/observability/trace-node.ts` exports `traceNode(nodeName, fn)`. It opens a `langgraph.node` dd-trace span with `resource = nodeName` and tag `langgraph.node=<nodeName>`, guaranteed to close on success, error, and stall.
+
+### ID tags
+
+When present in the node's state, these fields are lifted onto the span as `langgraph.<key>` searchable tags:
+
+```text
+loanId, auditRunId, documentId, pipelineId, classifySplitRunId, runId, lenderId
+```
+
+This is how you pivot in Datadog from a node span to the loan, audit run, or pipeline it belongs to.
+
+### Stall watchdog
+
+`STALL_THRESHOLD_MS` defaults to **5 minutes** (env `LANGGRAPH_NODE_STALL_MS`; `0` disables). On a stall the wrapper tags `langgraph.node.stalled=true` and `error.type=LangGraphNodeStall`, then force-closes the span so APM records the hang.
+
+<Warning>
+The watchdog only records the stall. It does **not** abort the underlying work — the node keeps running. The span just closes so the hang is visible in APM.
+</Warning>
+
+Per-node overrides live in `NODE_STALL_OVERRIDES_MS`:
+
+```ts
+NODE_STALL_OVERRIDES_MS = { reductoExtract: 95 * 60_000 } // 95 min
+```
+
+The `reductoExtract` override is 95 minutes, just above the 90-minute BullMQ appraisal worker lock, so a legitimately long extraction is not flagged as stalled.
+
+### Terminal-failure event
+
+On a node rejection or throw, `traceNode` tags `error`, `error.type`, `error.message`, `error.stack`, plus the facet tags `agent`, `step`, `lender`, `run_id`, `audit_id`, `error_class`, and emits a structured `NodeTerminalFailureEvent`:
+
+```json
+{
+  "event": "langgraph.node.terminal_failure",
+  "agent": "...",
+  "step": "...",
+  "lender": "...",
+  "run_id": "...",
+  "audit_id": "...",
+  "error_class": "...",
+  "error_message": "..."
+}
+```
+
+The event goes through a pluggable `terminalFailureEmitter` (default logs via `logger.error`). The module exposes `__test__` hooks for the emitter and the thresholds.
+
+## LangSmith trace naming
+
+`LangGraphService.createAgentConfig(agentType, loanId, documentId, auditRunId, additionalMetadata?)` (`langgraph.service.ts`, ~line 1785) builds the LangSmith `RunnableConfig` used on every `app.invoke(...)`:
+
+- `runName`: `` `${agentType}-Loan-${loanId}` `` normally; for Credit-Evaluation with a real `documentId` it is `` `${agentType}-Loan-${loanId}-Doc-${documentId}` ``.
+- `tags`: `[agentTag, "audit", "langgraph"]` where `agentTag` is `"credit"` for Credit-Evaluation, else `agentType.toLowerCase().replace(/[^a-z0-9]/g, "-")`.
+- `metadata`: `{ loanId, documentId, auditRunId, agentType, timestamp, executionContext:"langgraph-service", environment: NODE_ENV, ...additionalMetadata }`.
+- `hide_inputs` / `hide_outputs`: both set to the anonymizer below.
+
+Callers may pin `config.runId` to a UUID so a resolvable trace URL exists up front (used by appraisal). The `agentType` values passed in are display forms like `"PII-Validation"`, `"Property-Data"`, `"Document-Health"`, `"Credit-Evaluation"`, `"Pre-Audit-Classification"` — not the catalog keys.
+
+## LangSmith PII anonymizer
+
+`langgraph/utils/langsmith-anonymizer.ts` exports `createLangSmithAnonymizer()`, which returns a function usable as both `(text) => text` and `(payload) => payload`. It is wired into `createAgentConfig` as `hide_inputs` and `hide_outputs` for every LangSmith trace. The scrubbing is layered.
+
+<Steps>
+  <Step title="Key-aware redaction first">
+    `PII_KEY_DENYLIST` (a Set of lowercased keys) is applied before recursing into values. Denylisted keys become `[REDACTED:<key>]`. `containsPiiKey(key)` is exported. The denylist includes `loanname, first, last, loanssnlast4, ssnlast4, loanaddress, line1, city, state, postal_code, postalcode, property_address, zip_code, ownername, borrowername, subjectaddress, streetaddress, mailingaddress, work_number_employer, work_number_pay, work_number_time_at_job, work_number_year, label_text`.
+  </Step>
+  <Step title="Drop binary">
+    The `pdfBytes` key is stripped entirely — binary is never serialized into traces.
+  </Step>
+  <Step title="Regex defense-in-depth">
+    Free-text patterns: credit-card, driver's-license, name, SSN, ITIN, email, phone, bank-account; MISMO XML field patterns; JSON field patterns; the CRED_016 "Work Number Income Qualify" inline-message scrub.
+  </Step>
+  <Step title="Recurse">
+    Recurses arrays and objects; leaves `Date`, `ArrayBuffer`, and typed-array values untouched.
+  </Step>
+</Steps>
+
+<Warning>
+The key denylist must be applied **before** recursing into values. When a new credit-graph PII field is added, add its key to `PII_KEY_DENYLIST` — otherwise the value can leak into LangSmith via a key the regex layer does not catch.
+</Warning>
+
+## Studio adapters
+
+`langgraph/studio/adapters/` holds lightweight, non-NestJS stand-ins so each agent's `studio.ts` can build and run its graph in LangGraph Studio (local dev / Studio UI) without the full Nest DI container. Each agent's `studio.ts` builds its graph with these adapters and exports `graph` (plus `StateAnnotation`).
+
+| Adapter | Class | Stands in for |
+|---|---|---|
+| `drizzle.adapter.ts` | `DrizzleAdapter` | DB access — lazy `pg.Pool` from `DB_HOST/DB_PORT/DB_NAME/DB_USERNAME/DB_PASSWORD`; `sanitizeIdentifier` guards table/column names. |
+| `progress.adapter.ts` | `ProgressAdapter` | `ProgressEventsService` — console-logging `emit` / `emitEvent`. |
+| `llama.adapter.ts` | `LlamaAdapter` | `LlamaRestClient` — minimal LlamaCloud client; failures return empty results rather than throwing. |
+
+<Note>
+`langgraph/shared/adapters/` is a different adapter set (lender-config YAML DB/file adapters), not the Studio adapters.
+</Note>
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Datadog" icon="dog" href="/ops/datadog">
+    APM services, the dd-trace sidecar, custom `loanlight.pipeline.*` gauges, and dashboards.
+  </Card>
+  <Card title="LangSmith" icon="microscope" href="/ops/langsmith">
+    Projects, run naming, resolvable trace URLs, and querying traces for bug reports.
+  </Card>
+</Columns>

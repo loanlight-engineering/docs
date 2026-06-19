@@ -1,0 +1,117 @@
+---
+title: URLA Completeness rules engine
+description: The rules engine embedded in URLA-Extraction that checks Form 1003 completeness.
+icon: list-checks
+---
+
+The URLA Completeness rules engine is a deterministic (no-LLM) rule engine that checks a structured URLA application view (`UrlApplicationView`) for completeness and consistency, emitting PASS/FAIL/INFO findings per rule. It runs once per borrower.
+
+<Warning>
+This is **not** a standalone catalog agent. It runs as an embedded subgraph of the [URLA-Extraction agent](/agents/urla-extraction) (`urlaExtraction/buildGraph.ts` calls `buildRulesEngineSubgraph(configService)`) and is persisted by the same orchestrator. It has no `agents` catalog row and no independent entry path of its own.
+</Warning>
+
+Source root: `loanlight-api/packages/api/src/langgraph/agents/urlaCompletenessRulesEngine/`.
+
+## Graph
+
+`buildRulesEngineSubgraph` is a single-node graph: `__start__ → execute-rules → __end__`. State carries `urlApplicationData` (`UrlApplicationView`), `lenderCode?`, `loanProgram?`, `allBorrowersData?`, `bottomRatioPercent?`, `borrowerCountryOfCitizenship?`, and `borrowerCountryFieldPath?`, and outputs `{ summary: RuleExecutionSummary, completed }`.
+
+`ExecuteRulesNode` builds a `RulesExecutor()` (which loads `ALL_RULES`). When a `UrlaCompletenessRulesConfigService` is wired, it first reads `getDisabledRuleIds(lenderCode, loanProgram)` and `buildRuleOptionsMap(...)` from the lender YAML, then calls `rulesExecutor.execute(urlApplicationData, { disabledRuleIds, loanProgram, allBorrowersData, bottomRatioPercent, borrowerCountryOfCitizenship, borrowerCountryFieldPath, ruleOptions })`.
+
+## Executor
+
+`RulesExecutor` (`engine/rules-executor.ts`) builds a registry `Map<RuleId, Rule>` plus a `Map<RuleCategory, Rule[]>`. `execute(data, options)` runs every `enabled` rule minus `disabledRuleIds`. Each rule's `evaluator(context)` returns `RuleFinding[]`; a rule that throws produces a synthetic FAIL finding (`Rule execution failed: ...`) so the engine never crashes. Per-rule options are passed as `context.ruleOptions = options.ruleOptions.get(rule.id)`.
+
+`buildSummary` returns `RuleExecutionSummary { totalFindings, passedFindings, failedFindings, infoFindings, results: RuleFinding[], executionTimeMs }`.
+
+## Finding types and shape
+
+`FindingType` is `PASS | FAIL | INFO`. A `RuleFinding` is:
+
+```ts
+{ ruleId, ruleName, category, findingType, message,
+  fieldPath?, expectedValue?, actualValue?, metadata? }
+```
+
+A `Rule` is `{ id, name, description, category, enabled, scope?: "borrower" | "loan", evaluator }`. `scope: "loan"` rules may read `allBorrowersData` (the cross-borrower context the [aggregate-extractions barrier](/agents/urla-extraction) guarantees is populated); the default scope is per-borrower.
+
+## Rule categories
+
+`RuleCategory` has 16 values, one per URLA section (note `SECTION_6_ACKNOWLEDGEMENTS` exists in the enum even though its rules are disabled):
+
+```text
+SECTION_1A_PERSONAL_INFO, SECTION_1B_1C_1D_EMPLOYMENT, SECTION_1E_OTHER_INCOME,
+SECTION_2A_ASSETS, SECTION_2B_OTHER_ASSETS, SECTION_2C_LIABILITIES,
+SECTION_2D_OTHER_LIABILITIES, SECTION_3_REAL_ESTATE, SECTION_4A_LOAN_PROPERTY,
+SECTION_4B_OTHER_MORTGAGES, SECTION_4C_RENTAL_INCOME, SECTION_4D_GIFTS_GRANTS,
+SECTION_5_DECLARATIONS, SECTION_6_ACKNOWLEDGEMENTS, SECTION_7_MILITARY_SERVICE,
+SECTION_8_DEMOGRAPHICS
+```
+
+## Rule IDs
+
+`RuleId` (`types/rule-ids.enum.ts`) has 31 values, grouped by URLA section:
+
+<AccordionGroup>
+<Accordion title="Section 1A — personal info & address">
+`PERSONAL_INFO_BASIC_DETAILS`, `CURRENT_ADDRESS_RULES`, `FORMER_ADDRESS_RULES`, `IS_AT_CURRENT_ADDRESS_LESS_THAN_2_YEARS`, `MAILING_ADDRESS_RULES`
+</Accordion>
+<Accordion title="Section 1B–1D — employment">
+`CURRENT_EMPLOYMENT_DETAILS`, `CURRENT_EMPLOYMENT_LESS_THAN_2_YEARS`, `ADDITIONAL_EMPLOYMENT_RULES`, `PREVIOUS_EMPLOYMENT_RULES`, `EMPLOYMENT_HISTORY_2_YEAR_MINIMUM`, `DSCR_BORROWER_INCOME_PRESENT`
+</Accordion>
+<Accordion title="Section 1E / 2A–2D — income, assets, liabilities">
+`OTHER_INCOME_SOURCES`, `ASSETS_ACCOUNT_DETAILS`, `OTHER_ASSETS_DETAILS`, `LIABILITIES_DETAILS`, `OTHER_LIABILITIES_DETAILS`
+</Accordion>
+<Accordion title="Section 3 — real estate owned (REO)">
+`REO_REFINANCE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH` (deprecated), `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`
+</Accordion>
+<Accordion title="Sections 4, 5, 7, 8 and cross-section">
+`SECTION_4_LOAN_AND_PROPERTY_DETAILS`, `SECTION_4_PROPERTY_VALUE_REQUIRED`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS`, `SECTION_8_FACE_TO_FACE_VISUAL_OBSERVATION`, `DTI_EXCEEDS_50_PERCENT` (cross-section)
+</Accordion>
+</AccordionGroup>
+
+`rules/index.ts` aggregates the section arrays into `ALL_RULES`. **Section 6 (Acknowledgements) is disabled** (commented out of `ALL_RULES`), so the active sections are 1A, 1B–1C–1D, 1E, 2A, 2B, 2C, 2D, 3, 4, 5, 7, and 8.
+
+## Rule authoring
+
+Rules are built from helpers in `utils/rule-helpers.ts`: `isDefined` (treats `""`, whitespace, and the literal `"null"` as undefined), `hasAtLeastOne`, `allDefined`, `getTotalInMonths`, `isMortgageEffectivelyEmpty`, `isAtCurrentAddressLessThan2Years`, `isForeignAddress` (foreign = street+city present, state+postalCode both absent), `areAddressesDifferent`, `isValidPastDate`, `getMonthsSinceDate`, plus the finding factories `createPassFinding` / `createFailFinding` / `createInfoFinding`.
+
+Representative behaviors:
+
+- **`PERSONAL_INFO_BASIC_DETAILS`** — requires name, SSN-or-ITIN, DOB, citizenship, marital status, and at least one contact method. Invalid SSNs (`111111111`, `999999999`, blank) FAIL unless citizenship is `NON_PERMANENT_RESIDENT_ALIEN`; NPRA also requires Country of Citizenship (from `borrowerCountryOfCitizenship` / `borrowerCountryFieldPath`). Emits a single PASS when all checks pass.
+- **`CURRENT_ADDRESS_RULES` / `FORMER_ADDRESS_RULES`** — US address completeness (street/city/state/zip/country) vs foreign (street+city only); if less than 24 months at the current address, emits INFO `IS_AT_CURRENT_ADDRESS_LESS_THAN_2_YEARS` plus a FAIL when former addresses do not cover the 24-month history; RENT housing type requires `rentalExpense`.
+- **`DSCR_BORROWER_INCOME_PRESENT`** — only when `loanProgram` is in `DSCR_PROGRAM_CODES`; FAILs when current-employment `monthlyIncome.total > 0` (DSCR qualifies on property cash flow, not borrower income).
+- **`DTI_EXCEEDS_50_PERCENT`** — reads `context.bottomRatioPercent` (no value → no finding); threshold is `ruleOptions.threshold` else `DEFAULT_DTI_THRESHOLD = 50`; FAIL when DTI exceeds the threshold.
+- **`REO_REFINANCE_SUBJECT_PROPERTY`** (`scope: "loan"`) — for REFINANCE, the Section-4 subject property must appear in some borrower's Section-3 owned properties (uses `allBorrowersData`).
+
+## Lender configuration
+
+`UrlaCompletenessRulesConfigService` reads the `urla_completeness_rules` section of the lender YAML (via `LenderConfigLoaderService`). See [overrides and guidelines](/lender-config/overrides-and-guidelines).
+
+- `getDisabledRuleIds(lenderCode, loanProgram)` returns the union of top-level `disabled_rules` and per-program `disabled_rules`. The effective lender code defaults to `DEFAULT`; unknown rule IDs warn but are still added.
+- `getRuleOptions` / `buildRuleOptionsMap` build per-rule option objects (per-program overrides top-level, with no merge), for example the DTI `threshold`.
+- Program alias resolution uses `document_expiration.program_aliases`.
+
+## Persistence
+
+There are two entry paths, both ending in the same tables (see [URLA data model](/data-model/urla-data-model)):
+
+1. **Inline during extraction** — the extraction graph runs this subgraph per borrower and returns `rulesEngineSummaries: [{ borrowerLabel, summary }]`. `persistUrlaExtractionResults` writes `urla_extraction_results`, then `persistUrlaRulesFindings` runs per borrower.
+2. **Cached extraction re-evaluation** — `runRulesEngineForCachedExtraction` instantiates a `RulesExecutor` directly (skipping the LLM extraction entirely), picks each borrower's country via `pickCountryOfCitizenshipForBorrower`, runs `executor.execute(...)`, and persists per borrower.
+
+`persistUrlaRulesFindings(auditRunId, loanId, extractionResultId, borrowerLabel, rulesSummary)` inserts one parent `urla_rules_engine_results` row, then one `urla_rules_findings` row per finding (`rule_id`, `rule_name`, `rule_category`, `finding_type`, `message`, `field_path`, `expected_value`, `actual_value`, `metadata`).
+
+### Tables
+
+- **`urla_rules_engine_results`** — `audit_run_id` (FK → `audit_runs` cascade), `loan_id`, `urla_extraction_result_id` (FK), `borrower_label` (default `BORROWER_1`). Unique `(audit_run_id, borrower_label)` — one row per borrower.
+- **`urla_rules_findings`** — `rules_engine_result_id` (FK), `rule_id` (`ruleIdEnum`), `rule_name`, `rule_category` (`ruleCategoryEnum`), `finding_type` (`findingTypeEnum`), `message`, `field_path`, `expected_value` (jsonb), `actual_value` (jsonb), `metadata` (jsonb).
+
+The Postgres enums (`database/schema/enums.ts`): `finding_type` = `['PASS','FAIL','INFO']`, `rule_category` = the 16 `SECTION_*` values, `rule_id` = the 31 rule IDs. See [enums reference](/data-model/enums-reference).
+
+## Read API
+
+`UrlaCompletenessService.getLastUrlaCompletenessByAuditRun(auditRunId)` loads the latest `urla_extraction_results` (404 if none), the `urla_rules_engine_results` ordered by `borrower_label ASC` LIMIT 1, and the findings ordered by `(rule_category, rule_id, id)`. It computes `UrlaRulesEngineSummary { total_rules, passed_count, failed_count, info_count }`.
+
+<Note>
+Despite per-borrower persistence, this read API surfaces **BORROWER_1 only** (the `LIMIT 1` after ordering by `borrower_label`). Co-borrower findings are stored but not returned by this single-borrower DTO — flagged in code as a known limitation.
+</Note>

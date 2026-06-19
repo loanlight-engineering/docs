@@ -1,0 +1,100 @@
+---
+title: Feature flags and rollout
+description: The flags that gate router ownership per lender and observer mode.
+icon: flag
+---
+
+The agent platform ships behind flags so each path can be flipped per lender, observed for parity, and rolled back instantly. There are two kinds of flag: one **env var** that turns on observer-mode ledger writes globally, and four **per-lender** flags in `lender_feature_flags` that hand selection ownership to the router on a path-by-path basis. All default OFF and all are fail-closed.
+
+## Observer mode versus router ownership
+
+<Columns cols={2}>
+  <Card title="Observer mode" icon="eye">
+    Env var `AGENT_RUNS_LEDGER_ENABLED`. The router does not select. The legacy fan-out runs all agents; the observer only backfills `agent_runs` rows. This is the live default.
+  </Card>
+  <Card title="Router ownership" icon="route">
+    Per-lender `lender_feature_flags`. When ON for a path, the router computes the entitled closure, writes the ledger plus the `agent_config` bridge, and the executor honors the selection. Default OFF.
+  </Card>
+</Columns>
+
+<Warning>
+Do not conflate the two. `AGENT_RUNS_LEDGER_ENABLED` is an **env var** (process-wide). The four router-ownership flags are **rows in `lender_feature_flags`** (per lender). They are read by completely different code paths.
+</Warning>
+
+## The observer flag (env var)
+
+`AGENT_RUNS_LEDGER_FLAG = "AGENT_RUNS_LEDGER_ENABLED"`, read in `AgentRunLedgerObserver` with strict equality `=== "true"` (not truthy). `enabled()` returns that boolean. When OFF, every observer method short-circuits to a no-op — byte-identical to today, zero ledger writes. When ON, the observer backfills `agent_runs` rows over the existing "run all" fan-out. See [Agent runs ledger and reconciler](/agents/runs-ledger).
+
+## The per-lender router flags
+
+`isAgentRouterFlagEnabled(db, lenderId, featureKey)` (`langgraph/agents/agent-router-flags.ts`) is the single fail-closed reader for every router-ownership flip. It returns `true` only when a row exists for `(lenderId, featureKey)` in `lender_feature_flags` and `enabled === true`. It returns `false` on a null or empty lender, an absent row, or any DB error (the try/catch swallows). A transient flag-lookup blip therefore degrades to the un-flipped path, never crashes the audit.
+
+```ts
+export async function isAgentRouterFlagEnabled(
+  db: DrizzleDB,
+  lenderId: string | null | undefined,
+  featureKey: string,
+): Promise<boolean> {
+  if (!lenderId) return false;
+  try {
+    const rows = await db
+      .select({ enabled: lenderFeatureFlags.enabled })
+      .from(lenderFeatureFlags)
+      .where(and(
+        eq(lenderFeatureFlags.lenderId, lenderId),
+        eq(lenderFeatureFlags.featureKey, featureKey),
+      ))
+      .limit(1);
+    return rows.length > 0 && rows[0].enabled === true;
+  } catch {
+    return false; // fail-closed
+  }
+}
+```
+
+Two flag keys are declared in `agent-router-flags.ts`:
+
+- `AGENT_ROUTER_EPC_FLAG_KEY = "agent_router_epc_enabled"` — gates router ownership of the EPC (Encompass) selection path.
+- `AGENT_ROUTER_LOS_FLAG_KEY = "agent_router_los_enabled"` — gates router ownership and ledger instrumentation of the LOS document-upload dispatcher.
+
+Two more keys live with their consumers (same `lender_feature_flags` table, same reader pattern), not in `agent-router-flags.ts`:
+
+- `PARTNER_VIA_ROUTER = "PARTNER_VIA_ROUTER"` — `partner-api/controllers/partner-audits.controller.ts`. Live, with a consumer.
+- `APPRAISAL_VIA_ROUTER = "APPRAISAL_VIA_ROUTER"` — `modules/portal-appraisal/portal-appraisal.service.ts`, which has its own inline `isAppraisalViaRouterEnabled` reader. Live, with a consumer.
+
+## Flag inventory
+
+| Flag key | Table / type | Path it gates | Consumer file |
+|---|---|---|---|
+| `AGENT_RUNS_LEDGER_ENABLED` | env var | Observer-mode ledger writes | `agent-run-ledger-observer.service.ts` |
+| `agent_router_epc_enabled` | `lender_feature_flags` | EPC router ownership | `integration-events/services/integration-orchestration.service.ts` |
+| `agent_router_los_enabled` | `lender_feature_flags` | LOS router ownership + ledger | `los/services/document-processing.service.ts` |
+| `PARTNER_VIA_ROUTER` | `lender_feature_flags` | Partner API audit create via router | `partner-api/controllers/partner-audits.controller.ts` |
+| `APPRAISAL_VIA_ROUTER` | `lender_feature_flags` | Portal appraisal create via router | `modules/portal-appraisal/portal-appraisal.service.ts` |
+
+The `lender_feature_flags` table is also documented under [Feature flags and entitlements](/lender-config/feature-flags-and-entitlements).
+
+## Per-path behavior when ON
+
+<Tabs>
+  <Tab title="EPC">
+    `routeEpcSelection(...)` in `integration-orchestration.service.ts`. OFF returns `undefined` (executor runs all). ON calls `agentRouter.instrumentExistingRun(correlationId, {...triggerSource:'epc', correlationId, s3Prefix})` — the container was already minted by the dedup wrapper — and returns the non-skipped selected agents. Any failure logs `[EPC_ROUTER]` and returns `undefined`, degrading to "run all", never "run none". An empty selection also degrades to "run all".
+  </Tab>
+  <Tab title="LOS">
+    `instrumentLosLedger(...)` in `document-processing.service.ts`. Looks up `loans.lender_id`; OFF returns `false`. ON calls `agentRouter.instrumentExistingRun(auditRunId, {triggerSource:'los', requestedAgents: LOS_LEDGER_AGENTS}, {expandClosure:false})` — a flat ledger with no phase-0 closure. `settleLosLedger(...)` flips each row after the suite settles, then `tryCompleteAuditRun`. Best-effort.
+  </Tab>
+  <Tab title="Partner">
+    `partner-audits.controller.ts`. ON calls `agentRouter.route({ triggerSource:'partner', requestedAgents: dto.agents, s3Prefix:'partner/<lender>/<loan>' })`. If `plannedAgentRuns.length === 0`, it deletes the audit run best-effort (FK cascade drops the ledger rows) and returns 403 with the `denied` list. Otherwise it responds with the resolved plan as `agents` plus a `denied` field. OFF is the direct path (`createAuditRunForPartner`, raw allow-list, no closure, no ledger, no `denied`).
+  </Tab>
+  <Tab title="Portal appraisal">
+    `portal-appraisal.service.ts` + `appraisal.processor.ts`. On upload, ON calls `agentRouter.route({ triggerSource:'portal', requestedAgents:[APPRAISAL_AGENT_TYPE] })`, minting the container and the `appraisalEvaluation` ledger row; if denied, it tears down the container and returns 403. The `auditRunId` is stamped onto the new `appraisal_runs` row. On re-claim, `reopen(auditRunId, APPRAISAL_AGENT)`; on finalize, `flip(..., "complete", { externalRunId, langsmithUrl })` then `tryCompleteAuditRun`.
+  </Tab>
+</Tabs>
+
+## Rollout doctrine
+
+<Note>
+Every router flip is reversible by setting the row's `enabled` back to `false`. EPC is the highest-risk flip (revenue path) and is flipped per lender only after observer parity is green, validated with `diffPlanVsActual`. Observer mode plus all router flips are best-effort and fail-closed: a ledger or flag blip degrades to today's "run all" / un-instrumented behavior and never aborts the audit.
+</Note>
+
+See [Agent router and entitlements](/agents/router-and-entitlements) for `diffPlanVsActual` and the planner, and the [platform overview](/agents/platform-overview) for the two-phase rollout framing.

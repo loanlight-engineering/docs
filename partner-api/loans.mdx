@@ -1,0 +1,220 @@
+---
+title: Loans API
+description: Create loans, upload documents, check status, and list loans.
+icon: file-text
+---
+
+The `PartnerLoansController` (`@Controller("api/v1/partner/loans")`) manages loan ingest: creating loans with their MISMO XML and documents, uploading additional documents, and reporting readiness. Every endpoint requires the `x-api-key` header (see [authentication](/partner-api/authentication)) and is subject to [rate limiting](/partner-api/rate-limits-and-errors). Every read is scoped to the authenticated lender, so a loan that belongs to another lender returns `404`.
+
+<Warning>
+**Some Swagger examples are stale.** Where the published OpenAPI schema disagrees with runtime behaviour, this page documents the code. Specific drift items are called out inline.
+</Warning>
+
+## POST /api/v1/partner/loans
+
+Create a loan and upload its MISMO XML and supporting documents. Returns `202 Accepted`. This call does **not** trigger an audit — use [`POST /api/v1/partner/audits`](/partner-api/audits) for that once the loan is ready.
+
+### Request body
+
+Body is `CreatePartnerLoanDto`. See the [data model](/partner-api/data-model) for full validation rules.
+
+<ParamField body="loanNumber" type="string" required>
+The lender's loan number. Max 100 characters.
+</ParamField>
+<ParamField body="mismoXml" type="string (base64)" required>
+The base64-encoded MISMO 3.4 XML application. Validated by a Buffer round-trip (stack-safe for multi-MB payloads), not a regex.
+</ParamField>
+<ParamField body="documents" type="DocumentDto[]" default="[]">
+Supporting PDFs. Each document has `fileName`, `content` (base64), `mimeType` (required — `DocumentDto.mimeType` has no `@IsOptional()`), and an optional informational `documentType`.
+</ParamField>
+<ParamField body="metadata" type="LoanMetadataDto">
+Optional loan metadata: `estimatedClosingDate` (YYYY-MM-DD), `lenderCode`, `loanType`, `loanProgramName`.
+</ParamField>
+<ParamField body="skipClassification" type="boolean" default="false">
+When `true`, documents are still uploaded and registered but classification is skipped.
+</ParamField>
+
+<Note>
+**`loanType` is free-form text, not an enum.** The DB column is `text` and the value is passed through verbatim. There is no `@IsEnum` and no slug regex (LOA-1088): re-adding either rejects valid lender slugs like `bank_statement_12mo` and aliased labels like `"Bank Statement - 12 Month"`. `loanType` allows up to 100 characters; `loanProgramName` up to 255.
+</Note>
+
+### What happens
+
+<Steps>
+  <Step title="Upsert the loan">
+    `loanService.upsertLoan({...})` creates or updates the loan with `processingStatus: "processing"`. The S3 prefix is `partner/{lenderId}/{loanId}`.
+  </Step>
+  <Step title="Upload to S3">
+    `s3Service.uploadPartnerLoan` writes the MISMO XML to `{prefix}/mismo.xml` (ContentType `application/xml`) and each document to `{prefix}/documents/{fileName}`. Any failure sets the loan status to `error` and rethrows.
+  </Step>
+  <Step title="Create the LlamaCloud pipeline">
+    `pipelineService.getOrCreatePipeline(loanId, {...})` provisions the loan's [retrieval pipeline](/subsystems/llamacloud-retrieval) and links it to the loan. Failure sets status `error`.
+  </Step>
+  <Step title="Register documents">
+    `documentRegistry.registerDocuments` creates stable `loan_documents` rows (computing each `fileHash`, `source: "partner_s3"`). Failure sets status `error`.
+  </Step>
+  <Step title="Queue processing">
+    `upsertPartnerJob` upserts a `processing_jobs` row (`status: "queued"`, `source: "partner"`).
+  </Step>
+  <Step title="Run the pipeline (fire-and-forget)">
+    `runPartnerDocumentPipeline` runs [pre-audit classification](/agents/pre-audit-classification) (unless `skipClassification`) in parallel with LlamaCloud indexing, then flips the job `queued → running`. An indexing failure flips the job to `failed` and the loan to `error`.
+  </Step>
+</Steps>
+
+### Response (202)
+
+```json
+{
+  "loanId": "a1b2c3d4-...",
+  "status": "processing",
+  "pipelineId": "llama-pipeline-id",
+  "documents": [
+    { "documentId": "uuid", "fileName": "paystub.pdf", "status": "new" }
+  ],
+  "createdAt": "2026-06-19T18:00:00.000Z"
+}
+```
+
+<Warning>
+**The returned `status` is always the literal `"processing"`.** The Swagger schema lists an enum `["processing","ready_for_audit","error"]`, but the create handler always returns `"processing"`. The loan only becomes `ready_for_audit` after the async pipeline runs and an external poller advances it.
+
+**`documents[].status` is `new | updated | existing`**, derived from the registration result — not the `"uploaded"` shown in the stale Swagger example. (`"uploaded"` only appears in the GET loan-detail and pipeline-document responses below.)
+</Warning>
+
+Status codes: `202`, `400`, `401`, `429`, `500`.
+
+## GET /api/v1/partner/loans
+
+List all loans for the authenticated lender. Returns a bare array (no pagination wrapper), ordered `created_at DESC, id ASC` via `getLoansForLender`.
+
+Each item: `{ id, loanNumber, createdAt, updatedAt, lenderId, processingStatus, pipelineId, loanType, loanProgramName }`.
+
+<Warning>
+**This endpoint returns raw `LoanRecord` DB rows.** `getLoansForLender` selects the row directly, so the serialized field names reflect the snake_case database columns, even though the published Swagger schema documents camelCase. Treat the Swagger casing for this endpoint with suspicion; the row shape wins.
+</Warning>
+
+Status codes: `200`, `401`, `404` (lender not found), `500`.
+
+## GET /api/v1/partner/loans/:loanId
+
+Loan detail. Returns `404` if the loan is not owned by the lender (`getLoanByIdAndLender`).
+
+```json
+{
+  "loanId": "uuid",
+  "loanNumber": "LN-1001",
+  "status": "processing|ready_for_audit|ready|error",
+  "pipelineId": "llama-pipeline-id",
+  "loanType": "bank_statement_12mo",
+  "loanProgramName": "Bank Statement - 12 Month",
+  "documents": [
+    {
+      "documentId": "uuid",
+      "fileName": "paystub.pdf",
+      "status": "uploaded",
+      "llamaCloudFileId": "file-id"
+    }
+  ]
+}
+```
+
+`documents` come from `pipelineService.getPipelineDocumentRecordsByLoanId` (active `loan_documents`: not deleted, not superseded; ordered `created_at, id`). `loanType` and `loanProgramName` can be `null`.
+
+## GET /api/v1/partner/loans/:loanId/status
+
+The lightweight readiness poll. Use this before triggering an audit.
+
+```json
+{
+  "status": "processing|ready_for_audit|ready|error",
+  "pipelineSyncStatus": "not_started|running|success|failed",
+  "classification": {
+    "status": "not_started|running|complete|partial|failed|skipped",
+    "triggeredBy": "partner_create_loan|partner_upload_documents|epc_audit_run|null",
+    "startedAt": "<iso|null>",
+    "completedAt": "<iso|null>"
+  }
+}
+```
+
+`pipelineSyncStatus` is `getPipelineStatus(llc_pipeline_id)` from LlamaCloud, or `"not_started"` when no pipeline exists. `classification` is the latest non-dry-run run from `classifySplitPersistence.getLatestRunForLoan`. Wait for `status` to reach `ready_for_audit` (or `ready`) and `classification.status` to leave `running` before calling [`POST /audits`](/partner-api/audits).
+
+## GET /api/v1/partner/loans/:loanId/audits
+
+List audits for a loan, paginated. Returns `404` if the loan is not owned by the lender.
+
+<ParamField query="limit" type="integer" default="20">
+Page size, clamped to 1–100.
+</ParamField>
+<ParamField query="offset" type="integer" default="0">
+Offset, minimum 0.
+</ParamField>
+
+Ordered by start date descending (tiebreak on `run_number`). Backed by `auditService.getAuditsByLoanAndLender`.
+
+```json
+{
+  "audits": [
+    {
+      "auditId": "uuid",
+      "status": "pending|processing|complete|failed",
+      "runNumber": 1,
+      "startedAt": "<iso>",
+      "completedAt": "<iso|null>",
+      "agents": ["piiValidation"]
+    }
+  ],
+  "pagination": { "total": 1, "limit": 20, "offset": 0, "hasMore": false }
+}
+```
+
+`agents` is `audit.agent_config || null`. `hasMore` is `offset + audits.length < total`.
+
+## POST /api/v1/partner/loans/:loanId/documents
+
+Upload additional documents to an existing loan. Returns `202`. Returns `404` if the loan is not found or has no pipeline (`getPipelineIdByLoanId`).
+
+Body is `UploadAdditionalDocumentsDto`: `documents` (`DocumentDto[]`, required) and `skipClassification` (boolean, default `false`).
+
+The flow uploads docs to S3 (no MISMO), registers them, resets the loan status to `processing`, queues a `processing_jobs` row, and fires `runPartnerDocumentPipeline(..., "partner_upload_documents", ...)`.
+
+```json
+{
+  "documents": [
+    { "documentId": "uuid", "fileName": "w2.pdf", "status": "new" }
+  ]
+}
+```
+
+Status codes: `202`, `400`, `401`, `404`, `429`, `500`.
+
+## GET /api/v1/partner/loans/:loanId/documents
+
+List the documents currently in the loan's pipeline. Returns `404` if the loan is not owned by the lender. Backed by `pipelineService.listDocuments`, which combines LlamaCloud `/files` with local attachment records; empty array when no pipeline exists.
+
+```json
+{
+  "loanId": "uuid",
+  "documentCount": 2,
+  "documents": [
+    {
+      "llamaCloudFileId": "file-id",
+      "fileName": "paystub.pdf",
+      "fileSize": 48213,
+      "pageCount": 2,
+      "uploadedAt": "<iso|null>",
+      "documentId": "<uuid|null>"
+    }
+  ]
+}
+```
+
+## DELETE /api/v1/partner/loans/:loanId/documents/:documentId
+
+Remove a document from the LlamaCloud pipeline and delete its DB records (`pipelineService.removeDocument`).
+
+```json
+{ "loanId": "uuid", "documentId": "uuid" }
+```
+
+Status codes: `200`, `401`, `404`.

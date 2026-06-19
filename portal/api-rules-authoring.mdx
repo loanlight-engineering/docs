@@ -1,0 +1,134 @@
+---
+title: "Portal API: rules authoring"
+description: Appraisal/credit/income rule sets, NL parse, and staged bundles.
+icon: scale
+---
+
+Three modules author the rules that the audit pipeline evaluates: `portal-appraisal-rules`, `portal-credit-rules`, and `portal-income-rules`. They share a template-adoption pattern: a lender adopts a rule set from cross-module templates, then adds, updates, or deletes individual rules within a set. All endpoints use [`PortalAuthGuard`](/portal/api-auth).
+
+Custom rules span four concerns: authoring (these modules), override (`portal-lenders`), display (`portal-appraisal` / `portal-credit`), and evaluation (`lib/*-pipeline/rules`).
+
+## Rule codes, templates, and operators
+
+Rule code format: built-in rules use `[A-Z]{2,5}_\d{3}`; custom rules use `CUST_[A-F0-9]{8}`; credit also uses `CRED_*` template codes. Templates live in the cross-module table `appraisal_rule_templates`, filtered by `module` (`appraisal` or `credit`).
+
+The appraisal custom-rule evaluator supports these operators: `equals`, `not_equals`, `contains`, `not_contains`, `greater_than`, `greater_than_or_equal`, `less_than`, `less_than_or_equal`, `abs_less_than`, `abs_less_than_or_equal`, `regex`, `in`, `not_in`, `date_within_days`.
+
+<Info>
+USPAP rules were removed from active rule sets (LOA-726). `getAgencyAvailability` no longer surfaces `uspap`; only `fannie_mae` and `freddie_mac` are adoptable agency sources, even though `'uspap'` is still permitted in the type/CHECK for rendering historical rows.
+</Info>
+
+## isCompoundRulesEnabled gate
+
+Compound (multi-condition) custom rules are gated by `isCompoundRulesEnabled(lenderId)`, which is **default-enabled** — it returns `true` when the flag row is absent. The `POST .../rule-sets/:setId/rules` endpoints honor this gate when adding a compound rule.
+
+<Note>
+The `use_client_rule_sets` subsystem was fully removed (LOA-820 T3). Anything referencing client-rule-set opt-out or `isClientRuleSetsExplicitlyDisabled` is stale. The only remaining rule write-gate is `isCompoundRulesEnabled`.
+</Note>
+
+## portal-appraisal-rules
+
+Controller: `portal-appraisal-rules/portal-appraisal-rules.controller.ts` at `api/v1/portal/appraisal-rules`. Class-level `@UseGuards(PortalThrottlerGuard, PortalAuthGuard)`.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/appraisal-rules/field-registry` | `FieldRegistryResponse` of targetable fields (throttle 60/min) |
+| `POST /api/v1/portal/appraisal-rules/parse-nl` | Natural-language → rule draft via OpenAI (`nl-parse.service.ts`, throttle 30/min) |
+| `POST /api/v1/portal/appraisal-rules/preview` | Preview a rule against a sample (`preview.service.ts`, throttle 30/min) |
+| `POST /api/v1/portal/appraisal-rules` | **Legacy — returns HTTP 410 Gone.** Use rule sets |
+| `GET /api/v1/portal/appraisal-rules` | List rules (IDOR guard: rejects a mismatched `lenderId` query param for non-internal callers) |
+| `GET /api/v1/portal/appraisal-rules/agency/available` | Agency availability for the caller's lender |
+| `GET /api/v1/portal/appraisal-rules/agency/available/:lenderId` | For a specific lender |
+| `GET /api/v1/portal/appraisal-rules/templates` | List rule templates |
+| `POST /api/v1/portal/appraisal-rules/rule-sets` | Adopt a rule set (`AdoptRulesDto`, `@ArrayNotEmpty templateIds`) |
+| `GET /api/v1/portal/appraisal-rules/rule-sets` | List rule sets |
+| `GET /api/v1/portal/appraisal-rules/rule-sets/update-status` | Template update availability |
+| `POST /api/v1/portal/appraisal-rules/rule-sets/import-updates` | Import template updates |
+| `GET /api/v1/portal/appraisal-rules/rule-sets/:id` | Get a rule set (404 on wrong tenant — never 403) |
+| `GET /api/v1/portal/appraisal-rules/rule-sets/:setId/rules/:ruleId` | Get a rule |
+| `PATCH /api/v1/portal/appraisal-rules/rule-sets/:setId/rules/:ruleId` | Update a rule (`UpdateRuleDto`, `pickAllowedFields` / `ALLOWED_UPDATE_FIELDS`) |
+| `PATCH /api/v1/portal/appraisal-rules/rule-sets/:setId/rules` | Bulk update (`BulkUpdateRulesDto`; sorted by ruleId to avoid deadlocks; throttle 30/min) |
+| `DELETE /api/v1/portal/appraisal-rules/rule-sets/:setId/rules/:ruleId` | Delete a rule (HTTP 200) |
+| `POST /api/v1/portal/appraisal-rules/rule-sets/:setId/rules` | Add a custom rule (`AddCustomRuleDto`); compound gated by `isCompoundRulesEnabled` |
+| `DELETE /api/v1/portal/appraisal-rules/rule-sets/:id` | Delete a rule set (HTTP 200) |
+| `GET /api/v1/portal/appraisal-rules/split-drafts` | List split-rule drafts |
+| `POST /api/v1/portal/appraisal-rules/split-drafts` | Create a split draft (wizard; throttle 20/min) |
+| `POST /api/v1/portal/appraisal-rules/split-drafts/:id/dismiss` | Dismiss a draft (HTTP 200) |
+| `GET /api/v1/portal/appraisal-rules/split-drafts/:id/resume` | Resume a draft (404 for not-found and wrong tenant; throttle 30/min) |
+
+<Warning>
+`POST /api/v1/portal/appraisal-rules` returns HTTP 410 Gone. Rule creation is via `POST /rule-sets/:setId/rules`. The sole custom-rule writer is `rule-sets.service.ts::addCustomRule` (writing to `appraisal_rules`); `appraisal_custom_rules` is no longer read and is being dropped.
+</Warning>
+
+Services: `rule-sets.service.ts` (custom-rule writer), `nl-parse.service.ts`, `preview.service.ts`, `split-drafts.service.ts`, `custom-rule-evaluator.ts`, `field-registry.ts`.
+
+### Staged bundles (super-admin)
+
+A second controller under `portal-appraisal-rules/staged-bundles` mounts at `api/v1/portal/admin`. Class-level `@Roles("super_admin")`, throttle 100/min. Staged bundles are curated rule sets that internal staff apply to a lender.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/admin/staged-rule-bundles` | List staged appraisal rule bundles (`StagedBundleListItem[]`) |
+| `POST /api/v1/portal/admin/lenders/:lenderId/staged-rule-bundles/:bundleId/apply` | Apply a curated bundle to a lender (HTTP 200) |
+
+## portal-credit-rules
+
+Controller: `portal-credit-rules/portal-credit-rules.controller.ts` at `api/v1/portal/credit-rules`. The credit twin of the appraisal-rules module: templates come from `appraisal_rule_templates WHERE module='credit'`, rule sets/rules live in `credit_rule_sets` / `credit_rules`, and the evaluator is `lib/credit-pipeline/rules/evaluator.ts::evaluateWithDb`.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/credit-rules/field-registry` | `CreditFieldRegistryResponse` |
+| `POST /api/v1/portal/credit-rules/parse-nl` | NL parse (`ParseNlDto`, `credit-nl-parse.service.ts`) |
+| `GET /api/v1/portal/credit-rules/templates` | List templates |
+| `POST /api/v1/portal/credit-rules/rule-sets` | Adopt |
+| `GET /api/v1/portal/credit-rules/rule-sets` | List |
+| `GET /api/v1/portal/credit-rules/rule-sets/update-status` | Update status |
+| `POST /api/v1/portal/credit-rules/rule-sets/import-updates` | Import updates |
+| `GET /api/v1/portal/credit-rules/rule-sets/:id` | Get (404 on wrong tenant) |
+| `POST /api/v1/portal/credit-rules/rule-sets/:setId/rules` | Add a custom rule |
+| `PATCH /api/v1/portal/credit-rules/rule-sets/:setId/rules/:ruleId` | Update |
+| `PATCH /api/v1/portal/credit-rules/rule-sets/:setId/rules` | Bulk update |
+| `DELETE /api/v1/portal/credit-rules/rule-sets/:setId/rules/:ruleId` | Delete rule (HTTP 200) |
+| `DELETE /api/v1/portal/credit-rules/rule-sets/:id` | Delete set (HTTP 200) |
+
+### Staged bundles (super-admin)
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/admin/staged-credit-rule-bundles` | List staged credit bundles |
+| `POST /api/v1/portal/admin/lenders/:lenderId/staged-credit-rule-bundles/:bundleId/apply` | Apply a bundle (HTTP 200) |
+
+## portal-income-rules
+
+Controller: `portal-income-rules/portal-income-rules.controller.ts` at `api/v1/portal/income-rules`. Same template-adoption pattern via `IncomeRuleSetsService`.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/income-rules/templates` | List templates |
+| `POST /api/v1/portal/income-rules/rule-sets` | Adopt |
+| `GET /api/v1/portal/income-rules/rule-sets` | List |
+| `GET /api/v1/portal/income-rules/rule-sets/update-status` | Update status |
+| `POST /api/v1/portal/income-rules/rule-sets/import-updates` | Import updates |
+| `GET /api/v1/portal/income-rules/rule-sets/:id` | Get |
+| `POST /api/v1/portal/income-rules/rule-sets/:setId/rules` | Add a custom rule |
+| `PATCH /api/v1/portal/income-rules/rule-sets/:setId/rules/:ruleId` | Update |
+| `PATCH /api/v1/portal/income-rules/rule-sets/:setId/rules` | Bulk update |
+| `DELETE /api/v1/portal/income-rules/rule-sets/:setId/rules/:ruleId` | Delete rule (HTTP 200) |
+| `DELETE /api/v1/portal/income-rules/rule-sets/:id` | Delete set (HTTP 200) |
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Appraisal runs" icon="house" href="/portal/api-appraisal">
+    Where adopted rules are displayed and overridden.
+  </Card>
+  <Card title="Credit and income runs" icon="credit-card" href="/portal/api-credit-income">
+    Rule results on credit and income runs.
+  </Card>
+  <Card title="Overrides and guidelines" icon="file-pen" href="/lender-config/overrides-and-guidelines">
+    How rule overrides and guidelines layer onto config.
+  </Card>
+  <Card title="Lenders, users, and programs" icon="building" href="/portal/api-lenders-users-programs">
+    Agency adoptions and the lender-scoped rule mirror.
+  </Card>
+</Columns>

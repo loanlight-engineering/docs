@@ -1,0 +1,75 @@
+---
+title: Lender portal overview
+description: What the portal is and who uses it.
+icon: layout-dashboard
+---
+
+The lender portal (`@loanlight/app`, in `loanlight-api/packages/app`) is the Next.js 15 web app that lender staff use to run and review LoanLight's AI underwriting tools. It is a stateless Backend-For-Frontend (BFF): it holds no pipeline business logic and proxies almost everything to the [loanlight-api backend](/overview/repositories) under `/api/v1/portal/*`.
+
+- **Prod URL:** `https://portal.loanlight.com`
+- **Local:** `http://localhost:3001` (the NestJS/Fastify backend runs on `:3000`)
+- **Metadata title:** "LoanLight Portal — AI-powered underwriting tools"
+
+## What staff do here
+
+<Columns cols={2}>
+  <Card title="Run and review audits" icon="clipboard-check">
+    Run a full multi-agent loan audit and review findings: data consistency, document health, property data, 1003/URLA completeness, and credit results.
+  </Card>
+  <Card title="Appraisal review" icon="house">
+    Upload appraisal PDFs/XML, watch extraction, correct fields in the human-in-the-loop (HITL) screen, review rule findings, and view comparables, photos, and an executive dashboard.
+  </Card>
+  <Card title="Credit review" icon="credit-card">
+    Upload and review credit reports, tradelines, inquiries, public records, fraud messages, and rule findings.
+  </Card>
+  <Card title="Income analysis" icon="banknote">
+    Bank-statement income analysis plus wage-earner, self-employed, rental, and asset-based families, each with HITL review.
+  </Card>
+  <Card title="DSCR agent" icon="calculator">
+    A manual DSCR calculator (feature-flagged, V1 manual entry only).
+  </Card>
+  <Card title="Classification" icon="files">
+    Document classification: an upload zone plus a results table.
+  </Card>
+  <Card title="Guideline chat (LLUE)" icon="message-circle">
+    Chat over loan guidelines, surfaced as a floating chat drawer rather than a standalone page.
+  </Card>
+  <Card title="Settings and admin" icon="settings">
+    Manage users, loan programs, appraisal/credit/agency rules, key-field-review config, and appraiser deny lists. Internal admins manage client orgs, YAML configs, and shadow-audit diffs.
+  </Card>
+</Columns>
+
+## Who uses it
+
+The portal has four roles: three tenant roles (`client_admin`, `client_user`, `read_only`) plus one internal global role (`super_admin`). See [authentication and roles](/portal/auth-and-roles) for how access is enforced.
+
+Internal super admins can also impersonate any tenant ("View as Client") to reproduce what a lender sees. See [impersonation](/portal/impersonation).
+
+## Two surfaces, one app
+
+The portal renders two distinct UIs from the same codebase:
+
+<CardGroup cols={2}>
+  <Card title="Authenticated portal" icon="lock">
+    The main shell behind WorkOS AuthKit login, where lender staff run and configure tools. See the [route and feature map](/portal/feature-map).
+  </Card>
+  <Card title="Partner results viewer" icon="eye" href="/portal/partner-results-viewer">
+    A separate viewer at `/results/audits/[auditId]` authenticated by a short-lived view JWT (no WorkOS login), used by partners and the Encompass (EPC) iframe.
+  </Card>
+</CardGroup>
+
+## Tech stack
+
+| Concern | Choice |
+|---|---|
+| Framework | Next.js 15.5.19 (App Router), `output: "standalone"` |
+| UI | React 19, Tailwind CSS v4, shadcn/ui + radix-ui, `@loanlight-engineering/shared-ui`, `lucide-react` |
+| Auth | WorkOS AuthKit via `@loanlight-engineering/shared-auth` |
+| AWS | `@aws-sdk/client-s3` (uploads), `@aws-sdk/client-ses` (invite/reset emails); LocalStack locally |
+| LLM | `@anthropic-ai/sdk` for natural-language rule parsing and an agentic extraction fallback |
+| Observability | Datadog RUM + browser-logs, `dd-trace`, `pino` |
+| Testing | Vitest (unit, jsdom), Playwright + `playwright-bdd` (Gherkin) |
+
+<Note>
+The portal is stateless. It has no local database. The App `CLAUDE.md` line claiming `src/db/schema/*.ts` and `pnpm db:push` is out of date — the only persistence helpers are `src/lib/s3.ts` (S3 uploads) and `src/lib/email/ses.ts` (SES). All real data lives in [loanlight-api](/overview/repositories). See [portal architecture (BFF)](/portal/architecture-bff).
+</Note>

@@ -1,0 +1,151 @@
+---
+title: EPC integration HTTP API
+description: The HTTP endpoints exposed by the integration service.
+icon: route
+---
+
+The encompass service exposes a small set of HTTP endpoints. There is **no global route prefix** — every path is literal (`/integrations/...`, `/auth/encompass`).
+
+## Auth model
+
+Two layers protect these routes.
+
+<Steps>
+<Step title="Gateway authorizer (production)">
+API Gateway (REST) sits in front of an NLB → VPC Link → ECS. A Lambda authorizer (`Bearer-Token-Authorizer` / `EncompassAuthFunction`) validates the caller's FusionAuth RS256 JWT and forwards the resolved lender identity as the `X-Requestor-ID` header. The Nest app's `ConditionalJwtAuthGuard` is a **no-op in prod** — `canActivate` returns `true` when `USE_LOCAL_AUTH` is unset — so it trusts the gateway.
+</Step>
+<Step title="Local bearer auth">
+`USE_LOCAL_AUTH=true` activates the `requireBearerAuth` middleware plus a passport `JwtStrategy` (HS256, `JWT_SECRET` / `JWT_ISSUER` / `JWT_AUDIENCE`) and enables `POST /auth/encompass`.
+</Step>
+</Steps>
+
+The bearer middleware is applied globally **except** to paths starting with `/integrations/webhooks`, `/integrations/v1/health`, `/auth/encompass`, and `/integrations/images`. Webhook routes are authenticated separately by HMAC (see [Webhook security](/integrations/epc-webhook-security)).
+
+See [Integrations infrastructure](/integrations/infrastructure) for the gateway and authorizer details.
+
+## Endpoints
+
+| Method & path | Controller | Auth |
+|---|---|---|
+| `POST /auth/encompass` | `TokenController` | none (local only) |
+| `POST /integrations/origin` | `EpcOriginController` | `ConditionalJwtAuthGuard` |
+| `GET /integrations/webhooks` | `WebhooksController` | none |
+| `POST /integrations/webhooks/events` | `WebhooksController` | HMAC |
+| `POST /integrations/webhooks/transactions` | `WebhooksController` | HMAC |
+| `GET /integrations/audit-details/:id` | `AuditDetailsController` | `ConditionalJwtAuthGuard` |
+| `GET /integrations/audit-details/:id/stream` | `AuditDetailsController` | `ConditionalJwtAuthGuard` |
+| `POST /integrations/admin/trigger-recovery` | `AdminRecoveryController` | `ENABLE_ADMIN_ENDPOINTS` |
+| `GET /integrations/documents/:transactionStateId` | `DocumentsController` | `ConditionalJwtAuthGuard` |
+| `GET /integrations/documents/:transactionStateId/:filename` | `DocumentsController` | `ConditionalJwtAuthGuard` |
+| `GET /integrations/audits/:auditId/external-url` | `ResultsAccessController` | `ConditionalJwtAuthGuard` |
+| `GET /integrations/images` (+ subpaths) | `ImagesController` | none |
+| `GET /integrations/v1/health` | `HealthController` | none |
+| `GET /integrations/v1/health/full` | `HealthController` | none |
+| `GET /integrations/v1/health/sqs` | `HealthController` | none |
+| `GET /integrations/v1/health/events/audit-requested` | `HealthController` | none |
+| `POST /integrations/v1/health/audit-state` | `HealthController` | none |
+
+## Webhooks
+
+### POST /integrations/webhooks/transactions
+
+Encompass transaction webhook (created/updated). Verified by HMAC. Calls `WebhooksService.handleWebhook`. See [Audit lifecycle](/integrations/audit-lifecycle).
+
+<ResponseField name="message" type="string">
+Always `"Transaction received"`. The webhook returns immediately; processing is async via SQS.
+</ResponseField>
+
+### POST /integrations/webhooks/events
+
+Encompass event webhook. Verified by HMAC. Sets `body.environment` from the `elli-environment` header, generates a `webhookIngestionId`, then calls `WebhooksService.handleEventWebhook`. Returns the same `{ message: "Transaction received" }`.
+
+### GET /integrations/webhooks
+
+Unauthenticated liveness string: `"Hello World From Webhooks!"`.
+
+## Frontend bootstrap
+
+### POST /integrations/origin
+
+The endpoint the [frontend plug-in](/integrations/frontend-plugin) calls to fetch Encompass "origin" (loan) data plus the current audit state. Reads `x-is-uat` (default true) and calls `EpcService.getOrigin(body, true)` — credentials are stripped before returning to the frontend.
+
+## Audit progress
+
+### GET /integrations/audit-details/:id
+
+Returns the current `AuditDetail` for an EPC transaction id. If none exists yet, returns a synthetic `Processing` placeholder (`id: pending-{id}`, `progressStep: initializing`) so the frontend JSON parser does not choke. Sets `Cache-Control: no-store`.
+
+### GET /integrations/audit-details/:id/stream
+
+A Server-Sent Events stream of audit progress.
+
+- Polls `getAuditDetails` every 2 s, with a 30-minute overall timeout.
+- A 30 s grace period with heartbeats dodges API Gateway's 29 s idle timeout, and stale terminal states are ignored during grace.
+- Ends on `Complete`, `Failed`, or `Error`.
+- Each event emits `{ auditState, transactionStateId, updated, error*, progress* }`.
+- Sets `X-Accel-Buffering: no`.
+
+## Documents
+
+### GET /integrations/documents/:transactionStateId
+
+Lists document filenames for a transaction.
+
+<ResponseField name="documents" type="string[]" />
+<ResponseField name="transactionStateId" type="string" />
+
+### GET /integrations/documents/:transactionStateId/:filename
+
+Streams a PDF from S3 (`Content-Type: application/pdf`, `inline`).
+
+<ParamField query="presigned" type="boolean">
+When `true`, returns `{ url, filename, expiresIn }` (a presigned S3 URL) instead of streaming bytes.
+</ParamField>
+<ParamField query="expiresIn" type="number">
+Presigned URL lifetime in seconds, used with `presigned=true`.
+</ParamField>
+
+## External results URL
+
+### GET /integrations/audits/:auditId/external-url
+
+Mints a short-lived external results URL for an audit — the "pop-out" full results view served by loanlight-api.
+
+<ParamField path="auditId" type="string" required>
+Must be a UUIDv4.
+</ParamField>
+<ParamField header="X-Requestor-ID" type="string" required>
+The resolved lender identity, set by the gateway authorizer (or local middleware).
+</ParamField>
+<ResponseField name="url" type="string" />
+<ResponseField name="expiresAt" type="string" />
+
+See [Results access](/integrations/results-access) for the upstream call and error mapping.
+
+## Admin and health
+
+### POST /integrations/admin/trigger-recovery
+
+Manually runs `recoverStuckAudits()`. Returns `404` unless `ENABLE_ADMIN_ENDPOINTS=true`; otherwise `{ triggered: true }`.
+
+### Health endpoints
+
+| Path | Behaviour |
+|---|---|
+| `GET /integrations/v1/health` | Lightweight `{ status: "ok", timestamp }`. |
+| `GET /integrations/v1/health/full` | Full check including external services; `503 { status: "degraded" }` on failure. |
+| `GET /integrations/v1/health/sqs` | Enqueues a health-check SQS message; `{ accepted: true }`. |
+| `GET /integrations/v1/health/events/audit-requested` | Publishes a test "Audit Requested" EventBridge event. |
+| `POST /integrations/v1/health/audit-state` | Dev-only: forces `AusUpdateService.handleAusUpdate({ transactionStateId, auditState })`. |
+
+## Images proxy
+
+### GET /integrations/images
+
+An image proxy. It is a single special-cased gateway resource, registered so GETs hit it before the catch-all route. Bypasses the bearer middleware.
+
+## Local token mint
+
+### POST /auth/encompass
+
+Local-dev token mint. Returns `403` unless `USE_LOCAL_AUTH`. Reads headers `x-origin-id`, `x-partner-access-token`, `x-is-uat`, `x-session-id` and calls `TokenService.authenticate`.

@@ -1,0 +1,100 @@
+---
+title: Lender resolution and tenant attribution
+description: How an incoming loan is attributed to a lender.
+icon: building
+---
+
+Every audit must belong to exactly one lender (the tenant boundary). On the EPC path the loan
+arrives with an Encompass `requestorId` but no LoanLight lender id, so the orchestrator must
+resolve the requestor to a lender before it writes anything. That resolution is
+`resolveLender`.
+
+## resolveLender
+
+`resolveLender(requestorId, requestingPartyName?)` returns `{ id, configProfile }` with a
+**non-null** id. It never returns a null lender — that guard prevents cross-tenant null-lender
+loan writes.
+
+<Steps>
+  <Step title="Primary lookup by requestorId">
+    ```sql
+    SELECT lenders.id, lenders.config_profile
+    FROM lender_auth_clients
+    INNER JOIN lenders ON lender_auth_clients.lender_id = lenders.id
+    WHERE lender_auth_clients.client_id = :requestorId
+    ```
+    A hit short-circuits with no writes. `config_profile` defaults to `"default"` when null.
+  </Step>
+  <Step title="Self-healing fallback by name">
+    Only on a primary miss **and** when `requestingPartyName` is present:
+    upsert a lender by name (`INSERT INTO lenders (name) ... onConflictDoNothing(target: name)`,
+    wrapped in try/catch so a transient failure falls through to a name SELECT), then backfill
+    `INSERT INTO lender_auth_clients { lender_id, client_id: requestorId, source: "encompass" }
+    onConflictDoNothing(target: client_id)` (best-effort).
+  </Step>
+  <Step title="Throw on double miss">
+    If `requestorId` is unmapped **and** there is no name, `resolveLender` throws. The
+    orchestrator's catch routes that to `saveAuditError` → `failAuditRun` → `WORKFLOW.ERROR`.
+  </Step>
+</Steps>
+
+## lender_auth_clients
+
+The lookup primitive is `lender_auth_clients` (`database/schema/lender-auth-clients.ts`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `lender_id` | uuid NOT NULL → `lenders.id` (cascade) | |
+| `client_id` | text NOT NULL | external IdP / org / requestor id |
+| `source` | text NOT NULL | check: `fusionauth \| encompass \| devconnect \| workos` |
+| `created_at`, `updated_at` | timestamptz | |
+
+The unique index `lender_auth_clients_client_id_uniq` on `client_id` is the tenant-attribution
+security primitive — `client_id` is globally unique across all lenders.
+
+<Warning>
+Lookups filter **only** on `client_id`, never on `source`. The `source` value records which
+auth provider owns the `client_id` (WorkOS keys, FusionAuth orgs, Encompass requestor ids,
+Dev Connect clients); it is informational and is unrelated to the integration of origin. The
+unique index is what enforces correctness, so adding a `source` predicate would be both
+redundant and a way to accidentally split a tenant.
+</Warning>
+
+The same single-predicate lookup backs the EPC read-side guard,
+[EncompassRequestorAuthGuard](/integrations/results-access), which sets
+`req.user = { lenderId, lenderCode: configProfile ?? "default" }` from a comma-joined requestor
+header and rejects ambiguous (multi-lender) candidate sets with 401.
+
+## config_profile is the lender code
+
+`resolveLender` returns the lender's `config_profile`, which is the **lender code** used for
+YAML config lookup (for example `"luxury"`, falling back to `"default"`). There is no
+`lenders.lender_code` column. The orchestrator defaults `loanMetadata.lenderCode` to the
+resolved `config_profile` when unset, then upserts the loan with `lenderId`. See
+[Lender configuration overview](/lender-config/overview).
+
+## Shadow-audit lender resolution
+
+Shadow audits (LOA-731) still resolve through `resolveLender`. When
+`additionalData.isShadowAudit === true` and `additionalData.shadowAuditLenderName` is a
+non-empty trimmed string, the orchestrator swaps the name argument to the shadow name:
+
+```text
+resolveLender(requestorId, shadowName ?? requestingParty?.name)
+```
+
+The requestor id is unchanged, so the primary lookup still wins when the requestor is mapped.
+The name swap only matters on the self-healing fallback. Shadow audits otherwise run the full
+agent suite like any other audit. See [Shadow audits](/integrations/shadow-audits).
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Lender configuration" href="/lender-config/overview" icon="sliders-horizontal">
+    YAML config, feature flags, and entitlements keyed on the resolved lender.
+  </Card>
+  <Card title="Orchestration pipeline" href="/integrations/orchestration-pipeline" icon="workflow">
+    Where resolveLender sits in processAuditRequest.
+  </Card>
+</Columns>

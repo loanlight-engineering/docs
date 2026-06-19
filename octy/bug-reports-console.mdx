@@ -1,0 +1,97 @@
+---
+title: Bug Reports console
+description: Triggering and reviewing Oz investigations from the UI.
+icon: bug
+---
+
+The Bug Reports console at `/bug-reports` is the operator surface where engineers triage reported audit issues and delegate them to Oz, the autonomous coding agent. It is the human side of the [Oz run lifecycle](/octy/oz-run-lifecycle): you pick a skill, attach context, launch a run, then come back to read the agent's summary and any PRs it opened.
+
+The page lives in `src/app/(app)/bug-reports/page.tsx` plus its panel components (`RunDetailPanel.tsx`, `RunTimeline.tsx`, `ContextRunSelector.tsx`, `ModelPicker.tsx`, `IssueComments.tsx`).
+
+## The issue list
+
+The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue references an `audit_run_id` and a `loan_id`, and carries aggregate counts (run count, latest run status, PR count, comment count) plus its attached labels.
+
+Filters are URL-driven, so a filtered view is shareable:
+
+| Filter | Query param | Notes |
+|---|---|---|
+| Status | `status` / `intake_status` | Comma list. Default shows `new,acknowledged,delegated,ai_complete,in_review` (hides `closed`/`cancelled`). |
+| Agent | `agents` | Comma list of `AGENT_TYPE_VALUES`, matched against `related_traces[].agent_type`. |
+| Labels | `labels` | Comma list of label UUIDs. |
+| Lender | `lenders` | Comma list of lender UUIDs (resolved against `loans.lender_id`). |
+| Search | `q` | ILIKE over loan number or `audit_run_id`. |
+| Sort | `sort` | `date_asc` or `date_desc`. |
+
+The default page size is 20 (options 10/20/50/100). The `StatusChangerBadge` lets you change an issue's `intake_status` inline; it PATCHes `/api/octy-issues/[id]`.
+
+<Info>
+Issues are usually created upstream from the loanlight-api portal (or from Octy's own Loan Lookup BugReportPanel) via `POST /api/bug-reports`. See [Issues, runs, labels API](/octy/issues-runs-labels-api) for the intake contract.
+</Info>
+
+## The issue detail panel
+
+Selecting an issue opens a right-hand drawer (`PanelShell`) with the issue meta (loan, audit run, dates, status, labels), the description, related agent runs as LangSmith trace chips, the comment thread, and the Trigger Octy form.
+
+### Trigger Octy
+
+<Steps>
+<Step title="Name the run (optional)">
+A free-text run name, max 80 characters. If you set it, the agent cannot overwrite it on completion — your label wins.
+</Step>
+<Step title="Attach previous run context (optional)">
+`ContextRunSelector` lists prior runs on this issue that succeeded and have a non-null `summary`. Selected runs are loaded into a "Previous Run Context" section of the prompt, so a fix-and-PR run can build on an earlier root-cause run.
+</Step>
+<Step title="Review MCP servers">
+LangSmith CLI access and the LangChain Docs MCP are shown as read-only checked. The Datadog MCP attaches automatically when the Datadog keys are configured (see [Environment variables](/octy/environment-variables)).
+</Step>
+<Step title="Pick a model">
+`ModelPicker` is a cascading provider menu. The default is `claude-4-8-opus-xhigh`. The chosen `modelId` is passed straight through to Warp's `config.model_id`.
+</Step>
+<Step title="Pick a tentacle (skill)">
+A radio over `OZ_SKILLS`: Root Cause Analysis, RCA Fix & PR, or Ad Hoc. See [Oz skills](/octy/oz-skills) for what each does.
+</Step>
+<Step title="Add custom instructions / attach comments">
+Custom instructions apply to the fixed tentacles (RCA and fix-and-PR) as an "Additional User Instructions" section. The Attach comments checkbox folds the issue's comments into the prompt.
+</Step>
+<Step title="Launch">
+`handleLaunchOcty` POSTs to `/api/octy-issues/[id]/oz-run`, which builds the prompt, launches the Warp run, writes an `octy_runs` row, and moves the issue to `delegated`.
+</Step>
+</Steps>
+
+### Live prompt preview
+
+The panel assembles a live preview of the exact prompt the server will build. It calls `buildBasePrompt` client-side with placeholder tokens (and `datadogAvailable: true`) and appends the context, comments, and skill sections, mirroring the server. For the Ad Hoc tentacle the preview is an editable textarea seeded with the skill's pre-fill, which becomes the `customPrompt`.
+
+<Tip>
+The preview is the same code path the server runs, so what you see is what the agent receives (minus the real bearer token, which is injected server-side).
+</Tip>
+
+## Reviewing run history
+
+The detail panel also surfaces the issue's runs (from `GET /api/octy-issues/[id]/runs`, newest first). `RunDetailPanel` and `RunTimeline` render each run's status, model, skill, and timeline. While a run is active, the UI polls `GET /api/octy-runs/[runId]/status`, which retrieves the live Warp state and persists changes (including the `oz_session_url` Warp session link).
+
+`ACTIVE_OZ_STATUSES` is `queued`, `pending`, `claimed`, `in_progress`. When a run is active the panel warns that a run is in progress but still lets you launch another.
+
+When a run finishes, the completion webhook stores its markdown `summary` and `pr_urls`, and advances the issue to `ai_complete` (only if it was still `delegated`). The summary renders as markdown in the run detail; PR links open against loanlight-api. From there engineers move the issue to `in_review`, `closed`, or `cancelled`.
+
+<Note>
+Per-run completion never silently overwrites an engineer's manual status — the `delegated → ai_complete` transition only fires when the issue is still `delegated`. See [Completion webhook](/octy/completion-webhook).
+</Note>
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Oz run lifecycle" href="/octy/oz-run-lifecycle" icon="workflow">
+What happens after you click Launch.
+</Card>
+<Card title="Oz skills" href="/octy/oz-skills" icon="list">
+The three tentacles and what each produces.
+</Card>
+<Card title="Issues, runs, labels API" href="/octy/issues-runs-labels-api" icon="code">
+The endpoints behind this console.
+</Card>
+<Card title="Completion webhook" href="/octy/completion-webhook" icon="webhook">
+How summaries and PRs land back in the UI.
+</Card>
+</Columns>

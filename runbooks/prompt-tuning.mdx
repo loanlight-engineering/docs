@@ -1,0 +1,91 @@
+---
+title: Prompt tuning workflow
+description: The on-demand methodology for fixing agent behaviour via prompt + eval fixtures.
+icon: sliders-horizontal
+---
+
+Some agent bugs are not code bugs — they are prompt bugs. The model is doing what its prompt told it to, and the prompt is wrong or incomplete for a class of inputs. The fix is a targeted prompt change plus a regression fixture that captures the failing case, validated by a repeatable eval. This runbook is that workflow.
+
+Prompt tuning is **not** an Oz skill. There are only three skills (`root-cause-analysis`, `rca-fix-and-pr`, `ad-hoc`). Prompt tuning is delivered as an on-demand instruction set, fetched mid-run. See [Oz skills](/octy/oz-skills).
+
+<Note>
+  An out-of-date description (and `CLAUDE.md`) may list a fourth `prompt-tuning` skill. That skill no longer exists. A fix-and-PR run that turns out to need prompt tuning fetches the instructions on demand instead.
+</Note>
+
+## Fetch the instructions
+
+When a fix is a prompt change, retrieve the workflow with the `fetch-instructions` tool. It is the only supported instruction type today.
+
+```text
+POST /api/oz/tools/fetch-instructions
+{ "type": "prompt-tuning" }
+→ { "type": "prompt-tuning", "instructions": "## Prompt Tuning Instructions ..." }
+```
+
+The returned instructions are the authoritative, current workflow. An unknown `type` returns 400 with the `supported_types` list. This is a token-authenticated Oz tool call; see [the Oz tool API](/octy/oz-tool-api).
+
+## The workflow
+
+<Steps>
+  <Step title="Phase 1 — Investigate the failing trace">
+    Open the LangSmith trace for the related agent run (retry the MCP connection up to 10 times with backoff if unavailable). Identify the **node** that produced the wrong output (for example `validateField`, `planValidation`, `documentCompleteness`), the **inputs** it saw, the **actual vs. expected** output, and the **prompt file(s)** that drove it. Then find that node's `eval/` directory under `packages/api/src/langgraph/agents/`. Nodes with an eval have a sibling `eval/` folder containing `eval.ts` and a `fixtures/` subdirectory. This is the same trace work as [tracing a bad field](/runbooks/tracing-a-bad-field).
+  </Step>
+  <Step title="Phase 2 — Add a fixture from the trace, verbatim">
+    Add a new test case to the relevant fixture file in the node's `eval/fixtures/` (or a new file if the scenario type does not exist).
+
+    - **Match the existing fixture format exactly.** Read the sibling fixtures first and mirror their JSON schema, field names, and structure. Do not invent a format.
+    - **All fixture data must come directly from the trace — character for character.** Copy the actual inputs (field values, document content, borrower context, pipeline IDs, snippet text, chunk references) verbatim. Do not paraphrase, fabricate similar-looking data, or generate synthetic inputs. The fixture must reproduce the exact scenario that failed.
+    - Name and describe the fixture by the **class** of problem in plain language (for example "Co-borrower name in borrower-only document should be missing"), not by the loan number.
+    - Set `expected` to the **correct** output the prompt should produce — the right answer, not what it currently returns.
+  </Step>
+  <Step title="Phase 3 — Iterative tuning loop">
+    Create `prompt-tuning-log.md` next to `eval.ts`. This is your experiment journal and **must never be committed**. Initialise it with the problem statement and the target eval path.
+
+    Run the target eval first to confirm the new fixture currently **fails** (use the relevant `pnpm eval:*` script). Then loop:
+
+    1. **Hypothesise** a minimal, targeted change that fixes the *class* of problem, not just the one case.
+    2. **Apply** it to the prompt file(s).
+    3. **Run** the target eval.
+    4. **Record** the change, result, and observation in `prompt-tuning-log.md`.
+    5. When all fixtures pass, run the eval **two more times** to confirm stability.
+
+    Continue until the target eval passes **3 consecutive times**. If a change makes the new fixture pass but breaks an existing fixture, revert it and take a different approach (overfitting guard).
+  </Step>
+  <Step title="Phase 4 — Commit prompt + fixture only, open a PR">
+    Stage and commit **only** the new/modified fixture file(s) and the modified prompt file(s). Do **not** commit `prompt-tuning-log.md` or any other iteration artefacts. Open a pull request against the `main` branch of `loanlight-api` with a concise title and a body covering the problem, the root cause, and the prompt change. Request review from `@loanlight-engineering/eng-team` and include the Octy footer (the fix-and-PR ground rules).
+  </Step>
+  <Step title="Phase 5 — Report via the completion webhook">
+    Call `octy-run-complete` once with `pr_urls` (array of PR URLs) and a markdown `summary` covering the problem, the fixture added, the full iteration history from `prompt-tuning-log.md`, the final prompt change, and the final eval scores. See [the completion contract](/octy/completion-webhook).
+  </Step>
+</Steps>
+
+<Warning>
+  Three consecutive passing runs is the bar because these evals call live LLMs and are non-deterministic. A single green run can be luck. The loop is not "make it pass once" — it is "make it pass reliably, without regressing other fixtures."
+</Warning>
+
+## The eval scripts
+
+Evals are `ts-node` harnesses defined as `pnpm eval:*` scripts in `loanlight-api/packages/api/package.json`. Each loads fixtures from a node's `eval/fixtures/`, runs the node against them, scores each case, and reports a pass percentage (the validation evals pass at 80% per case). Use `--list` to enumerate fixtures and `--fixture <name>` (or `--field <Name>`) to narrow the run.
+
+| Script | Node under test |
+|---|---|
+| `pnpm eval:pii-validate-field` | PII `validateField` (one fixture per field: full-name, social-security-number, mailing-address, …) |
+| `pnpm eval:pii-plan-validation` | PII `planValidation` |
+| `pnpm eval:pii-all` | both PII evals in sequence |
+| `pnpm eval:extract-section1` | URLA `extractSection1` (name/suffix extraction) |
+| `pnpm eval:extract-section2-and-3` | URLA `extractSection2And3` (REO mortgage linkage) |
+| `pnpm eval:doc-completeness` | Document Health `documentCompleteness` |
+| `pnpm eval:doc-expiration` | Document Health `validateDocumentExpiration` |
+| `pnpm eval:doc-sig-cue` | Document Health signature verification |
+
+The doc-completeness and doc-expiration evals also expose targeted variants (`:list`, `:basics`, `:dates`, `:multi-doc`, `:composite`, `:w2`, `:paystub`) for running a single fixture during the loop. {/* TODO: verify the full list of targeted eval variants if a new one is added; the table above reflects package.json at time of writing. */}
+
+## How the fixtures actually run
+
+Knowing the harness shape keeps your fixture authoring honest. For the PII `validateField` eval, the harness monkeypatches `retrieveDocumentSnippets` to return the fixture's `mockDocumentContent` (with optional `mockSnippetMetadata.classification_type`), runs `ValidateFieldNode.execute`, and scores field match (10) + `hasIssue` (40) + `issueKind` (30) + `docValue` (20), with an 80% pass threshold. So the document content and metadata you copy from the trace *are* the retrieval input — getting them verbatim is what makes the fixture reproduce the real failure. A paraphrased snippet tests a different scenario than the one that broke.
+
+## What this workflow is and is not
+
+- It is for **prompt** bugs: the model behaved per its prompt, and the prompt was wrong for a class of inputs. The fix lives in a prompt file plus a fixture.
+- It is **not** for code or scoping bugs. If the value never reached the model (a retrieval or [scoping](/runbooks/pii-scoping-debug) problem) or a deterministic post-LLM safety net overrode the model, tuning the prompt will not help — and the eval will not exercise the real path.
+- The committed artefacts are exactly two kinds: prompt files and fixture files. Everything else — the log, scratch runs, partial experiments — stays out of the PR.

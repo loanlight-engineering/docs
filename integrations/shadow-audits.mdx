@@ -1,0 +1,67 @@
+---
+title: Shadow audits
+description: The LOA-731 shadow-audit mechanism.
+icon: copy
+---
+
+Shadow audits (LOA-731) run a second, parallel audit alongside a real one — typically to exercise additional agents (such as credit) or a different lender configuration without affecting what the lender sees in Encompass. The shadow audit produces a PDF stored in S3 and **never PATCHes Encompass**.
+
+<Note>
+Shadow audits are gated by `SHADOW_AUDIT_ENABLED=true` and default **off**, so production behaviour is unchanged unless the flag is set.
+</Note>
+
+## How a shadow run is created
+
+After publishing the real "Audit Requested" event, `processTransaction` optionally calls `fanOutShadowAudit`:
+
+<Steps>
+<Step title="Create synthetic records">
+A synthetic shadow `loan`, `transaction_record` (`is_shadow = true`), and `transaction_state` are created. Their IDs are **deterministic**, derived from the real `correlationId`, so SQS re-deliveries dedup rather than spawning duplicate shadow runs.
+</Step>
+<Step title="Mark the loan number">
+The shadow loan gets a loan-number suffix: `SHADOW_LOAN_NUMBER_MARKER` plus 8 hex chars. This marker is what the defensive guards later detect.
+</Step>
+<Step title="Publish a second Audit Requested">
+A second "Audit Requested" event is published with an `additionalData` block:
+
+```json
+{
+  "isShadowAudit": true,
+  "shadowOfTransactionId": "...",
+  "shadowOfCorrelationId": "...",
+  "shadowAuditLenderName": "loanlight-shadow",
+  "shadowLoanNumber": "..."
+}
+```
+
+`shadowAuditLenderName` defaults to `"loanlight-shadow"`.
+</Step>
+</Steps>
+
+Shadow fan-out failures are **swallowed** — they never block the real audit.
+
+## Lender resolution without leaking identity
+
+The point of the shadow is to run under a different lender configuration (`resolveLender(shadowAuditLenderName)`) while keeping the real lender's `requestingParty.name` **byte-identical** to the real audit. The shadow resolves its own lender by name (via the [`lender` table](/integrations/database-schema)) for config purposes, but the requesting-party payload is preserved exactly so downstream behaviour that keys on it is not perturbed.
+
+Shadow audits run **all agents, including credit**, which is what makes them useful for validating agent coverage that a given lender's normal entitlements might not include.
+
+## Completion: write PDF, never touch Encompass
+
+When the shadow run completes, the AUS update consumer detects it and routes to `handleShadowAusUpdate`:
+
+- Writes the AUS Report PDF to `shadow-audits/{transactionStateId}/AUS-Report.pdf` (`SHADOW_S3_PREFIX`).
+- Reconciles `transaction_state` to `ShadowComplete` or `ShadowFailed`.
+- Emits a `shadow_audit_complete` log line.
+- **Never PATCHes Encompass.**
+
+`transaction_record.partner_status` shadow values (`ShadowProcessing`, `ShadowComplete`, `ShadowFailed`) are local-only; Encompass never sees them.
+
+## Guards against leaking into the real loan
+
+Several layers prevent a shadow run from ever touching the real Encompass transaction:
+
+- `workflow:start` handling **skips shadow runs entirely** (see [Messaging](/integrations/messaging)).
+- `AusUpdateService.handleAusUpdate` checks `is_shadow` (or `additionalData.isShadowAudit`) and routes to `handleShadowAusUpdate` before any Encompass call.
+- Defense-in-depth `assertNotShadowLoan` throws `ShadowLoanLeakError` if a loan number carries the shadow marker on a path that would PATCH Encompass.
+- The stuck-audit recovery cron excludes shadow rows by design (see [Audit lifecycle](/integrations/audit-lifecycle)).

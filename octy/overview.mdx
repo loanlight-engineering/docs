@@ -1,0 +1,66 @@
+---
+title: Octy overview
+description: LoanLight's self-healing AI command center.
+icon: octagon
+---
+
+Octy is LoanLight's internal self-healing AI command center. It is a Next.js 16 (App Router, React 19) full-stack app that turns reported audit bugs into autonomous AI investigations and gives engineers a console to triage, delegate, and review them.
+
+When an underwriter or engineer finds something wrong with an audit run — a misclassified document, a missing URLA field, a PII mismatch — they file an issue against that `audit_run_id`. Octy hands the issue to **Oz**, an autonomous coding agent running on Warp's Oz Agent SDK. Oz reads LangSmith traces, the loanlight-api codebase, and the loan's audit data, then reports a root cause and (optionally) opens a fix PR. Engineers review the result back in Octy.
+
+<Note>
+Octy is internal-only. Every protected route requires a WorkOS-authenticated user whose email ends in `@loanlight.com` (`isAllowedDomain` in `src/lib/auth-domain.ts`). The only routes that bypass WorkOS middleware are `/api/health` (public health check) and `/api/oz/tools/*` (protected by per-run bearer token instead). See [auth and access](/octy/auth-and-access).
+</Note>
+
+## What Octy does
+
+<Steps>
+  <Step title="Receives bug reports (issues)">
+    Issues are created against a specific `audit_run_id` + `loan_id`, with optional LangSmith trace references. They come from the loanlight-api portal's loan lookup, or from Octy's own Loan Lookup bug-report panel. See [issues, runs, and labels API](/octy/issues-runs-labels-api).
+  </Step>
+  <Step title="Delegates investigations to Oz">
+    Octy builds a large prompt (identity, ground rules, system architecture, auth, a generated data-tool catalog, a completion contract, and one skill) and launches a Warp Oz run. See [the Oz run lifecycle](/octy/oz-run-lifecycle).
+  </Step>
+  <Step title="Exposes a private callback API">
+    The running agent calls back into `/api/oz/tools/*` — token-authenticated and scoped to the issue's audit run — to fetch audit data, list and read the loan's S3 objects, refresh its token, fetch on-demand methodology instructions, and signal completion. See [the Oz tool API](/octy/oz-tool-api).
+  </Step>
+  <Step title="Surfaces the result for review">
+    On completion the agent posts a markdown summary plus any PR URLs; Octy stores them and advances the issue to `ai_complete`. Engineers read the summary and PR, then move the issue to `in_review`, `closed`, or `cancelled`.
+  </Step>
+</Steps>
+
+## Operator tooling
+
+Beyond the Oz loop, Octy gives engineers a set of read-and-configure surfaces over the shared LoanLight database and loanlight-api.
+
+<Columns cols={2}>
+  <Card title="Bug reports console" href="/octy/bug-reports-console" icon="bug">
+    Triage the issue queue, delegate runs, pick a skill and model, and review summaries and PRs.
+  </Card>
+  <Card title="DB Studio" href="/octy/db-studio" icon="database">
+    Read-only Postgres explorer with an ER diagram. Disabled in production (404).
+  </Card>
+  <Card title="Classify and split config" href="/octy/classify-split-config" icon="scissors">
+    Edit categories, rules, and PII doc-type rules; run a live dry-run against loanlight-api.
+  </Card>
+  <Card title="Billing reports" href="/octy/billing" icon="receipt">
+    Count billable loans per lender, anchored on each loan's first completed non-shadow audit run.
+  </Card>
+</Columns>
+
+There is also a Dashboard (issue and run aggregates), Loan Lookup, Audit Runs, and a Lenders config editor. See [environment variables](/octy/environment-variables) and [infrastructure](/octy/infrastructure) for how Octy is wired and deployed.
+
+## What Octy connects to
+
+| System | Use |
+|---|---|
+| LoanLight Aurora/Postgres | Reads app data; owns and writes its own `octy_*` tables |
+| Warp / Oz Agent SDK | Launches and polls autonomous agent runs |
+| LangSmith | Trace project `loanlight-aus`; surfaced in the UI and queried by the agent |
+| Datadog | MCP server attached to runs, env-scoped, when keys are present |
+| loanlight-api | Internal API for classify-split dry-runs and audit results, via shared secret |
+| S3 | Three allowlisted buckets the agent can list and read (fail-closed) |
+
+<Info>
+Octy runs as an ECS Fargate service behind an internal-facing ALB. There is no Datadog APM sidecar — Octy is log-only. See [infrastructure](/octy/infrastructure).
+</Info>

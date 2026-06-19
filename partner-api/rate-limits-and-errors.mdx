@@ -1,0 +1,87 @@
+---
+title: Rate limits and error handling
+description: The 100 req/min sliding-window limiter and error responses.
+icon: gauge
+---
+
+After [authentication](/partner-api/authentication) resolves the lender context, the `PartnerRateLimitInterceptor` (`interceptors/rate-limit.interceptor.ts`) enforces a per-lender request budget on every Partner API call.
+
+## How the limiter works
+
+The interceptor requires `request.lenderId` (set by the auth interceptor). If it is missing it returns `500 "Internal server error"` — the limiter never runs unauthenticated.
+
+It calls `PartnerRateLimitService.checkAndLogRequest(lenderId, rateLimitPerMinute, endpoint)`, where `endpoint = "${method} ${url}"`. The service invokes the Postgres function `check_and_log_rate_limit(p_lender_id, p_rate_limit, p_endpoint)`, which atomically:
+
+1. Inserts a log row into `partner_api_rate_limit_logs`.
+2. Counts that lender's rows in the trailing **60-second sliding window**.
+3. Returns `allowed = v_count <= p_rate_limit`, `current_count`, and `remaining_requests = GREATEST(0, p_rate_limit - v_count)`.
+
+The default limit is **100 requests per minute per lender**, sourced from `partner_api_keys.rate_limit_per_minute` (nullable, coalesced to 100 — see [authentication](/partner-api/authentication)). WorkOS `sk_*` keys always use the default 100; legacy keys may set a custom value per key.
+
+A `@Cron("0 */5 * * * *")` job, `cleanupOldLogs()`, deletes `partner_api_rate_limit_logs` rows older than one hour every five minutes.
+
+## Response headers
+
+Every response — allowed or not — carries:
+
+| Header | Meaning |
+| --- | --- |
+| `X-RateLimit-Limit` | The lender's configured per-minute limit |
+| `X-RateLimit-Remaining` | Requests left in the current window |
+
+When a request is throttled the interceptor also sets `Retry-After: 60`.
+
+<Tip>
+The reliable signal is a `200` with a low `X-RateLimit-Remaining`. Watch that header to back off proactively. Do not rely solely on receiving `429`s, because the limiter fails open (see below).
+</Tip>
+
+## The 429 response
+
+When `!allowed`, the interceptor throws `429` (`TOO_MANY_REQUESTS`) with this body:
+
+```json
+{
+  "success": false,
+  "message": "Rate limit exceeded. Too many requests per minute.",
+  "retryAfter": 60,
+  "limit": 100,
+  "currentCount": 101,
+  "lenderId": "<uuid>",
+  "timestamp": "<iso8601>"
+}
+```
+
+## Fail-open behaviour
+
+<Warning>
+**The limiter fails open.** Any database error inside `checkAndLogRequest` is caught and returns `{ allowed: true, currentCount: 0, limit: rateLimitPerMinute, remainingRequests: rateLimitPerMinute }`. A broken `check_and_log_rate_limit` SQL function silently disables rate limiting — no `429`s are emitted. Monitor the service error log, not the absence of HTTP 429s, to detect this.
+</Warning>
+
+## Common error codes
+
+These apply across the Partner API. Endpoint-specific codes are listed on the [Loans](/partner-api/loans) and [Audits](/partner-api/audits) pages.
+
+| Status | When |
+| --- | --- |
+| `400` | Request body fails validation (bad base64, missing required field, malformed UUID). |
+| `401` | Missing, empty, duplicated, invalid, revoked, or expired `x-api-key`. |
+| `403` | Audit creation only, and only when the `PARTNER_VIA_ROUTER` flag is on for the lender and no requested agent is entitled. See [Audits API](/partner-api/audits). |
+| `404` | Resource not found, or not owned by the authenticated lender (tenant isolation). |
+| `409` | Loan not ready for audit, classification still in progress, or access-url requested before the audit completed. |
+| `429` | Per-lender rate limit exceeded. |
+| `500` | Internal error (for example, the rate-limit interceptor ran without a lender context). |
+| `503` | Results-access endpoint is misconfigured in production (missing JWT secret or base URL). See [Results and access URLs](/partner-api/results-and-access-urls). |
+
+## The rate-limit log table
+
+`partner_api_rate_limit_logs` (`database/schema/partner.ts`):
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | |
+| `lender_id` | text NOT NULL | |
+| `api_key_id` | uuid | FK to `partner_api_keys.id`, `ON DELETE SET NULL` |
+| `endpoint` | text | `"METHOD /url"` |
+| `created_at` | timestamptz | defaultNow |
+
+Indexes: `idx_partner_rate_limit_lender_time` (`lender_id`, `created_at`) and `idx_partner_rate_limit_created_at`.

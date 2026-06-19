@@ -1,0 +1,118 @@
+---
+title: S3 storage layout
+description: Where EPC and Partner loan files live in S3.
+icon: folder-tree
+---
+
+LoanLight stores loan source files (the MISMO 3.4 XML application and supporting PDF documents) in S3 before the audit pipeline reads them. There are two independent storage layouts depending on the entry path: EPC (Encompass Partner Connect) and the Partner API. Each uses a different bucket, a different key prefix, and a different writer/reader pair.
+
+<Warning>
+The legacy prompt referred to the buckets as `S3_INTEGRATION_FILES_BUCKET` and `S3_PARTNER_FILES_BUCKET`. **Neither name exists in the code.** The real env vars are `INTEGRATION_FILES_BUCKET_NAME` (EPC, producer side) and `PARTNER_S3_BUCKET` (Partner). Use those.
+</Warning>
+
+## Buckets at a glance
+
+| Purpose | Real env var | Read in | Notes |
+|---|---|---|---|
+| EPC integration files (producer) | `INTEGRATION_FILES_BUCKET_NAME` | `loanlight-integrations` encompass `s3/s3.service.ts` | LocalStack default literal `loanlight-integration-files` |
+| EPC files (consumer allowlist) | `INTEGRATION_AUDIT_S3_BUCKET_ALLOWLIST` (CSV) | `integration-events/utils/integration-audit-bucket.util.ts` | Falls back to `INTEGRATION_FILES_BUCKET_NAME` when allowlist empty |
+| EPC KMS key | `INTEGRATION_FILES_KMS_KEY_ALIAS` | encompass `s3.service.ts` | SSE-KMS on every EPC upload |
+| Partner loan files | `PARTNER_S3_BUCKET` | `s3/s3.service.ts`, `integration-orchestration.service.ts` | Required; throws if unset |
+| Portal uploads | `PORTAL_S3_BUCKET` (resolved via `S3_UPLOAD_BUCKET` → `PORTAL_S3_BUCKET` → `PARTNER_S3_BUCKET`) | `common/utils/upload-bucket.util.ts` (`resolveUploadBucket()`) | Appraisal/credit/income/bank-statement uploads |
+
+<Note>
+Two unrelated classes are both named `S3Service`. The producer of EPC files lives in `loanlight-integrations/packages/encompass/src/s3/s3.service.ts`; the loanlight-api `src/s3/s3.service.ts` handles Partner uploads and generic GET streams. Disambiguate by path.
+</Note>
+
+## EPC (Encompass) layout
+
+The Encompass plug-in in `loanlight-integrations` is the producer. When a webhook fires it fetches documents from Encompass and uploads them to `INTEGRATION_FILES_BUCKET_NAME`.
+
+### Key prefix is the loan GUID
+
+`buildS3Prefix(correlationId)` returns its argument unchanged, but in the webhook flow it is called as `buildS3Prefix(loanGuid)`. **The prefix is the Encompass `loanGuid`, not the transaction/correlation id.**
+
+<Warning>
+A common misconception is that EPC documents are keyed by `correlationId`. They are not. The document prefix is `loanGuid`. The `correlationId` (= `transactionState.id`) is only carried as event metadata and written inside `metadata.json`.
+</Warning>
+
+### Keys written per loan
+
+```text
+{loanGuid}/mismo.xml
+{loanGuid}/documents/{encompassDocId}_{sanitizedFilename}
+{loanGuid}/metadata.json
+{loanGuid}/txn_{N}/mismo.xml
+{loanGuid}/txn_{N}/metadata.json
+```
+
+- `buildDocumentKey` sanitizes filenames by replacing `/ \ < > : " | ? *` with `-`.
+- `metadata.json` is the per-loan manifest (`correlationId = transactionState.id`, `uploadedAt`, `documents[]`).
+- `txn_{N}/` holds transaction-history snapshots. `getNextTransactionNumber(bucket, loanGuidPrefix)` lists `{prefix}/txn_*` common prefixes, parses `/txn_(\d+)\/$/`, and returns max+1 (starting at 1). Snapshot writes are **non-blocking**: a failure is logged and never aborts the audit.
+
+### Encryption and dedup
+
+Every EPC upload is server-side encrypted with KMS (`ServerSideEncryption: "aws:kms"`, `SSEKMSKeyId = INTEGRATION_FILES_KMS_KEY_ALIAS`). Each object stamps `Metadata["content-sha256"]` for content-aware dedup and a URI-encoded `original-filename`. Re-exported documents are deduped by content hash via `findExistingDocumentByHash` / `computeObjectHashes` (a HEAD on the `content-sha256` metadata).
+
+### The audit-requested event
+
+After upload the producer publishes an audit-requested event carrying `correlationId = transactionState.id`, `s3Bucket`, and `s3Prefix = loanGuid`. That event lands on the `audit-requested-events` SQS queue and drives `IntegrationOrchestrationService.processAuditRequest`. See [orchestration pipeline](/integrations/orchestration-pipeline) and [EPC webhook security](/integrations/epc-webhook-security).
+
+### Consumer-side bucket allowlist
+
+The loanlight-api consumer does not trust the bucket name on the event blindly. `resolveIntegrationAuditS3Bucket(requestedBucket, configReader)`:
+
+- When `USE_LOCALSTACK` is truthy (`true|1|yes`), it forces `loanlight-integration-files`.
+- Otherwise it validates `requestedBucket` against `INTEGRATION_AUDIT_S3_BUCKET_ALLOWLIST` (CSV). When that allowlist is empty it falls back to `INTEGRATION_FILES_BUCKET_NAME`.
+- Errors: `"s3Bucket is required"`, `"allowlist is not configured…"`, `"s3Bucket '…' is not in the configured … allowlist"`.
+
+On download the consumer uses `s3PrefixToUse = s3Prefix?.trim() || correlationId`, so the loanGuid prefix is used to read `{loanGuid}/documents/` and `{loanGuid}/mismo.xml` via `S3FileRetrievalService.downloadTransactionFiles`.
+
+## Partner API layout
+
+The loanlight-api `S3Service` (`src/s3/s3.service.ts`) writes Partner loan files to `PARTNER_S3_BUCKET`. `getBucketName()` throws `"PARTNER_S3_BUCKET environment variable is required"` if the var is unset.
+
+### Key prefix
+
+```text
+partner/{lenderId}/{loanId}/mismo.xml
+partner/{lenderId}/{loanId}/documents/{fileName}
+```
+
+`lenderId` comes from the authenticated partner API key; `loanId` is the `loans.id` UUID. The prefix is built in `partner-loans.controller.ts` and `partner-audits.controller.ts`.
+
+### Upload flow
+
+<Steps>
+<Step title="Create the loan row">
+`POST /api/v1/partner/loans` inserts a `loans` row with status `processing`.
+</Step>
+<Step title="Upload to S3">
+`s3Service.uploadPartnerLoan(prefix, dto)` decodes the base64 MISMO XML to `{prefix}/mismo.xml` (ContentType `application/xml`) and uploads documents to `{prefix}/documents/{fileName}` in batches of 10 concurrent `PutObjectCommand`s. On failure the loan status is set to `error` and the error rethrown.
+</Step>
+<Step title="Register documents">
+`documentRegistry.registerDocuments` writes `loan_documents` rows from `buildPartnerIncomingDocs` (source `"partner_s3"`, `s3Bucket = getBucketName()`, `partnerS3Key = {prefix}/documents/{fileName}`).
+</Step>
+</Steps>
+
+`loan_documents` rows store `partner_s3_key` (and a `storage_path` in `s3://bucket/key` form). `S3FileRetrievalService.resolveS3Key()` prefers `partner_s3_key`, falling back to parsing `storage_path`. `validateS3Key()` requires no leading slash, at least 3 `/`-segments (`module/id/filename`), no `..`, and a non-empty filename.
+
+On audit (`POST /api/v1/partner/audits` → `processAuditForPartner`), the consumer reads `s3Bucket = process.env.PARTNER_S3_BUCKET` and calls `downloadPartnerTransactionFiles(s3Bucket, partnerId, loanId)` against `partner/{lenderId}/{loanId}/`.
+
+See [Partner API loans](/partner-api/loans) and [Partner API audits](/partner-api/audits).
+
+## Reads, presigning, and PDFs
+
+- The loanlight-api `S3Service` exposes `getObjectStream(bucket, key)` and `deleteFile(s3Key)` but **generates no presigned URLs**. Presigning is per-domain: the Encompass plug-in (`getDocumentPresignedUrl` / `getObjectPresignedUrl`, default 300s expiry), bank-statement export (`SignedUrlService`, 15-min expiry), and the portal appraisal/credit/income modules.
+- Audit report PDFs are **not** stored in S3. They are pushed to the LOS as attachments. See [audit report PDF generation](/storage/pdf-reports).
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Property-data read module" href="/storage/property-data-module" icon="house">
+The read-side service that merges property results and consolidated blobs.
+</Card>
+<Card title="LlamaCloud retrieval" href="/subsystems/llamacloud-retrieval" icon="search">
+How uploaded documents are indexed and queried by the agents.
+</Card>
+</Columns>

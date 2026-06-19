@@ -1,0 +1,166 @@
+---
+title: Debugging PII retrieval scoping
+description: Inspect why a PII field was scoped or fell back to whole-loan search.
+icon: filter
+---
+
+PII validation does not search the whole loan for every field. For each of the nine PII fields it computes a deterministic document scope — a set of eligible files and page ranges — and pushes that down to LlamaCloud as a `search_filters` payload. This is the LOA-564 scoping feature. When a field behaves unexpectedly (it found nothing, it searched documents it should not have, or it was skipped entirely), the question is almost always: *what scope did this field compute, and why?*
+
+This runbook is for answering that with the scoping replay tool, without re-running the audit. Background: [PII-Validation](/agents/pii-validation) and [retrieval tools and scoping](/subsystems/retrieval-tools-and-scoping).
+
+## The two terminal states
+
+Every field's scoping resolves to one of two outcomes:
+
+<CardGroup cols={2}>
+  <Card title="scoped" icon="filter">
+    Active rules existed for the field **and** at least one eligible segment was found. Retrieval is constrained to those files and page ranges. The `data` is the union of allow-listed segments and salvaged segments, excluding `UNKNOWN`/`unknown` buckets.
+  </Card>
+  <Card title="full_fallback" icon="globe">
+    Either no active rules exist for the field, or rules exist but zero segments were eligible *for a reason that does not justify skipping*. Retrieval searches the whole loan index. `data` is empty.
+  </Card>
+</CardGroup>
+
+There is a third, rarer outcome that is neither of these and is the one that surprises people: a field can be **skipped entirely** — no retrieval, no LLM call, no finding. That is Scenario B, covered below.
+
+## Replay scoping without re-running the audit
+
+Octy exposes a pure reimplementation of the production scoping logic as the `pii-scoping-decision` data tool. It computes the same decision the `validateField` node's `computeScoping` would, against the loan's live classification map and rules, and returns it as a synthetic table.
+
+```text
+GET /api/oz/tools/pii-scoping-decision?field_key=SocialSecurityNumber&loan_purpose=PURCHASE
+→ { table: "pii_scoping_decision", status: "scoped" | "full_fallback", data: [ ... ] }
+```
+
+<ParamField query="field_key" type="string" required>
+  One of the nine canonical PII keys: `FullName`, `DateOfBirth`, `SocialSecurityNumber`, `ITIN`, `MailingAddress`, `PropertyAddress`, `MaritalStatus`, `EmployerName`, `EmployerAddress`.
+</ParamField>
+<ParamField query="loan_purpose" type="string">
+  `PURCHASE` or `REFINANCE`. Anything else is normalized away, leaving only loan-purpose-agnostic rules in scope.
+</ParamField>
+
+<ResponseField name="status" type="string">
+  `scoped` or `full_fallback` — the terminal state.
+</ResponseField>
+<ResponseField name="data" type="array">
+  For `scoped`, the eligible segments (allow ∪ salvage, `UNKNOWN`/`unknown` excluded; `classification_failed` segments always salvaged). For `full_fallback`, empty.
+</ResponseField>
+
+<Tip>
+  This replay reads the same `pii_field_doc_type_rules` and classification map the live agent uses, so it is the fastest way to answer "why did this field scope the way it did" — far faster than re-running the audit and re-reading the LangSmith trace. The trace still has the authoritative record of the *actual* run; the replay tells you what the current rules and classifications would decide now.
+</Tip>
+
+## The inputs that decide the scope
+
+Three inputs feed the decision. Inspect each when a scope looks wrong.
+
+### 1. The doc-type rules — `pii_field_doc_type_rules`
+
+This table is the allow-list matrix. Octy exposes it as the `pii-field-doc-type-rules` tool (`?field_key=` and `?loan_purpose=` filters). Each active row contributes a `match_value` to either the `split_type` set or the `classification_type` set, depending on `match_kind`.
+
+Resolution is a **union**: loan-purpose-agnostic rules (`applies_to_loan_purpose IS NULL`) plus rows matching the normalized purpose. So for a `PURCHASE` loan, a field's allow-list is `NULL-purpose rules ∪ PURCHASE rules`.
+
+| Symptom | Likely rules cause |
+|---|---|
+| Field went to `full_fallback` unexpectedly | The field has **no active rules** (`allowed.isEmpty`). Whole-index is the correct, pre-LOA-564 behaviour for unrules'd fields. |
+| Field searched a document type you did not expect | A rule allows that `split_type` or `classification_type`. Check both the field's rows and the loan-purpose. |
+| Field missed a document that clearly holds the value | The document's resolved classification is not in the allow-list (and the segment was not salvaged). |
+
+<Note>
+  On any database error reading the rules, the service fails safe to `isEmpty: true` — meaning no scoping, whole-index search. A field that *should* be scoped but shows `full_fallback` could be masking a transient rules-table read failure; confirm the rules actually exist.
+</Note>
+
+### 2. Segment eligibility from classify-split
+
+The classification map comes from `getActiveClassificationsForLoan(loanId)` — the latest active `document_classifications` per segment, projected to `ClassificationSegment`. Inspect it via the `classify-split-segments` tool. Segments without a `llama_cloud_file_id` are dropped (they cannot be filtered on in LlamaCloud).
+
+A segment is eligible if it falls into one of two groups:
+
+<Steps>
+  <Step title="Allow-list match">
+    `selectAllowSegments` keeps segments whose `split_type` or `classification_type` is in the field's allow Sets. It **explicitly excludes** `split_type === "UNKNOWN"` and `classification_type === "unknown"` — these are never admitted by the allow-list.
+  </Step>
+  <Step title="Salvage">
+    `isSalvageSegment` is true only when `classification_status === "classification_failed"`. Salvaged segments are **always** eligible regardless of the allow-list, so PII coverage is not lost on segments the classifier could not type. Note what is *not* salvage: `split_type='UNKNOWN'`, `classification_type='unknown'`, `classification_status='split'` (Phase 2 never ran), and `requires_review=true` are all dropped if not allow-listed — only `classification_failed` is salvaged.
+  </Step>
+</Steps>
+
+Eligible files are then built per `file_id` as a union of page ranges (`mergeRanges` merges overlaps, keeps adjacent ranges separate). A file with no numeric page boundaries gets `pageRanges: null`, meaning "all pages of this file are eligible."
+
+### 3. The classify-split run status
+
+This is the input that determines whether zero-eligible-files means "fall back" or "skip." It is the most misunderstood part of the decision tree.
+
+## The decision tree
+
+`computeScoping` falls back to whole-index search in every case **except** Scenario B. Walk it top to bottom:
+
+<AccordionGroup>
+  <Accordion title="Whole-index fallbacks (status: full_fallback)">
+    1. **No rules service** (Studio or a test DI gap) → whole-index. Logged `pii.scoping_skipped` (`noRulesFallback: true`). The Studio entrypoint builds the graph without the rules service, so scoping always falls back there.
+    2. **Field did not canonicalize** → whole-index. Logged `pii.scoping_skipped`.
+    3. **Field has no rules** (`allowed.isEmpty`) → whole-index. Preserves pre-LOA-564 behaviour. Logged `pii.scoping_skipped`.
+    4. **Zero eligible files, classification map empty** (Scenario A — classify-split never ran or produced no segments) → whole-index. Logged `pii.scoping_skipped`.
+    5. **Zero eligible files, classify-split incomplete** (map non-empty but `classifySplitRunStatus !== "complete"`) → whole-index. Logged `pii.scoping_skipped_classify_split_incomplete`. The rationale: a split-failed document contributes zero classification rows, so empty eligibility is "for the wrong reason," and skipping would silently suppress PII validation.
+  </Accordion>
+  <Accordion title="Scenario B — the only skip (field dropped entirely)">
+    **Zero eligible files, classification map non-empty, AND `classifySplitRunStatus === "complete"`** → `noEligibleDocs: true`. The field is skipped: no retrieval, no LLM, no finding. Logged `pii.scoping_no_eligible_docs`.
+
+    The reasoning: classification finished cleanly and still produced no eligible document for this field, so the field genuinely has no supporting document of the right type. Searching the whole index here would re-admit the very `UNKNOWN`/`unknown` segments the allow-list deliberately excluded — re-introducing the noise scoping exists to remove.
+
+    If a field "should have a finding" but does not, and the replay shows `full_fallback` with empty data while the classify-split status is `complete`, you are looking at Scenario B. The fix is usually a missing rule or a misclassified document, not a scoping bug.
+  </Accordion>
+  <Accordion title="Happy path (status: scoped)">
+    **One or more eligible files** → `buildSearchFilter(eligibleFiles)` produces the `search_filters` payload and `eligibleFileIds` is set. Logged `pii.scoping_active` with allow/salvage/overlap file counts and the payload.
+  </Accordion>
+</AccordionGroup>
+
+## The deterministic `search_filters` payload
+
+When a field is `scoped`, the filter is built deterministically and pushed down to LlamaCloud. Two facts matter when debugging.
+
+**The filter overrides the LLM.** The retrieval model issues `llc_retrieve` tool calls and may put its own `search_filters` in the args. The node ignores them: `params = { ...baseParams, search_filters: scoping.searchFilters }`. Doc-type scoping must not depend on model behaviour. LangSmith records `search_filters_overridden` in metadata. If you see the model "choosing" a different scope in the trace, that choice was discarded.
+
+**The filter shape** (keys are LlamaCloud chunk metadata: `file_id` and `page_label`):
+
+```text
+condition: "or"
+filters: [
+  { key: "file_id", value: [A, B], operator: "in" },        // all-pages files
+  { condition: "and", filters: [                            // ranged file C
+      { key: "file_id", value: C, operator: "==" },
+      { condition: "or", filters: [
+          { condition: "and", filters: [ {page_label >= 1}, {page_label <= 5} ] },
+          { condition: "and", filters: [ {page_label >= 7}, {page_label <= 8} ] }
+      ]}
+  ]}
+]
+```
+
+<Warning>
+  A "smoke alarm" guards the push-down: after retrieval, any returned snippet whose `metadata.file_id` is outside `eligibleFileIds` triggers a WARN `pii.pushdown_leak`. This detects LlamaCloud not honouring `search_filters`. The filter is otherwise **trusted** — there is no post-retrieval eligibility filtering. If you see a `pii.pushdown_leak`, the bug is in LlamaCloud filter handling, not in scoping; the scope was computed correctly but not enforced by the index.
+</Warning>
+
+## A worked checklist
+
+When a PII field looks wrong because of scoping:
+
+<Steps>
+  <Step title="Replay the decision">
+    Call `pii-scoping-decision?field_key=...&loan_purpose=...`. Note `status` and `data`.
+  </Step>
+  <Step title="If full_fallback, check the rules">
+    Call `pii-field-doc-type-rules?field_key=...`. No rows → expected whole-index. Rows present → continue.
+  </Step>
+  <Step title="Check the classify-split status">
+    If the field expected a scope but got `full_fallback` or a skip, the classify-split run status is the deciding input. `complete` + zero eligible = Scenario B (skip). Anything other than `complete` = whole-index fallback. Confirm via `audit-runs`/classify-split state.
+  </Step>
+  <Step title="Inspect the segments">
+    Call `classify-split-segments`. Confirm the document holding the value was classified into an allow-listed `split_type`/`classification_type`, or was salvaged (`classification_failed`). A document misclassified into `UNKNOWN`/`unknown` will be excluded — the fix is in classification, not scoping.
+  </Step>
+  <Step title="Confirm enforcement in the trace">
+    In the PII LangSmith trace, check `search_filters_overridden` and watch for `pii.pushdown_leak`. The first confirms the deterministic filter won over the LLM; the second flags LlamaCloud ignoring it.
+  </Step>
+</Steps>
+
+If the scope is correct but the field still produced no finding, the value was simply not present in the eligible documents — and zero-retrieval is deliberately not a finding. At that point it is a classification or rules-coverage question, not a scoping defect.

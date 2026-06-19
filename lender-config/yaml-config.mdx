@@ -1,0 +1,124 @@
+---
+title: Lender YAML config
+description: The three YAML sections and the DB-backed vs legacy on-disk stores.
+icon: file-code
+---
+
+Lender YAML config tunes three audit agents through three structured sections. The config is loaded by `LenderConfigLoaderService` (see [Lender configuration overview](/lender-config/overview)) from one of two backing stores: a DB store (`lender_yaml_configs`) or legacy on-disk YAML files. An adapter resolver decides which per lender.
+
+## The three sections (and only three)
+
+The type definitions live in `langgraph/shared/lender-config.types.ts`; the Zod schemas (which validate on both read and write) live in `langgraph/shared/lender-config.schema.ts`. The top-level envelope `LenderConfig` carries optional `lender_name`, `lender_code`, and `description` plus the three optional section objects.
+
+<Warning>
+There are **exactly three valid section names**, enforced both by the DB check constraint `lyc_config_section_check` and by the Zod `LenderConfigSectionNameSchema`:
+
+- `document_expiration`
+- `red_flags`
+- `urla_completeness_rules`
+
+Any other section name is invalid and rejected on write.
+</Warning>
+
+<AccordionGroup>
+  <Accordion title="document_expiration">
+    Drives document presence and expiration logic in the [Document-Health agent](/agents/document-health). `DocumentExpirationConfig` fields:
+
+    | Field | Purpose |
+    |---|---|
+    | `default_program` | Fallback program key when none resolves from loan metadata (must exist in `loan_programs`) |
+    | `global_required_documents` | Docs required for all programs; merged with program-specific at runtime |
+    | `required_documents` | Legacy flat list fallback or category map |
+    | `preferred_file_patterns` | Filename match patterns per doc type |
+    | `document_requirements` | Per-doc-type expiration rules (the core map) |
+    | `loan_programs` | Per-program required-doc sets |
+    | `program_aliases` | Partner program names → canonical YAML keys (case-insensitive) |
+    | `signature_required_documents` | Doc types that trigger the signature-verification subgraph |
+    | `program_resolve_fields` | Ordered loan-metadata fields tried for alias resolution (default `["loanProgramName"]`) |
+
+    `DocumentRequirement` (per doc type) includes `expiration_days`, `business_days`, `warning_days`, `date_locations`, `date_formats`, `hard_coded_condition`, an optional `date_selection_rule` (per-lender critical-date disambiguation injected into the extraction prompt), `dual_flag_system`, `extended_validity_months`, and `special_cases` (e.g. `TX50a6`).
+
+    Category entries (`credit`, `income_w2`, `assets`, ...) use a `ConditionType` enum (`SUPPORTED_CONDITIONS` in `schema.ts`) such as `required`, `not_required`, `if_expired`, `if_rerun`, `if_self_employed`, `if_cash_out`, `if_texas_50a6`, plus the dynamic form `if_present:<type>`. Future conditions (`if_flagged`, `if_amended`, `if_in_flood_zone`) are logged and skipped.
+  </Accordion>
+  <Accordion title="red_flags">
+    Drives the [Property-Red-Flags agent](/agents/property-red-flags). `RedFlagsConfig`:
+
+    - `thresholds` — `zestimate_variance_percent`, `home_value_change`, `rental_value_change`. Each change threshold is either a `{ percent, months }` tier or `{ tiers: [...] }`.
+    - `program_matrices` — `Record<string, ProgramMatrix> | null`. Real YAMLs often set it empty (parsed as `null`), so the schema is `.nullable()`. Keyed by canonical lowercase program codes; each matrix is `{ ineligible_property_types, max_acreage? }`.
+    - `rules` — `general`, `loan_purpose` (`PURCHASE` / `REFINANCE`), and `occupancy` (`PRIMARY_RESIDENCE` / `INVESTMENT` / `SECOND_HOME`) maps of `RuleConfig`. A `RuleConfig` is either a boolean or an object of params; a rule is "on" when `true` or an object, off when `false`.
+
+    Consumed by `red-flags-config.service.ts` (`getRedFlagsConfig`, `getThresholds`, `getRuleConfig` with `RuleContext { loanPurpose, occupancy, loanProgram }`).
+  </Accordion>
+  <Accordion title="urla_completeness_rules">
+    Drives the URLA completeness rules engine (an embedded subgraph of [URLA-Extraction](/agents/urla-extraction), see [URLA completeness](/agents/urla-completeness)). `UrlaCompletenessRulesSection`:
+
+    - `disabled_rules` — rule IDs disabled across all programs.
+    - `rule_options` — per-rule option overrides.
+    - `loan_programs` — per-program (keyed by canonical name after alias resolution), each `{ disabled_rules?, rule_options? }`.
+
+    Merge semantics in `completeness-rules-config.service.ts`: per-program `disabled_rules` are **merged** with the top-level set (union); per-program `rule_options` **override** top-level (no merge). Unknown rule IDs are warned but still included; rule IDs are validated against the `RuleId` enum. When the section is absent, the service returns an empty disabled set.
+  </Accordion>
+</AccordionGroup>
+
+## The two backing stores
+
+<Tabs>
+  <Tab title="DB store (current)">
+    Table `lender_yaml_configs` (`database/schema/lender-yaml-configs.ts`):
+
+    | Column | Notes |
+    |---|---|
+    | `id` | uuid PK |
+    | `lender_id` | uuid → `lenders.id` (cascade delete) |
+    | `config_section` | check `lyc_config_section_check`: one of the three valid sections |
+    | `yaml_text` | raw YAML; check `lyc_yaml_text_size_check`: `octet_length < 262144` (256 KB) |
+    | `version` | integer, default 1 |
+    | `is_active` | boolean, default true |
+    | `updated_by` | uuid → `portal_users.id` (set null) |
+    | `created_at`, `updated_at` | timestamptz |
+
+    Indexes: `lender_yaml_configs_active_unique` (UNIQUE on `(lender_id, config_section) WHERE is_active = true` — one active row per section per lender) and `lender_yaml_configs_history_idx` for version history.
+
+    The DB adapter `YamlDbAdapter` requires a UUID `lenderId` (resolve the code via `LenderIdentityService` first), reads the active row ordered `updated_at DESC, id DESC`, parses the `yaml_text` with `js-yaml`, and validates it against the per-section schema. It does **not** fall back to DEFAULT — that is the loader's job.
+  </Tab>
+  <Tab title="On-disk store (legacy)">
+    Directory `src/langgraph/lenders/`. Filename rule: `${lenderCode.toLowerCase()}.yaml`.
+
+    | File | lender_code | Sections present |
+    |---|---|---|
+    | `default.yaml` | `DEFAULT` | `document_expiration`, `red_flags` |
+    | `loanlight-test.yaml` | `LOANLIGHT-TEST` | `document_expiration`, `red_flags` |
+    | `firstcolony.yaml` | `FIRSTCOLONY` | all three |
+    | `luxury.yaml` | `LUXURY` | all three |
+    | `priority.yaml` | `PRIORITY` | `document_expiration`, `urla_completeness_rules` |
+    | `document-types.yaml` | — | not a lender config; document-type taxonomy loaded via `loadParsedFile()` |
+
+    `default.yaml` defines 10 industry-standard `loan_programs` (conventional_conforming, jumbo, fha, va, usda, bank_statement, dscr_investor, asset_depletion, foreign_national, construction_reno) plus a large `program_aliases` map.
+
+    The disk adapter `YamlFileAdapter` treats `lenderId` as the lender **code** (file-era semantics), searches four candidate paths, validates the full envelope with `LenderConfigSchema` (throwing `LenderConfigShapeError`), and caches the parsed envelope per code. `hasLender(code)` is a synchronous `existsSync` check the resolver uses to decide disk vs DB.
+  </Tab>
+</Tabs>
+
+<Note>
+`default.yaml`, `loanlight-test.yaml` (and historically others) do **not** define `urla_completeness_rules`. Only `firstcolony.yaml`, `luxury.yaml`, and `priority.yaml` carry that section. When it is absent, the completeness rules engine receives an empty disabled set, so all default rules run.
+</Note>
+
+## Adapter resolution and onboarding new lenders
+
+`LenderAdapterResolver` chooses disk vs DB per lender:
+
+1. `FORCE_YAML_DB_LENDERS` env allowlist (comma-separated, uppercased, parsed once at module load) → `"db"` (`env-override`).
+2. `fileAdapter.hasLender(code)` finds a disk file → `"disk"` (`auto-detect-disk`).
+3. Otherwise → `"db"` (`auto-detect-db`).
+
+Because a missing disk file auto-routes to the DB, **new lenders onboard by inserting `lender_yaml_configs` rows with no code deploy**. Routing to DB emits a deduped structured CloudWatch log (`event: "yaml_adapter_routed"`, LOA-731), keyed by `(lenderCode, reason)`.
+
+<Warning>
+Routing to DB only works when config is loaded through the DI `LenderConfigLoaderService`. The `sharedLenderConfigLoader` singleton has no DB adapter and silently degrades DB-routed lenders to DEFAULT. See the trap described in [Lender configuration overview](/lender-config/overview).
+</Warning>
+
+## Parity monitoring (disk vs DB shadow audit)
+
+`modules/parity-monitor/parity-monitor.service.ts` runs a cron (`0 */15 * * * *`, plus `onApplicationBootstrap`) for the LUXURY lender (`config_profile = "luxury"`). For each of the three sections it loads from both `YamlFileAdapter` and `YamlDbAdapter`, hashes each via `canonicalHash`, and records `parity_monitor_runs` rows with a `diverged` flag.
+
+The monitor **fails closed**: any adapter error counts as divergence, which keeps migration 0077 Gate 2 (`drop_client_rules`) from dropping the disk YAML until a clean run is observed. It emits `parity_divergence` and `parity_adapter_error` critical logs. For 72 hours after boot it runs every 15 minutes, then hourly.

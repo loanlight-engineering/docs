@@ -1,0 +1,116 @@
+---
+title: "Portal API: credit and income audit runs"
+description: Credit and income run endpoints.
+icon: credit-card
+---
+
+The credit and income modules follow the common portal agent-run shape: `POST .../run` enqueues a BullMQ job (the run row is inserted before `queue.add()` and deleted on enqueue failure), a processor extracts data and evaluates rules, and the read endpoints serve detail, status, rules, corrections, overrides, and key-field reviews. All endpoints use [`PortalAuthGuard`](/portal/api-auth).
+
+## portal-credit
+
+Controller: `portal-credit/portal-credit.controller.ts` at `api/v1/portal/credit`.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `POST /api/v1/portal/credit/run` | client_admin, client_user | Enqueue a credit run (HTTP 201) |
+| `GET /api/v1/portal/credit` | auth | List runs |
+| `GET /api/v1/portal/credit/:id` | auth | Run detail (overlays corrections before redaction) |
+| `GET /api/v1/portal/credit/:id/status` | auth | Poll status |
+| `GET /api/v1/portal/credit/:id/rules` | auth | Compliance results |
+| `PATCH /api/v1/portal/credit/:id/rules/:ruleCode` | client_admin | Set a rule override (the override row and the audit metadata both persist `effectiveOutcome`) |
+| `DELETE /api/v1/portal/credit/:id/rules/:ruleCode` | client_admin | Revert override (HTTP 204) |
+| `GET /api/v1/portal/credit/:id/corrections` | client_admin, client_user | List corrections |
+| `POST /api/v1/portal/credit/:id/corrections` | client_admin, client_user | `CreateCorrectionDto` (HTTP 201). Invalidates stale key-field reviews in the same transaction |
+| `DELETE /api/v1/portal/credit/:id/corrections/:corrId` | client_admin, client_user | Revert correction (HTTP 204) |
+| `POST /api/v1/portal/credit/:id/mark-reviewed` | client_admin, client_user | Mark reviewed (HTTP 200) |
+| `POST /api/v1/portal/credit/:id/revert-approval` | client_admin | Revert approval (HTTP 200) |
+| `GET /api/v1/portal/credit/:id/audit-events` | read+ | Audit-event history |
+| `GET /api/v1/portal/credit/:id/pdf` | read+ | Proxy the source PDF |
+| `GET /api/v1/portal/credit/:id/pdf-url` | read+ | Signed URL |
+| `GET /api/v1/portal/credit/:id/key-field-reviews` | read+ | Key-field reviews |
+| `PATCH /api/v1/portal/credit/:id/key-field-reviews/:fieldId` | client_admin, client_user | Patch a review |
+
+#### POST /api/v1/portal/credit/run
+
+Enqueue a solo credit run. Returns HTTP 201.
+
+<ParamField body="inputS3Key" type="string" required>
+S3 key of the credit report PDF.
+</ParamField>
+<ParamField body="loanId" type="string">
+Optional loan association.
+</ParamField>
+<ParamField body="ruleSetId" type="string">
+Optional credit rule set to evaluate against.
+</ParamField>
+<ParamField body="grossMonthlyIncome" type="number">
+Optional income figure used in DTI computation.
+</ParamField>
+<ParamField body="selectedRuleSources" type="string[]">
+Optional rule-source selection.
+</ParamField>
+
+### Solo vs audit-driven credit
+
+There are two ways credit runs execute, and they take different code paths.
+
+<Tabs>
+  <Tab title="Solo (BullMQ)">
+    A run created through `POST /api/v1/portal/credit/run` has `audit_run_id IS NULL`. `credit.processor.ts` handles these solo runs only. The solo claim is:
+
+    ```sql
+    UPDATE credit_runs SET status='running'
+    WHERE id=? AND lender_id=? AND status='pending'
+    ```
+
+    Terminal failure writes go through `withDbRetry` and stamp `completedAt`; recovery re-enqueue uses `CREDIT_RECOVERY_QUEUE_OPTIONS`.
+  </Tab>
+  <Tab title="Audit-driven (inline)">
+    Credit triggered as part of a full audit does **not** use BullMQ. It runs inline through `integration-orchestration.service.ts::executeAuditAgents`, keyed by `audit_run_id`. See [audit agents stage](/pipeline/audit-agents-stage) and [credit evaluation](/agents/credit-evaluation).
+  </Tab>
+</Tabs>
+
+<Note>
+Docs implying that all credit runs flow through the queue are wrong. The BullMQ credit processor handles only solo runs (`audit_run_id IS NULL`); audit-driven credit runs inline in the orchestration service.
+</Note>
+
+## portal-income
+
+The income module mirrors the agent-run surface family. Income is implemented as a module pipeline (`portal-income`), not as a standalone LangGraph catalog agent. Controller: `portal-income/portal-income.controller.ts` at `api/v1/portal/income`.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `POST /api/v1/portal/income/run` | client_admin, client_user | Enqueue income run (HTTP 201, throttle 10/min) |
+| `POST /api/v1/portal/income/_testing/ensure-stub-loan` | client_admin | Test-only stub loan |
+| `GET /api/v1/portal/income/settings/review-threshold` | read | Read review threshold |
+| `PATCH /api/v1/portal/income/settings/review-threshold` | client_admin | Update review threshold |
+| `GET /api/v1/portal/income` | auth | List runs |
+| `GET /api/v1/portal/income/:id` | auth | Run detail |
+| `GET /api/v1/portal/income/:id/status` | auth | Poll status |
+| `GET /api/v1/portal/income/:id/documents` | auth | List documents |
+| `GET /api/v1/portal/income/:id/key-field-reviews` | auth | Key-field reviews |
+| `PATCH /api/v1/portal/income/:id/key-field-reviews/:fieldId` | client_admin, client_user | Patch a review |
+| `POST /api/v1/portal/income/:id/export` | client_admin, client_user | Export run (HTTP 200, throttle 5/min) |
+| `POST /api/v1/portal/income/:id/rule-overrides` | client_admin, client_user | Create override (HTTP 201) |
+| `PATCH /api/v1/portal/income/:runId/documents/:extractionId/corrections` | client_admin, client_user | Apply corrections |
+| `GET /api/v1/portal/income/:runId/documents/:extractionId/pdf` | client_admin, client_user | Stream document PDF |
+| `GET /api/v1/portal/income/:runId/documents/:extractionId/pdf-url` | client_admin, client_user | Signed URL |
+
+Income rule authoring (templates, rule sets, custom rules) lives in [rules authoring](/portal/api-rules-authoring) via `portal-income-rules`.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Credit evaluation agent" icon="credit-card" href="/agents/credit-evaluation">
+    The fully-implemented 11-node credit agent (and DTI/liabilities).
+  </Card>
+  <Card title="Income analysis agent" icon="dollar-sign" href="/agents/income-analysis">
+    The income module pipeline behind these runs.
+  </Card>
+  <Card title="Rules authoring" icon="scale" href="/portal/api-rules-authoring">
+    Credit and income rule sets and templates.
+  </Card>
+  <Card title="Bank statement and DSCR" icon="landmark" href="/portal/api-bank-statement-dscr">
+    Bank-statement analysis and DSCR computation.
+  </Card>
+</Columns>

@@ -1,0 +1,75 @@
+---
+title: Issue-kind taxonomy
+description: The shared taxonomy of audit issues.
+icon: tags
+---
+
+An issue kind is a stable, machine-readable code that classifies a single audit finding (for example `expired` or `identity_mismatch`). The taxonomy is shared across agents so that downstream consumers — the partner results service, the portal, and Octy — can group and prioritize findings without parsing free text.
+
+## IssueKindService
+
+`IssueKindService` (`issue-kinds/issue-kind.service.ts`) is the runtime authority:
+
+- On `onModuleInit` it loads `issue-kinds/issueKinds.yaml`, caches entries by `code`, and best-effort upserts them into the `issue_kinds` table (columns `code` unique, `category`, `description`).
+- `getInfo(code)` returns `{ code, category, description? }`.
+- `ensure(code)` throws `"Unknown issue_kind"` for any code not in the YAML.
+
+<Note>
+The YAML file is the source of truth. The in-memory cache survives a DB failure, so a transient database problem during boot does not break issue-kind resolution.
+</Note>
+
+## The catalog
+
+`issueKinds.yaml` defines these codes, grouped by category:
+
+<AccordionGroup>
+  <Accordion title="PII">
+    | Code | Meaning |
+    |---|---|
+    | `missing` | Field present in MISMO but absent in the supporting doc |
+    | `inconsistent` | Value mismatch between MISMO and the supporting doc |
+    | `identity_mismatch` | Doc belongs to a different person than the MISMO borrower (potential fraud) |
+  </Accordion>
+  <Accordion title="Validation">
+    | Code | Meaning |
+    |---|---|
+    | `invalid` | Invalid value |
+  </Accordion>
+  <Accordion title="Credit">
+    | Code | Meaning |
+    |---|---|
+    | `credit_low` | Middle credit score below the product minimum |
+  </Accordion>
+  <Accordion title="Document Health">
+    | Code | Meaning |
+    |---|---|
+    | `expired` | Document exceeded its maximum age and requires update |
+    | `expiring_soon` | Document will expire before closing |
+    | `date_missing` | Date required for expiration validation not found |
+    | `date_invalid` | Date found but format is invalid or unreadable |
+    | `missing_document` | Required document not found in the loan file |
+    | `conditional_document_unknown` | Conditional requirement could not be evaluated due to missing loan context |
+    | `page_mismatch` | Declared page count differs from pages found |
+    | `multi_doc_mismatch` | Multi-document bundle page total off |
+    | `composite_mismatch` | Composite bundle page total off |
+    | `independent_collection_incomplete` | Independent collection missing required pages |
+    | `indeterminate` | Could not determine a final outcome from available evidence |
+    | `signature_missing` | Required signature not detected on the document pages |
+  </Accordion>
+</AccordionGroup>
+
+## How agents emit issue kinds
+
+Agents write their findings to per-agent result tables (see [Reading audit results](/pipeline/results)), and each issue-bearing row carries an issue-kind value:
+
+- The [PII agent](/agents/pii-validation) writes `pii_validation_results.issue_kind`. Its canonical enum is `missing | inconsistent | identity_mismatch`.
+- [Document health](/agents/document-health) writes `doc_expiration_results.issue_kind` and `doc_completeness_results` codes (`expired`, `expiring_soon`, `page_mismatch`, and so on).
+- [Property red flags](/agents/property-red-flags) surface a `rule_id` as the issue kind rather than a taxonomy code.
+
+## Relation to result tables and severity buckets
+
+The partner results service (`AuditResultsService`) reads each result table's issue-kind value and buckets it into critical or warning using `CRITICAL_ISSUE_KINDS` and `WARNING_ISSUE_KINDS`. See [Critical vs warning bucketing](/pipeline/results#critical-vs-warning-bucketing).
+
+<Warning>
+The agent-emitted enums and the YAML taxonomy are related but not identical surfaces. The results service's bucketing sets include codes the agents emit that are not all present in `issueKinds.yaml` — `mismatch`, `missing_required_field`, `unsigned`, `partially_signed`, and `verification_failed`. Note also that the PII agent does not emit the older single `mismatch` code; it uses `missing | inconsistent | identity_mismatch`.
+</Warning>

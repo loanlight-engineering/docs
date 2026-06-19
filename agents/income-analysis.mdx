@@ -1,0 +1,226 @@
+---
+title: Income analysis pipeline
+description: The fully implemented income system, a module pipeline rather than a LangGraph catalog agent.
+icon: wallet
+---
+
+Income analysis is fully implemented, but it is **not** a LangGraph catalog agent. It is a NestJS
+module pipeline — `portal-income` — built from a three-stage BullMQ job pipeline, a pure
+calculation engine, and per-document-type extractors, backed by the `income_runs` family of
+tables.
+
+<Note>
+There is no `langgraph/agents/incomeEvaluation`. Unlike
+[Credit-Evaluation](/agents/credit-evaluation) and
+[Appraisal-Evaluation](/agents/appraisal-evaluation), which are compiled `StateGraph`s, income
+is a module-based pipeline with a pure engine and document-type extractors. Treat it as a
+pipeline, not a catalog agent.
+</Note>
+
+<Warning>
+Do not confuse this with the older, separate bank-statement income pipeline keyed off
+`borrower_files` → `bank_statements` → `transactions` (plus `income_filters`, `findings`,
+`ai_summaries`). That is a distinct, legacy subsystem. This page describes the newer
+`income_runs` family.
+</Warning>
+
+## Income families
+
+The family is **user-selected at run creation**, not auto-detected. The `income_family` pgEnum
+(`database/schema/enums.ts`) has four values, and `engineHandlers` enforces one handler per
+family:
+
+| Family | Engine path |
+|---|---|
+| `wage_earner` | `normalizeWageEarner` → `calculateWageEarner` + contractor + fixed income |
+| `self_employed` | `normalizeSelfEmployed` → `calculateSelfEmployed` (Schedule C, K-1) |
+| `rental` | `normalizeRental` → `calculateRental` (Schedule E) |
+| `asset_based` | `normalizeAssetBased` → `calculateAssetDepletion` |
+
+## The three-stage pipeline
+
+A run is created via `POST /api/v1/portal/income/run` (`PortalIncomeController`, base path
+`api/v1/portal/income`). The DTO `CreateIncomeRunDto` carries `family` (required, in
+`INCOME_FAMILIES`), optional `loanId`, `auditRunId`, `borrowerName`, and required `fileKeys[]`.
+The controller inserts an `income_runs` row (status `pending`) and enqueues a `"run"` job on the
+BullMQ queue `portal-income` (concurrency 10, lockDuration 5,400,000 ms = 90 minutes).
+
+`portal-income.processor.ts` dispatches by `job.name`:
+
+<Steps>
+<Step title="run (~100 ms)">
+Compare-and-set claims the run (`pending → running`, `current_stage = 'run'`),
+`bridge.attachFiles` writes `income_run_sources`, then enqueues the `classify` job.
+</Step>
+<Step title="classify (1–5 min)">
+Compare-and-set `run → classify`. `IncomeDocumentBridgeService.awaitClassifications` runs
+[classify-split](/subsystems/classify-split) (Reducto plus the LangGraph classify step, no
+timeout, lender-mode fast-path keyed by `lenderId`, LOA-905) and writes `classification_id`
+onto each `income_run_sources` row, then enqueues `extract`. This stage is idempotent — it
+re-enqueues `extract` if sources are already classified.
+</Step>
+<Step title="extract">
+Compare-and-set `classify → extract`. For each classified source it resolves
+`getExtractor(family, classificationType)`, downloads the PDF
+(`bridge.getLoanDocumentBuffer`), runs the extractor in mode `"live"`, and persists
+`income_extractions`. Then it calls `completeRun`.
+</Step>
+</Steps>
+
+A separate single-stage `recalc` job (`recalculate: true`) is triggered by corrections. It
+reloads stored extractions with corrections overlaid, re-runs the engine, and **never
+re-resolves the rule set** — it preserves the pinned `ruleSetId`/`ruleSetVersion` — then deletes
+and recreates `income_rule_outcomes`.
+
+### completeRun
+
+`completeRun` runs `runEngine({ family, extractionInputs })` (pure), evaluates the active income
+rule set, persists `income_streams`, `income_findings`, and `income_conditions` (on the initial
+run only), and flags low-confidence key fields via `IncomeReviewService.flagLowConfidenceFields`
+against the lender's threshold. It then updates `income_runs`: `status = 'completed'`,
+`totalMonthlyIncome` (null when reviews are pending), `reviewState` (`pending | cleared | none`),
+`requiresReview`, `pendingReviewCount`, `blockedActions` (`["export", "rule_override"]` while
+reviews are pending), `ruleSetId`/`ruleSetVersion`, and `completedAt`.
+
+## The calculation engine
+
+The engine (`modules/portal-income/engine`) is pure: no I/O, no `Date.now`, deterministic.
+`run-engine.ts` dispatches by family.
+
+<AccordionGroup>
+<Accordion title="wage_earner">
+Normalizes, then `calculateWageEarner` + `calculateContractor` + `calculateFixedIncome`.
+Findings via `generateWageEarnerFindings` + `generateExtrasFindings`; conditions via
+`generateWageEarnerConditions` + `generateExtrasConditions`.
+</Accordion>
+<Accordion title="self_employed">
+`calculateSelfEmployed` covers Schedule C plus partnership / K-1. Add-backs use `AddBackConfig`
+(flags INC_006–INC_011 in the engine types — distinct from the rule templates): depreciation,
+amortization, depletion, mileage, business use of home, and a non-recurring exclusion.
+</Accordion>
+<Accordion title="rental">
+`calculateRental` covers Schedule E with `RentalAddBackConfig` (depreciation L18, insurance L9,
+mortgage interest L12, property taxes L16, HOA L19) and `fairRentalDays`.
+</Accordion>
+<Accordion title="asset_based">
+`calculateAssetDepletion` with `AssetRuleConfig`: divisor default 84, a 0.70 retirement haircut
+below age 59.5, account types `taxable_brokerage` and `retirement`.
+</Accordion>
+</AccordionGroup>
+
+The output is an `EngineOutput`: `streams[]` (each with `streamType`, `label`, `monthlyAmount`,
+and `components[]` carrying `{ name, amount, source: { loanDocumentId, field } }`), `findings[]`
+(`findingType`, `severity`, `description`, `evidence`), `conditions[]` (`description`, `status`,
+`requiredDocTypes[]`), and `totalMonthlyIncome` (`sumMonthlyIncome`, with bankers rounding in
+`engine/rounding.ts`).
+
+## Extractors
+
+The extractor registry (`modules/portal-income/extractors/registry.ts`,
+`getExtractor(family, classificationType)`) produces a `NormalizedExtraction`
+(`classificationType`, `employerName`, `employeeName`, `grossMonthlyIncome`, `taxYear`,
+`rawFields`, `confidence`). The classification-type keys below have no leading underscore — the underscore appears only in the extractor import filenames (e.g. `extract1099Nec` from `./wage-earner/_1099_nec`), because a JS identifier cannot start with a digit. Implemented document types:
+
+| Family | Document types |
+|---|---|
+| wage-earner | `paystub`, `w2`, `written_voe`, `ssa_1099`, `1099_misc`, `1099_nec`, `1099_r` |
+| self-employed | `schedule_c`, `schedule_k1`, `1065`, `1120`, `1120s` |
+| rental | `schedule_e` |
+| asset-based | `brokerage_statement`, `retirement_statement` |
+
+Live extraction goes through OpenAI (`extractors/live-extract-via-openai.ts`, field schemas in
+`field-schemas.ts`). Paystub monthly recompute on correction uses `PAYSTUB_CYCLES_PER_YEAR`
+(`weekly: 52`, `biweekly: 26`, `semimonthly: 24`, `monthly: 12`).
+
+## Income rules (INC_001–INC_015)
+
+Rules are authored and seeded via the `portal-income-rules` module
+(`PortalIncomeRulesController`, `income-rule-sets.service.ts`,
+`seeds/baseline-templates.ts`). Engine-side evaluation is
+`engine/evaluate-income-rule.ts::evaluateIncomeRule(rule, engineOutput)`, returning
+`{ ruleCode, outcome, message, evidence }` with outcomes `PASS | FAIL | WARNING | SKIPPED`
+(it uses engine findings, streams, and conditions as evidence; `FAIL` downgrades to `WARNING`
+when severity is `WARNING`).
+
+| Code | Name | Category |
+|---|---|---|
+| INC_001 | Income Source Documentation | documentation |
+| INC_002 | Employer Name Consistency | consistency |
+| INC_003 | Gross Monthly Income Calculable | calculation |
+| INC_004 | W-2 Annual Income Consistency | consistency |
+| INC_005 | Paystub Recency | timeliness |
+| INC_006 | Employment Status Confirmed | employment |
+| INC_007 | WVOE Base Salary Present | documentation |
+| INC_008 | Multiple Employer Income Streams | calculation |
+| INC_009 | YTD Earnings Trend | consistency |
+| INC_010 | Tax Year Coverage | documentation |
+| INC_011 | Paystub YTD vs W-2 Reconciliation | consistency |
+| INC_012 | Base vs Overtime Separation | calculation |
+| INC_013 | Bonus Income Documentation | documentation |
+| INC_014 | Minimum Qualifying Income | threshold |
+| INC_015 | Document Confidence Threshold | quality |
+
+<Info>
+The `AddBackConfig` INC_006–INC_011 numbering in the engine types is a separate Schedule C
+add-back mapping. It is distinct from these INC rule templates despite the overlapping numbers.
+</Info>
+
+The income rule-set / rule schema matches the [credit](/agents/credit-evaluation) and
+[appraisal](/agents/appraisal-evaluation) shapes (lender-scoped `*_rule_sets`, `*_rules` with
+`code`/`category`/`severity`/`thresholds`/`evaluateFnKey`/operator/condition/source/
+`loanProgramId`, program overlay, and per-run overrides). `income_rules.source_template_id`
+points at the shared `appraisal_rule_templates` catalog.
+
+## Data model
+
+The tables live in `database/schema/income-*.ts`. See
+[the financial data model](/data-model/financial-data-model) for the full catalog.
+
+<ResponseField name="income_runs" type="table">
+`lenderId`, `loanId`, `auditRunId`, `family`, `borrowerName`, `status` (default `pending`),
+`reviewState` (default `none`), `requiresReview`, `pendingReviewCount`, `totalMonthlyIncome`
+(numeric), `blockedActions` (jsonb), `failureReason`, `failureDetail`,
+`ruleSetId`/`ruleSetVersion`, `currentStage`, and `completedAt`.
+</ResponseField>
+
+<ResponseField name="income run children" type="tables">
+`income_run_sources` (links a run to its source documents and classifications),
+`income_extractions` (one per `(runId, sourceId)`, with `extractedData`, `confidence`,
+`anomalies`), `income_extraction_corrections` (overlaid on recalc), `income_streams`,
+`income_findings`, `income_conditions`, and `income_rule_outcomes` (unique
+`(runId, ruleCode, ruleSetId)`).
+</ResponseField>
+
+<ResponseField name="rule config and overrides" type="tables">
+`income_rule_sets`, `income_rules`, `income_lender_rule_overrides` (lender-scoped, migration-only
+COALESCE unique on `(lenderId, ruleCode, loanProgramId)`), and `income_run_rule_overrides`
+(per-run, latest wins). Export PDFs are produced by the `income-export` module.
+</ResponseField>
+
+## HTTP endpoints
+
+All under `api/v1/portal/income` (`PortalIncomeController`):
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/run` | Create an income run |
+| GET | `/` | List runs |
+| GET | `/:id` | Get a run |
+| GET | `/:id/status` | Poll status |
+| GET | `/:id/documents` | Run documents |
+| GET | `/:id/key-field-reviews` | Key-field reviews |
+| PATCH | `/:id/key-field-reviews/:fieldId` | Resolve a key-field review |
+| POST | `/:id/export` | Export a PDF |
+| POST | `/:id/rule-overrides` | Override a rule outcome |
+| PATCH | `/:runId/documents/:extractionId/corrections` | Apply corrections (triggers recalc) |
+| GET | `/:runId/documents/:extractionId/pdf` | Source PDF |
+| GET | `/:runId/documents/:extractionId/pdf-url` | Presigned PDF URL |
+| GET | `/settings/review-threshold` | Read the review threshold |
+| PATCH | `/settings/review-threshold` | Update the review threshold |
+| POST | `/_testing/ensure-stub-loan` | Test-only helper |
+
+## Key-field reviews
+
+Like the credit and appraisal agents, income seeds `key_field_reviews` rows with the text
+`agent` column set to `"income"`. Low-confidence fields block `export` and `rule_override` until
+reviewed; the field catalog lives in `modules/key-field-reviews/catalogs/income.ts`.

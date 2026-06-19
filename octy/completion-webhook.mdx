@@ -1,0 +1,91 @@
+---
+title: Completion webhook contract
+description: "octy-run-complete: the single call that closes a run."
+icon: flag
+---
+
+`POST /api/oz/tools/octy-run-complete` is the one call that closes an Oz run. The agent must call it **exactly once at the very end** of a run. On success it records the run's summary and PR URLs, permanently invalidates the token, and advances the parent issue. Source: `src/app/api/oz/tools/octy-run-complete/route.ts`.
+
+## Auth
+
+Same as the other [Oz tool API](/octy/oz-tool-api) calls — the run id and token travel in **headers**, never the body:
+
+```http
+POST /api/oz/tools/octy-run-complete
+Authorization: Bearer <access_token>
+X-Oz-Run-Id: <run_id>
+Content-Type: application/json
+```
+
+`validateOzToken` runs first. It returns 401 (invalid / no run / wrong hash), 408 (access token expired — refresh and retry), or 410 (run already completed) with distinct human-readable messages. No DB write happens on an auth failure.
+
+<Warning>
+The legacy prompt's `CLAUDE.md` describes the payload as `{ run_id, token, summary, pr_url?, run_name? }`. That is wrong on two counts: `run_id` and `token` are **headers**, not body fields, and the PR field is `pr_urls` (an **array**), not a singular `pr_url`. Use the body below.
+</Warning>
+
+## Request body
+
+<ParamField body="summary" type="string" required>
+A thorough, self-contained markdown document recapping the entire run: what was investigated and why, every data tool called and its key findings, issues found with root causes and severity, any fixes (with file paths), any PRs opened, and a final verdict. Must be a non-empty string. This is the permanent record of the run and must stand alone.
+</ParamField>
+
+<ParamField body="pr_urls" type="string[]">
+A flat array of full PR URLs for every pull request opened during the run. Each element must be a plain URL string — not an object, not nested. Pass `[]` if no PRs were created.
+</ParamField>
+
+<ParamField body="run_name" type="string">
+A short descriptive title for the run, under 80 characters. Optional at the server: it is only applied if the run does not already have a name (a user-provided label wins). The agent is asked to always provide one.
+</ParamField>
+
+```json
+{
+  "summary": "## Root cause\n\nThe URLA parser ... \n\n## Fix\n\n...",
+  "pr_urls": ["https://github.com/loanlight/loanlight-api/pull/4821"],
+  "run_name": "Root cause: URLA parser null path"
+}
+```
+
+<Note>
+`OZ_TOOL_REGISTRY` marks `run_name` as `required: true` in the generated prompt, so the agent always sends it. The server route, however, treats `run_name` as optional and ignores it when a name is already set. Both behaviors are intentional: the prompt pushes the agent to title its run, while the server protects an operator-set label.
+</Note>
+
+## Validation behavior
+
+Field-level validation collects **all** errors before returning, so the agent gets the complete picture in one response. On any malformed payload the server returns **400** with `completionPayloadError(...)`:
+
+```json
+{
+  "error": "MALFORMED_COMPLETION_PAYLOAD",
+  "field_errors": [
+    { "field": "summary", "received": "(empty string)", "reason": "..." }
+  ],
+  "completion_tool_spec": { "...": "..." },
+  "example_body": { "...": "..." }
+}
+```
+
+Validation rules:
+
+- `summary` must be present, a string, and non-empty after trimming.
+- `pr_urls`, if present, must be an array; every element must be a string (the error names the offending indices).
+- `run_name`, if present, must be a string.
+
+<Check>
+A 400 does **not** consume the token. The agent can read `field_errors`, fix the payload, and retry the call. This is verified by `octy-run-complete/route.test.ts`. A 400 is the only retryable error response from this endpoint.
+</Check>
+
+## On success
+
+When validation passes, the server updates `octy_runs` with the trimmed `summary`, the cleaned `pr_urls`, and `run_name` (only if not already set), then sets `token_consumed_at = now` — which permanently kills both the access path and the refresh path for this run. Any later tool call returns 410.
+
+It then advances the parent issue from `delegated` to `ai_complete`, **but only if the issue is still `delegated`** — it will not clobber a status an engineer has already moved on. The response is `{ "ok": true }`.
+
+## JSON-escaping guidance
+
+The `summary` is markdown delivered as a JSON string, so it must be valid JSON. Escape control characters — newlines become `\n`, double quotes become `\"`, backslashes become `\\`. If the body is not valid JSON, the server returns a 400 with a `field: "body"` error noting the body is not valid JSON, which (like all 400s) does not consume the token. Build the request from a real JSON serializer rather than concatenating strings, especially when the summary contains code fences or quoted SSNs.
+
+## Related
+
+- [The Oz run lifecycle](/octy/oz-run-lifecycle) — where completion fits in the run.
+- [Oz tool API](/octy/oz-tool-api) — the rest of the callback surface and the shared error contract.
+- [Issues, runs, and labels API](/octy/issues-runs-labels-api) — the `intake_status` flow that `ai_complete` plugs into.

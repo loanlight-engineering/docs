@@ -1,0 +1,121 @@
+---
+title: Issues, runs, and labels API
+description: The octy-issues, oz-run, and octy-labels endpoints.
+icon: ticket
+---
+
+These routes manage Octy's own data model — issues (`octy_issues`), the runs launched for them (`octy_runs`), labels, and threaded comments. All routes are WorkOS auth-gated (`@loanlight.com` only), unlike the [Oz tool API](/octy/oz-tool-api). They back the [bug reports console](/octy/bug-reports-console).
+
+## Issue intake
+
+<ParamField path="POST /api/bug-reports" type="endpoint" />
+
+Creates an issue. This is the intake endpoint the loanlight-api portal (and Octy's own Loan Lookup bug-report panel) posts to.
+
+<ParamField body="audit_run_id" type="uuid" required>
+The audit run the issue is about. Must reference an existing `audit_runs` row, else the route returns **422**.
+</ParamField>
+<ParamField body="loan_id" type="uuid" required />
+<ParamField body="description" type="string" required>
+The reported problem.
+</ParamField>
+<ParamField body="related_traces" type="RelatedTrace[]">
+LangSmith traces the reporter attached, per agent. Shape: `{ agent_type, run_name, trace_id }`.
+</ParamField>
+<ParamField body="audit_run_traces" type="RelatedTrace[]">
+All traces for that audit run, used to surface a URLA trace as extra context.
+</ParamField>
+<ParamField body="reporter_id" type="string" />
+
+Returns the created row with **201**.
+
+<ParamField path="GET /api/bug-reports" type="endpoint" />
+
+Paginated issue list with aggregates.
+
+<Expandable title="Query parameters">
+| Param | Notes |
+|---|---|
+| `page`, `limit` | `limit` capped at 100 |
+| `status` / `intake_status` | comma list of intake statuses |
+| `agents` | comma `AGENT_TYPE_VALUES`, matched against `related_traces[].agent_type` via jsonb |
+| `labels` | comma label uuids |
+| `lenders` | comma lender uuids (matched on `loans.lender_id`) |
+| `q` | `loan_number` or `audit_run_id` ILIKE |
+| `sort` | `date_asc` or `date_desc` |
+</Expandable>
+
+Each row includes `runCount`, `latestRunStatus`, `prCount`, `commentCount`, and `labels[]`.
+
+## Single issue
+
+<ParamField path="GET /api/octy-issues/[id]" type="endpoint" />
+
+Returns a single issue (ignoring filters) with the same aggregates as the list.
+
+<ParamField path="PATCH /api/octy-issues/[id]" type="endpoint" />
+
+Updates `intake_status`. The value is validated against the seven statuses.
+
+### Status flow
+
+The `octy_issue_intake_status` enum is `new`, `acknowledged`, `delegated`, `ai_complete`, `in_review`, `closed`, `cancelled`.
+
+<Steps>
+  <Step title="new">Issue created via intake.</Step>
+  <Step title="acknowledged">An engineer optionally acknowledges it.</Step>
+  <Step title="delegated">Launching an Oz run sets this automatically.</Step>
+  <Step title="ai_complete">The [completion webhook](/octy/completion-webhook) sets this — but only from `delegated`.</Step>
+  <Step title="in_review / closed / cancelled">Engineers move the issue to a terminal state.</Step>
+</Steps>
+
+## Runs
+
+<ParamField path="POST /api/octy-issues/[id]/oz-run" type="endpoint" />
+
+Launches an Oz run for the issue. The body and the full launch sequence are documented in [the Oz run lifecycle](/octy/oz-run-lifecycle). Returns `{ run, issue }`.
+
+<ParamField path="GET /api/octy-issues/[id]/runs" type="endpoint" />
+
+All runs for the issue, newest first.
+
+<ParamField path="GET /api/octy-issues/[id]/audit-run-metadata" type="endpoint" />
+
+Returns the exact `AuditRunMetadata` baked into the prompt (audit run started/completed/status plus the matching classify-split run timing), so the UI can render an accurate prompt preview.
+
+<ParamField path="GET /api/octy-runs/[runId]/status" type="endpoint" />
+
+Polls the Warp run status, maps it to `oz_run_status`, captures the `session_link`, persists any change, and returns `{ run, isActive }`. `isActive` is true while the Warp state is one of `QUEUED`, `PENDING`, `CLAIMED`, `INPROGRESS`.
+
+## Comments
+
+<ParamField path="GET /api/octy-issues/[id]/comments" type="endpoint" />
+<ParamField path="POST /api/octy-issues/[id]/comments" type="endpoint" />
+
+Threaded comments, one level deep (`octy_issue_comments`). POST body is `{ comment_body, parent_id? }`; the author is the WorkOS user.
+
+<Warning>
+Comments are exactly one level deep. A reply to a reply is rejected with **400**, and the `parent_id` must belong to the same issue.
+</Warning>
+
+## Labels
+
+<ParamField path="POST /api/octy-issues/[id]/labels" type="endpoint" />
+<ParamField path="DELETE /api/octy-issues/[id]/labels" type="endpoint" />
+
+Attach a label (`{ label_id }`, `onConflictDoNothing`) or detach one (`?label_id=`). Backed by the `octy_issue_labels` join table.
+
+<ParamField path="GET /api/octy-labels" type="endpoint" />
+<ParamField path="POST /api/octy-labels" type="endpoint" />
+
+List labels (ascending by name) or create one. Create body is `{ name, color?, description? }`. `color` must match `^#[0-9a-fA-F]{3,8}$`, else it defaults to `#6366f1`. A duplicate name returns **409**.
+
+<ParamField path="PATCH /api/octy-labels/[id]" type="endpoint" />
+<ParamField path="DELETE /api/octy-labels/[id]" type="endpoint" />
+
+Update or delete a label. A duplicate name returns **409**; a missing label returns **404**.
+
+## Related
+
+- [Bug reports console](/octy/bug-reports-console) — the UI over these routes.
+- [Oz run lifecycle](/octy/oz-run-lifecycle) and [completion webhook](/octy/completion-webhook) — the run side of the data model.

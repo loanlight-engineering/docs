@@ -1,0 +1,161 @@
+---
+title: PII-Validation agent
+description: Cross-document PII consistency with deterministic per-field retrieval scoping.
+icon: shield-check
+---
+
+The PII-Validation agent compares the borrower PII values extracted from the MISMO/URLA application against the supporting document corpus (the loan's [LlamaCloud index](/subsystems/llamacloud-retrieval)), and emits per-field and per-document findings. Its defining feature is **deterministic per-field retrieval scoping**: for each PII field it computes which document segments are eligible from `pii_field_doc_type_rules` plus the classify-split classification map, pushes that down to LlamaCloud as a `search_filters` payload, and overrides any filter the LLM tried to set.
+
+Source root: `loanlight-api/packages/api/src/langgraph/agents/piiValidation/`.
+
+| Property | Value |
+|---|---|
+| LangGraph run name / executor key | `PII-Validation` (ledger key `piiValidation`) |
+| Plan / retrieval / aggregate models | `gpt-4o` / `gpt-4o-mini` (`PII_MODELS.planValidation`, `PII_MODELS.fieldRetrieval`) |
+| Final field-validation model | `gpt-4.1`, temp 0, topP 0.05 (`PII_MODELS.fieldValidation`) |
+| Orchestrator | `LangGraphService.createPiiValidationGraphWithSharedAuditRun(...)` |
+
+## Graph shape
+
+`buildGraph(llama?, progressEvents?, db?, classifySplitPersistence?, piiDocTypeRulesService?)` builds a `StateGraph(PiiValidationStateSchema)`:
+
+```text
+__start__ → prepare → plan-validation
+plan-validation → [conditional] one Send("validate-field", …) per pending field (fan-out)
+                                or → aggregate when pending is empty
+validate-field → aggregate → __end__
+```
+
+State (`PiiValidationStateSchema`) carries `xmlData`, `pipelineId`, `loanId`, `documentId`, `fieldsOverride`, `auditRunId`, `borrowerCount`, `fieldsToProcess`, `pending`, `loanPurpose` (`PURCHASE`/`REFINANCE`/undefined), `classificationMap` (`ClassificationSegment[]`), `classifySplitRunStatus`, `results` (concat reducer), and `completed`.
+
+<Note>
+`studio.ts` builds the graph without the rules service, classify-split persistence, or DB, so scoping there always falls back to whole-index search.
+</Note>
+
+## Nodes
+
+<Steps>
+<Step title="prepare (PrepareNode)">
+Emits `EVENTS.AGENT.PII_VALIDATION.START`, resolves the shared audit run, and forwards `loanPurpose` from the orchestrator (it is derived from URLA extraction via `extractLoanContextFromUrla`, not re-derived from XML). It calls `loadClassificationMap(loanId)` (`classifySplitPersistence.getActiveClassificationsForLoan`) — rows missing `llama_cloud_file_id` are dropped — and `loadClassifySplitRunStatus(loanId)`. On any failure the map falls back to `[]` (no scoping) and the status to `undefined` (treated as "not complete").
+</Step>
+<Step title="plan-validation (PlanValidationNode)">
+Determines the PII fields to validate. The production path uses `fieldsOverride` (fields pre-extracted by [URLA extraction](/agents/urla-extraction)) and skips the LLM entirely. Otherwise it runs `PII_MODELS.planValidation` with `withStructuredOutput(PiiPlanSchema)`, with a no-structured-output fallback (`parseManualPlanResponse`) and a graceful empty result on total failure. `normalizeFieldNames` maps free text to canonical keys; SSN/ITIN values are padded and formatted to `XXX-XX-XXXX`.
+</Step>
+<Step title="validate-field (ValidateFieldNode)">
+The heart of the agent — see below. Runs once per pending field in parallel.
+</Step>
+<Step title="aggregate (AggregateNode)">
+Computes `{ issuesFound, totalDocumentsAnalyzed, fieldsWithMultipleDocuments }`. If issues are found and the DB and `auditRunId` are present, it inserts issue rows into **`audit_errors`** (`agent_name: "piiValidation"`). It emits `EVENTS.AGENT.PII_VALIDATION.COMPLETE` and always returns `completed: true`.
+</Step>
+</Steps>
+
+<Warning>
+The validate-field and aggregate nodes do **not** write `pii_validation_results` / `pii_document_validations`. The orchestrator (`langgraph.service.ts` `persistMultiDocumentValidationResults`) writes those, attaching severity. The aggregate node only writes `audit_errors`.
+</Warning>
+
+## The validate-field pipeline
+
+`validateFieldAcrossDocuments(state)` runs five steps per field:
+
+1. **Scoping** — `computeScoping(state)` (see below). If it returns `noEligibleDocs: true` (Scenario B), the field is skipped with no retrieval and no LLM (`hasIssue: false`).
+2. **Retrieval** — `retrieveDocumentSnippets` against LlamaCloud. Zero snippets returns `createNoDocumentsResult` (`hasIssue: false`, logged as `pii.zero_retrieval`). Zero-retrieval is deliberately **not** a user-facing issue.
+3. **Enrichment** — `enrichSnippetsWithClassification` stamps each snippet's `metadata.classification_type` by matching `file_id` + page range against the classification map (so prompts can see e.g. `bank_statement_business`).
+4. **Per-document validation** — `validateSingleDocument` per snippet. Per-snippet failure becomes `createErrorDocumentValidation` (`hasIssue: true`, `issueKind: "missing"`).
+5. **Aggregation** — `aggregateDocumentValidations` collapses to a single `PiiValidationResult`.
+
+### Per-field scoping (LOA-564)
+
+This is the agent's signature subsystem. Two collaborating files — `nodes/validateField/scoping.ts` (pure helpers) and the `computeScoping` method in `node.ts` — back it, plus the `pii_field_doc_type_rules` table. See [retrieval tools and scoping](/subsystems/retrieval-tools-and-scoping) and the [PII scoping debug runbook](/runbooks/pii-scoping-debug).
+
+`PiiDocTypeRulesService.getAllowedDocTypes(fieldKey, loanPurpose)` returns `AllowedDocTypes { splitTypes, classificationTypes, isEmpty }`. It queries `pii_field_doc_type_rules` where `field_key = fieldKey` and `is_active = true` and (`applies_to_loan_purpose IS NULL` OR `= normalizedPurpose`). The resolution is the **union of loan-purpose-agnostic (NULL) rules and matching-purpose rules**. Only `PURCHASE`/`REFINANCE` survive `normalizePurpose`; anything else falls back to the agnostic subset. A 5-minute in-memory cache backs it, and a DB error returns `isEmpty: true` (safe fallback = whole-index).
+
+The pure helpers in `scoping.ts`:
+
+- `isSalvageSegment(seg)` is true when `classification_status === "classification_failed"`. **Salvage segments are always eligible** regardless of the allow-list, so PII coverage is not lost on segments the classifier could not type. Other low-confidence signals are not salvage: `split_type='UNKNOWN'` / `classification_type='unknown'` are dropped if not allow-listed, `classification_status='split'` means Phase 2 has not run yet, and `requires_review=true` still defers to the allow-list.
+- `selectAllowSegments` keeps segments whose `split_type` or `classification_type` is in the allow Sets (explicitly excluding `UNKNOWN`/`unknown`).
+- `buildEligibleFiles` unions page ranges per `file_id` (`mergeRanges` merges overlaps, keeps adjacent ranges separate). A file with no numeric page boundaries gets `pageRanges: null` (all pages eligible).
+- `buildSearchFilter` builds the LlamaCloud `search_filters` `MetadataFilters` payload (top-level `condition: "or"`): all-pages files coalesce into one `{ key: "file_id", operator: "in" }`; ranged files become `{ condition: "and", filters: [file_id ==, {or: per-range groups}] }`; a single page is `page_label ==`, a multi-page range is `{and: [page_label >= start, page_label <= end]}`.
+
+`computeScoping` returns `ScopingDecision { searchFilters, eligibleFileIds?, noEligibleDocs?, metrics }`. Every path falls back to whole-index search **unless Scenario B fires**:
+
+<AccordionGroup>
+<Accordion title="Whole-index fallbacks (logged pii.scoping_skipped)">
+1. No rules service (Studio / test DI gap) — `noRulesFallback: true`.
+2. Field did not canonicalize.
+3. Field has no rules (`allowed.isEmpty`) — preserves pre-LOA-564 behavior.
+4a. **Scenario A** — `eligibleFiles` empty because the classification map is empty (classify-split never ran).
+4b. **Classify-split incomplete** — map non-empty but `classifySplitRunStatus !== "complete"` (partial/failed/running/skipped/undefined). Logged `pii.scoping_skipped_classify_split_incomplete`. A split-failed document contributes zero classification rows, so blindly skipping would silently suppress PII validation.
+</Accordion>
+<Accordion title="Scenario B — the only skip (pii.scoping_no_eligible_docs)">
+Map non-empty **and** `classifySplitRunStatus === "complete"` **and** still zero eligible files → `noEligibleDocs: true`. The caller skips the field entirely (no retrieval, no LLM, no finding). Searching whole-index here would re-admit the very `UNKNOWN`/`unknown` segments that `selectAllowSegments` deliberately excluded.
+</Accordion>
+<Accordion title="Happy path (pii.scoping_active)">
+`eligibleFiles > 0` → `searchFilters = buildSearchFilter(...)`, `eligibleFileIds` is set, and metrics carry `rulesActive`, `allowFiles`, `salvageFiles`, `overlapFiles`, `eligibleFiles`, `eligibleSegments`.
+</Accordion>
+</AccordionGroup>
+
+### Retrieval push-down
+
+`retrieveDocumentSnippets` uses `createLlamaCloudRetrievalTool` (the `llc_retrieve` tool) over the `pipelineId`. The retrieval LLM issues one or more tool calls with `{ query, params, pass_name }`.
+
+<Warning>
+**The deterministic filter overrides the LLM.** If `scoping.searchFilters` is set, it replaces any `search_filters` the LLM put in its tool args (`params = { ...baseParams, search_filters: args.searchFilters }`). Doc-type scoping must not be LLM-controlled (LOA-564). The trace records `search_filters_overridden`.
+</Warning>
+
+After retrieval, a smoke-alarm WARN (`pii.pushdown_leak`) fires if any returned snippet's `file_id` is outside `eligibleFileIds`, detecting a case where LlamaCloud failed to honor the filter. The filter is otherwise trusted — there is no post-retrieval eligibility filtering. The core retrieval prompt hardcodes `alpha: 0.3, hybrid: true, rerank: true, top_k: 64, bm25_top_k: 100, files_top_k: 5`, a 2-pass adaptive baseline, returning up to 30 snippets.
+
+## PII fields and comparison modes
+
+`PiiFieldKeySchema` enumerates the **9 canonical fields**. Each has a `comparisonMode` from `ComparisonMode` (`stringExact | caseInsensitive | digitsOnly | addressNormalized | dateNormalized`), implemented by `normalize/normalize.ts`.
+
+| Field | comparisonMode | Notable synonyms |
+|---|---|---|
+| FullName | caseInsensitive | Name, BorrowerName, ApplicantName |
+| DateOfBirth | dateNormalized | DOB, BirthDate |
+| SocialSecurityNumber | digitsOnly | SSN, SocSecNum |
+| ITIN | digitsOnly | ITINNumber |
+| MailingAddress | addressNormalized | Address, HomeAddress, CurrentAddress |
+| PropertyAddress | addressNormalized | SubjectProperty, PropertyLocation |
+| MaritalStatus | caseInsensitive | Marital, MarriageStatus |
+| EmployerName | caseInsensitive | Employer, BusinessName, CompanyName |
+| EmployerAddress | addressNormalized | WorkAddress, JobAddress |
+
+## Single-document validation and safety nets
+
+`validateSingleDocument` builds a user prompt (`buildValidationUserPrompt`) that assembles context blocks: all-borrowers context, EMPLOYMENT CONTEXT (only `EmployerName`/`EmployerAddress`), FORMER ADDRESSES (only `MailingAddress`), the TARGET role ("Borrower"/"Co-Borrower"), DOCUMENT_CLASSIFICATION (only `FullName` when classification is `bank_statement_business`), and the document content. The LLM (`PII_MODELS.fieldValidation`, `gpt-4.1`) returns `LlmValidationResponseSchema { docValue, pageRef, hasIssue, issueKind, message }`.
+
+The core prompt's `issueKind` taxonomy:
+
+| Situation | hasIssue | issueKind |
+|---|---|---|
+| Field not found | false | `missing` |
+| Found but for a different borrower | false | `missing` |
+| Found but inconsistent | true | `inconsistent` |
+| Document belongs to the wrong person | true | `identity_mismatch` |
+
+**Deterministic safety nets** then override the LLM verdict where appropriate:
+
+- **FullName** — if the LLM flagged a mismatch but stripping trailing account-titling designations (`stripTrailingNameDesignations`: TOD/POD/JTWROS/IRA/ROTH/TTEE/REV LIV TR, etc.) and tokenizing names match on first+last, override to no issue.
+- **dateNormalized / addressNormalized** — if both sides normalize equal, override to no issue.
+- **digitsOnly (SSN/ITIN)** — if the LLM flagged inconsistent but the doc value has no mask chars (`X`/`*`/`#`) and is not 9 digits, treat it as an OCR artifact (`hasIssue: false`, `issueKind: "missing"` = unverifiable). `SocialSecurityNumber.validation.ts` also handles redacted SSNs (compare only the visible last-4) and SSN↔ITIN interchangeability.
+
+### Aggregation rules
+
+- `filterPreviousEmployerNoise` (EmployerName/EmployerAddress only) — when a document has at least one valid match plus inconsistent results from the same document, drop the inconsistent ones (likely previous-employer pages in a multi-record WVOE).
+- `deduplicateDateFindings` — collapse same-document findings with the same normalized doc value, preferring `hasIssue=true`.
+- digitsOnly — distinguish a genuine valid match from OCR-overridden chunks; if every chunk is an OCR artifact, surface as `missing`.
+
+## Outputs
+
+The orchestrator's `persistMultiDocumentValidationResults` resolves per-field severity via `PiiSeverityService.resolveBatch(lenderId, fields)` and writes, in a transaction:
+
+- **`pii_validation_results`** — one parent row per field: `field`, `mismo_value`, `borrower_index`, `has_issue`, `issue_kind`, `severity`, `overall_message`, `lang_smith_trace_url`.
+- **`pii_document_validations`** — one child row per document validation: `document_name`, `document_source`, `doc_value`, `page_ref`, `page_number`, `has_issue`, `issue_kind`, `severity`, `message`, `chunk_reference` (jsonb), `document_ref` (=`file_id`), `snippet_id`, `start_char_idx`, `end_char_idx`.
+
+Both tables enforce a DB CHECK on `issue_kind` (NULL | `missing` | `inconsistent` | `identity_mismatch`) and on `severity` (`high` | `medium` | `low`). Default severities (`PiiSeverityService.DEFAULT_PII_SEVERITY`): FullName, SSN, ITIN, PropertyAddress, EmployerName, EmployerAddress = `high`; DateOfBirth, MailingAddress, MaritalStatus = `medium`. Lender overrides come from `lenderPiiSeverityOverrides` and are frozen on the row at audit time.
+
+The `pii_field_doc_type_rules` scoping matrix has columns `field_key` (CHECK = one of the 9 keys), `applies_to_loan_purpose` (CHECK NULL | PURCHASE | REFINANCE), `match_kind` (CHECK `split_type` | `classification_type`), `match_value`, `is_active`, with a unique index on `(field_key, COALESCE(applies_to_loan_purpose,'__ANY__'), match_kind, match_value)`.
+
+<Info>
+`RetrievalHealthService.logFieldRetrievalHealth` emits a structured `event: "retrieval_health"` log (Datadog) per field with snippet counts, retrieval calls, duration, and `docTypeScoping` metrics. This is log-only, not a DB table. See [observability](/agents/observability).
+</Info>

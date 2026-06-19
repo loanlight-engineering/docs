@@ -1,0 +1,75 @@
+---
+title: Classify and Split config
+description: Editing classify-split config and the live SSE dry-run.
+icon: scissors
+---
+
+The Classify & Split config tool at `/classify-split-config` lets engineers edit the document classification configuration that the Pre-Audit-Classification agent reads, and validate changes with a live dry-run against loanlight-api. The data it edits is the [classify-split data model](/subsystems/classify-split-data-model).
+
+## Config editing
+
+The page is tab-based (`src/app/(app)/classify-split-config/`):
+
+- **Categories & Rules** — the split categories and classification rules.
+- **Classifications** — the classification types.
+- **Confusion Map / Matrix / Graph** — visualizations of misclassification.
+- **PII Doc-Type Rules** — the `pii_field_doc_type_rules` that drive PII scoping.
+- **Dry Run** — run the live validation described below.
+
+Edits are applied through server actions in `actions/` (`classifications.ts`, `classify-rules.ts`, `split-categories.ts`, `pii-doc-type-rules.ts`, `confusion-edges.ts`, `bulk-config.ts`, `config-context.ts`), with Zod schemas in `src/lib/schemas/`.
+
+## Live dry-run
+
+The Dry Run tab exercises the real loanlight-api classify-split pipeline against an uploaded document or a JSON payload, without going through the full audit flow.
+
+### Request path
+
+The browser POSTs to `POST /api/classify-split-config/dry-run` (`src/app/api/classify-split-config/dry-run/route.ts`). That handler proxies to loanlight-api's `POST /internal/dry-run/classify-split` (JSON or multipart file upload) and streams the response back to the browser as Server-Sent Events (`text/event-stream`).
+
+The proxy uses `src/lib/loanlight-api-client.ts`, which calls `${LOANLIGHT_API_URL}` with:
+
+- `x-internal-api-key: OCTY_INTERNAL_API_KEY` — the shared secret that must match loanlight-api's `InternalApiKeyGuard`.
+- `x-acting-user: <email>` — the WorkOS user running the dry-run.
+
+The client uses a 120-second timeout and surfaces failures as `ApiClientError`.
+
+<Warning>
+The dry-run is gated by `OCTY_INTERNAL_API_KEY`. If the secret does not match loanlight-api's `InternalApiKeyGuard`, the proxied request is rejected. See [Environment variables](/octy/environment-variables).
+</Warning>
+
+### Modes
+
+- `mode`: `split` (Phase 1 splitting only) or `full` (split + classify).
+- `classificationMode` (optional): `per_segment`, `majority_bucket`, or `two_pass`.
+- `preAudit` (optional): run through the pre-audit wrapper.
+
+### SSE events
+
+The stream emits typed `DryRunEvent` records:
+
+| Event | Meaning |
+|---|---|
+| `step` | A pipeline stage started/progressed. |
+| `result` | A classification result for a segment. |
+| `heartbeat` | Keep-alive while the backend works. |
+| `trace` | A LangSmith trace pointer for the run. |
+| `error` | A failure (`BACKPRESSURE_TIMEOUT` or `LLAMACLOUD_FAILURE`). |
+| `done` | Terminal event; the stream then sends `data: [DONE]`. |
+
+<Warning>
+A dry-run is not free of side effects. It writes **real rows** into the classify-split tables with `is_dry_run = true`. Filter on that column when querying, and do not treat dry-run output as ephemeral.
+</Warning>
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Classify-split data model" href="/subsystems/classify-split-data-model" icon="table">
+The tables this tool edits and the dry-run writes.
+</Card>
+<Card title="Classify and split" href="/subsystems/classify-split" icon="scissors">
+The two-phase pipeline behind the config.
+</Card>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+`LOANLIGHT_API_URL` and `OCTY_INTERNAL_API_KEY`.
+</Card>
+</Columns>

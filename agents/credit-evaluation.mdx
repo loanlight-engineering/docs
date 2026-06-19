@@ -1,0 +1,310 @@
+---
+title: Credit-Evaluation agent
+description: The fully implemented credit agent (liabilities and DTI live here).
+icon: credit-card
+---
+
+The Credit-Evaluation agent (`creditEvaluation`) is a fully implemented, 11-node compiled
+LangGraph that extracts a credit report, computes facts, evaluates the lender's credit rules,
+and persists a `credit_runs` row. Liabilities and DTI are part of this agent — there is no
+separate liabilities agent.
+
+<Note>
+The legacy Octy system prompt lists `creditEvaluation` as a "stub, not yet implemented." That
+is wrong. The agent is fully built: an 11-node graph plus the `lib/credit-pipeline` library
+(extraction, a Zod facts schema, 16 rules CRED_001–CRED_016, summaries, risk projection), the
+`portal-credit` NestJS module with 16 HTTP routes, and a BullMQ worker with heartbeat and
+orphan recovery. The only genuine stub is [Liabilities-Assessment](/agents/liabilities-assessment).
+</Note>
+
+## How it runs
+
+The agent has two entry paths.
+
+<Tabs>
+<Tab title="Solo run (portal)">
+A standalone credit run is created from the portal via `POST /api/v1/portal/credit/run`
+(`PortalCreditController`, base path `api/v1/portal/credit`). The DTO `CreateCreditRunDto`
+carries `inputS3Key` (required, path-traversal guarded), optional `loanId`, `ruleSetId`,
+`grossMonthlyIncome`, and `selectedRuleSources[]`.
+
+The controller inserts a `credit_runs` row with status `pending` and enqueues a job on the
+BullMQ queue `credit-extraction`. `CreditProcessor`
+(`modules/portal-credit/credit.processor.ts`, `@Processor("credit-extraction")`) claims the
+run with a compare-and-set (`pending → running` plus a `claimToken` and heartbeat), downloads
+the PDF from S3, and calls `LangGraphService.createCreditEvaluationGraph`. Solo runs have
+`audit_run_id IS NULL`.
+</Tab>
+<Tab title="Audit-driven run (pipeline)">
+During an audit, `AuditAgentsExecutor`
+(`integration-events/services/audit-agents-executor.service.ts`) runs credit evaluation inline
+in Phase 2 alongside PII and property data. It fans out over the loan's classified credit-report
+documents and calls `LangGraphService.createCreditEvaluationGraphWithSharedAuditRun`, attaching
+the run to the parent [audit run](/concepts/audit-run) with `isAuditDriven: true`. Each run
+upserts a `credit_runs` row keyed by `(auditRunId, auditedCreditDocumentId)`.
+
+Credit evaluation only runs when the loan has at least one document whose
+`classification_type` is in the credit-report allowlist (see below). If none is classified yet,
+the executor skips credit — a per-agent skip never fails the audit run.
+</Tab>
+</Tabs>
+
+`LangGraphService.createCreditEvaluationGraph` mints an `auditRunId` (and creates an audit run
+when `loanId` is present), builds the graph, and races `app.invoke` against
+`CREDIT_GRAPH_DEADLINE_MS` — an `AbortController` wall-clock backstop set strictly below the
+BullMQ worker lock (`CREDIT_EXTRACTION_LOCK_DURATION_MS`). The graph's own `aggregate` node
+persists the `credit_runs` row; the service does not.
+
+### Credit-report classification allowlist
+
+Audit-driven runs are gated on document classification. A document drives credit evaluation only
+when its `classification_type` is one of the values in
+`integration-events/constants/credit-report-classifications.ts`:
+
+```ts
+export const CREDIT_REPORT_CLASSIFICATION_TYPES = [
+  "credit_report",
+  "credit_report_trimerge",
+  "credit_report_single",
+] as const;
+```
+
+`AuditAgentsExecutor.hasClassifiedCreditReportForLoan` checks for at least one matching
+[classify-split](/subsystems/classify-split) segment before enqueueing the agent, and the
+fan-out iterates over those documents.
+
+## The graph
+
+The graph is linear:
+
+```text
+__start__ → prepare → detectScanned → ocr → extractText → extractStructured
+  → mergeCandidates → validate → computeFactsSummaries → evaluateRules
+  → generateAiSummary → aggregate → __end__
+```
+
+<AccordionGroup>
+<Accordion title="prepare — cross-tenant guard">
+If `loanId` is undefined, looks up the `credit_runs` row by `(pipelineId, lenderId)` and reads
+`gross_monthly_income` and `rule_set_id`. If `loanId` is set, verifies the loan is owned by the
+lender and throws `CrossTenantGuardError` on mismatch. This guard never soft-degrades. The
+audit-driven path keeps the orchestrator-seeded `grossMonthlyIncome`.
+</Accordion>
+<Accordion title="detectScanned — digital vs scanned">
+Loads the PDF with pdfjs and extracts text items. A page counts as "digital" when it has at
+least `SCANNED_PAGE_THRESHOLD` (5) text items; the document is treated as scanned when digital
+pages are at most half the total. Emits `isScanned` and `textItems`.
+</Accordion>
+<Accordion title="ocr — inert pass-through">
+Returns `{}` and does nothing (LOA-1101). The old `ocrmypdf` preprocessing was removed and the
+binary is absent in production; Reducto OCRs scanned PDFs natively in `extractStructured`. Do
+not re-add OCR here.
+</Accordion>
+<Accordion title="extractText — text-layer candidates">
+`generateCreditTextCandidates` from `textItems` (or a single `rawText` item). Records
+`layersUsed` of `["ocr_text"]` or `["pdf_text"]`.
+</Accordion>
+<Accordion title="extractStructured — Reducto extraction">
+When a Reducto client is present, `generateCreditReductoCandidates` runs over the PDF bytes.
+Records `layersUsed` of `["reducto"]`. Skipped when no client is configured.
+</Accordion>
+<Accordion title="mergeCandidates — candidate merge and fact build">
+Merges candidate maps in the order corrections → text → reducto
+(`mergeCandidateMaps(injectCorrections(corrections), textCandidates, reductoCandidates)`), so
+for same-priority ties corrections win over text, which wins over Reducto. Then
+`buildFactsFromCandidates` produces `facts`. Records `["user_corrections"]` when corrections
+exist.
+</Accordion>
+<Accordion title="validate — non-fatal schema check">
+`CreditFactsSchema.safeParse(state.facts)`. On failure it logs and proceeds with the raw facts;
+validation never aborts the run.
+</Accordion>
+<Accordion title="computeFactsSummaries — summaries and coverage">
+`computeSummaries` produces `factsSummary` and coverage percent
+(`computeCoverageFromFacts` against `COVERAGE_THRESHOLD`). This node must return
+`facts.summaries` merged into facts, or six rules silently misfire.
+</Accordion>
+<Accordion title="evaluateRules — DB-backed rule evaluation">
+Resolves `loanProgramId` for program-scoped credit rules (LOA-1080) and calls
+`evaluateWithCreditRules`. The DB evaluator is authoritative; this node does no rule-set
+pre-lookup. Returns `complianceResults`, `ruleSetId`, and `ruleSetVersion`.
+</Accordion>
+<Accordion title="generateAiSummary — DTI and narrative">
+Computes `dtiRatio = totalMonthlyDebt / grossMonthlyIncome`, guarding `grossMonthlyIncome > 0`.
+`generateCreditSummary` produces `aiSummary` (skipped when no OpenAI client is configured).
+</Accordion>
+<Accordion title="aggregate — persist">
+Builds the completed payload (status `completed`, `extractedData` = facts, `complianceResults`,
+`overallRisk` via `computeOverallRisk`, `aiSummary`, `coveragePercent`, `isScanned`,
+`layersUsed`, `dtiRatio`, `grossMonthlyIncome`, `ruleSetId`/`ruleSetVersion`,
+`auditedCreditDocumentId`). The solo path runs `UPDATE credit_runs` where status is in
+(`pending`, `running`) and never writes a null `ruleSetId`. The audit path runs
+`INSERT … ON CONFLICT` with `setWhere: ne(status, 'reviewed')`. Then it seeds key-field reviews
+via `keyFieldReviewsService.seedForRun({ agent: "credit", … })`.
+</Accordion>
+</AccordionGroup>
+
+The trap-door invariants for these nodes are catalogued in `creditEvaluation/CLAUDE.md`:
+the `facts.summaries` merge, no rule-set pre-lookup, the DTI guard, the inert `ocr` node,
+preserving `ruleSetId`, the merge order, the cross-tenant guard, the audit upsert `setWhere`,
+and the persist branch keyed on `isAuditDriven`.
+
+## CreditFacts schema
+
+The extracted facts conform to `CreditFactsSchema`
+(`lib/credit-pipeline/schemas/credit-facts.schema.ts`, `schema_version: "CreditFacts.v0"`). Top
+level: `report`, `borrowers` (≥1), `bureaus` (1–3), and optional `tradelines[]`, `inquiries[]`,
+`public_records[]`, `collections[]`, `alerts[]`, and `summaries`.
+
+Selected enums:
+
+| Field | Values |
+|---|---|
+| `EvidenceSchema.source_method` | `pdf_rule_based`, `pdf_table_model`, `pdf_regex`, `pdf_ocr`, `mismo_xml`, `vendor_json`, `pdf_hil_confirmed`, `reducto_extract`, `reducto_table` |
+| `BureauNameEnum` | `experian`, `equifax`, `transunion` (+ `unknown`) |
+| `AccountTypeEnum` | `mortgage`, `installment`, `revolving`, `charge_card`, `student_loan`, `auto`, `credit_card`, `heloc`, `personal_loan`, `line_of_credit`, `collection`, `alimony`, `child_support`, `other` |
+| `AccountStatusEnum` | `open`, `closed`, `paid`, `charged_off`, `collection`, `foreclosure`, `repo`, `settled`, `deferred`, `unknown` |
+| `PublicRecordTypeEnum` | `bankruptcy`, `tax_lien`, `judgment`, `foreclosure`, `short_sale`, `deed_in_lieu`, `civil_claim`, `other` |
+| `InquiryTypeEnum` | `hard`, `soft`, `unknown` |
+| `AlertTypeEnum` | `fraud_alert`, `active_duty_alert`, `id_theft_statement`, `ofac_notice`, `file_freeze`, `other` |
+
+`ScoreSchema.score_value` is an integer 300–900 with a refine for FICO ≤ 850. The `summaries`
+block carries `liabilities` (`total_monthly_debt`, housing/installment/revolving debt, secured
+and unsecured balances), `delinquencies`, `utilization`, `counts`, `score`
+(`representative_score`, `representative_bureau`, `meets_threshold`, `bureau_spread`), and
+`tradeline_type_rollups[]`. The Work Number / TWN "Income Qualify" addendum fields on
+`EmploymentSchema` drive rule CRED_016.
+
+## Credit rules
+
+The 16 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
+(`rule-registry.ts`, looked up by `getCreditRuleByCode`):
+
+| Code | Name | Category |
+|---|---|---|
+| CRED_001 | Address Consistency | Consistency |
+| CRED_002 | Name Consistency | Consistency |
+| CRED_003 | SSN Consistency | Consistency |
+| CRED_004 | Late Payments (12mo) | Payment History |
+| CRED_005 | Late Payments (24mo) | Payment History |
+| CRED_006 | Active Delinquency | Payment History |
+| CRED_007 | Bankruptcy | Public Records |
+| CRED_008 | Foreclosure / Short Sale | Public Records |
+| CRED_009 | Tax Lien / Judgment | Public Records |
+| CRED_010 | Disputed Accounts | Disputed Accounts |
+| CRED_011 | Recent Inquiries | Credit Inquiries |
+| CRED_012 | Credit Score Minimum | Credit Scores |
+| CRED_013 | Score Discrepancy | Credit Scores |
+| CRED_014 | DTI Ratio | DTI & Liabilities |
+| CRED_015 | Collection Accounts | Collections |
+| CRED_016 | Work Number Income Qualify Addendum Present | DTI & Liabilities |
+
+### Rule evaluation
+
+`evaluateWithCreditRules` (`rules/evaluator.ts`, delegating to `evaluateWithDb`) is DB-backed:
+
+<Steps>
+<Step title="Load the active rule set">
+Loads the lender's active `credit_rule_sets`. It honors a `requestedRuleSetId` when that set is
+active and lender-owned; otherwise it picks the most recent active set ordered by
+`desc(createdAt), desc(id)`.
+</Step>
+<Step title="Load and overlay rules">
+Loads `credit_rules` for that set ordered by `(code, loanProgramId, id)`, then applies
+`applyProgramOverlay` so a program-scoped rule replaces the lender-global rule with the same
+code.
+</Step>
+<Step title="Evaluate each rule">
+A disabled rule yields `SKIPPED`; missing required fields yield `NEEDS_INFO`; an
+`evaluateFnKey === "custom"` rule yields `SKIPPED` ("evaluated in a later release"); otherwise
+the evaluator dispatches `CREDIT_RULE_FN_MAP[evaluateFnKey]` with merged and validated
+thresholds. A `FAIL` is downgraded to `WARNING` when `rule.severity === "WARNING"`.
+</Step>
+</Steps>
+
+Outcomes are `PASS`, `FAIL`, `WARNING`, `NEEDS_INFO`, or `SKIPPED`. The evaluator returns
+`{ results, ruleSetId, ruleSetVersion }`, returns empty results without `db` and `lenderId`, and
+never throws.
+
+The rule operators on `credit_rules.operator` use the 14-value union pinned by
+`credit_rules_operator_check` — credit does **not** include `abs_less_than` /
+`abs_less_than_or_equal` (those two are appraisal-only, where the constraint lists 16). Each rule may use
+exactly one rule type: a `condition` JSONB, an `operator` + `fieldPath`, or none
+(`chk_credit_rule_type_exclusive`).
+
+## Data model
+
+The credit subsystem lives in `database/schema/credit-runs.ts`, `credit-rule-sets.ts`, and
+`credit-rules.ts`. See [the financial data model](/data-model/financial-data-model) for the full
+catalog.
+
+<ResponseField name="credit_runs" type="table">
+One row per run. Carries `status` (`pending | running | completed | failed | reviewed`),
+`extractedData` (facts), `complianceResults`, `aiSummary`, `isScanned`, `coveragePercent`,
+`overallRisk`, `dtiRatio` (real), `grossMonthlyIncome` (real), `ruleSetId`/`ruleSetVersion`,
+`auditRunId`, `selectedRuleSources[]`, `layersUsed[]`, `auditedCreditDocumentId`, recovery
+columns (`lastHeartbeatAt`, `claimToken`, `recoveryAttempts`, `errorCategory`), and `deletedAt`
+(soft delete). Two partial unique indexes — `(auditRunId, auditedCreditDocumentId)` and
+`(auditRunId)` where the document id is null — both gated on `deleted_at IS NULL`.
+`buildCreditRunsConflictArgs()` chooses the upsert target.
+</ResponseField>
+
+<ResponseField name="credit_rule_sets" type="table">
+Lender-scoped, versioned rule sets (`lenderId`, `name`, `version`, `templateVersion`,
+`isActive`, `createdBy`). Partial unique `(lenderId, name)` where active.
+</ResponseField>
+
+<ResponseField name="credit_rules" type="table">
+Per-rule definitions (`ruleSetId`, `sourceTemplateId` — intentionally not an FK, `code`, `name`,
+`category`, `severity` (`FAIL | WARNING`), `thresholds`, `requiredFields[]`, `formTypes[]`,
+`evaluateFnKey`, `operator`/`fieldPath`/`expectedValue`/`condition`, `source`, `failMessage`,
+`passMessage`, `isEnabled`, `loanProgramId`).
+</ResponseField>
+
+Human-in-the-loop tables: `credit_corrections` (field edits) and `credit_rule_overrides`
+(override outcome `PASS | FAIL | WARNING | NEEDS_INFO | SKIPPED`).
+
+## HTTP endpoints
+
+All under `api/v1/portal/credit` (`PortalCreditController`):
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/run` | Create a credit run |
+| GET | `/` | List runs |
+| GET | `/:id` | Get a run |
+| GET | `/:id/status` | Poll status |
+| GET | `/:id/rules` | Rule outcomes |
+| PATCH | `/:id/rules/:ruleCode` | Override a rule outcome |
+| DELETE | `/:id/rules/:ruleCode` | Clear an override |
+| GET | `/:id/corrections` | List corrections |
+| POST | `/:id/corrections` | Add a correction |
+| DELETE | `/:id/corrections/:corrId` | Remove a correction |
+| POST | `/:id/mark-reviewed` | Mark reviewed |
+| POST | `/:id/revert-approval` | Revert approval |
+| GET | `/:id/audit-events` | Run audit trail |
+| GET | `/:id/pdf` | Source PDF |
+| GET | `/:id/pdf-url` | Presigned PDF URL |
+| GET | `/:id/key-field-reviews` | Key-field reviews |
+| PATCH | `/:id/key-field-reviews/:fieldId` | Resolve a key-field review |
+
+Custom credit-rule authoring (natural-language parsing, staged bundles, the credit field
+registry) lives in a separate `portal-credit-rules` module (`PortalCreditRulesController`).
+
+## Reliability and recovery
+
+`CreditProcessor` writes are scoped by a `claimToken` and keep a heartbeat
+(`CREDIT_HEARTBEAT_INTERVAL_MS`). A startup reconcile plus a periodic orphan sweep
+(`CREDIT_ORPHAN_SWEEP_INTERVAL_MS`) recover stale `pending`/`running` solo runs
+(`audit_run_id IS NULL AND deleted_at IS NULL`), re-enqueue them with `addBulk` (jobId
+`recover:<id>:<attempts>`) up to `CREDIT_MAX_RECOVERY_ATTEMPTS`, then terminally fail. There are
+two orphan legs: stale-heartbeat (older than `heartbeatCutoff`) and null-heartbeat
+(`startedAt < windowCutoff`). Runs that are still heartbeating past
+`CREDIT_SILENT_RUN_BUDGET_MS` are alert-only — termination is owned by the in-process
+`CREDIT_GRAPH_DEADLINE_MS` deadline, which sits strictly below the BullMQ lock.
+
+<Tip>
+Tracing a credit finding that looks wrong? See
+[Tracing a bad field](/runbooks/tracing-a-bad-field) and
+[Investigating a failed run](/runbooks/investigating-a-failed-run).
+</Tip>

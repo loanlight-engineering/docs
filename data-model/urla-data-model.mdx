@@ -1,0 +1,68 @@
+---
+title: URLA data model
+description: urla_extraction_results and the URLA rules engine tables.
+icon: file-text
+---
+
+The URLA (Uniform Residential Loan Application, Form 1003) subsystem stores the structured form data the [URLA-Extraction agent](/agents/urla-extraction) produces from MISMO 3.4 XML, plus the per-borrower findings the [URLA-Completeness rules engine](/agents/urla-completeness) generates over it. All three tables live in `urla.ts`.
+
+## urla_extraction_results
+
+One row per audit run holding the full extracted 1003 data.
+
+<ParamField path="id" type="uuid PK" />
+<ParamField path="audit_run_id" type="uuid → audit_runs (cascade, UNIQUE)">**Unique** — exactly one extraction per audit run.</ParamField>
+<ParamField path="loan_id" type="uuid → loans (cascade)" />
+<ParamField path="urla_extraction_result" type="jsonb NOT NULL">The full extracted URLA form data. GIN-indexed.</ParamField>
+<ParamField path="created_at" type="timestamptz" />
+
+### urla_extraction_result JSON shape
+
+The jsonb column is typed `UrlaExtractionResult` (`langgraph/agents/urlaExtraction/types/output-schema.types.ts`):
+
+```ts
+interface UrlaExtractionResult {
+  borrowerRelationshipsResult: BorrowerCreditGrouping;
+  borrowerExtractionResults: BorrowerExtractionResult[];
+}
+
+interface BorrowerExtractionResult {
+  borrowerLabel: string;            // e.g. "BORROWER_1"
+  urlaExtractionResult: UrlApplicationView;
+}
+```
+
+Each `UrlApplicationView` carries the 1003 sections:
+
+| Field | Section |
+|---|---|
+| `section1BorrowerInfo` | 1 — borrower information |
+| `section2FinancialInfo` | 2 — assets and liabilities |
+| `section3RealEstate` | 3 — real estate owned (REO) |
+| `section4LoanAndProperty` | 4 — loan and property |
+| `section5Declarations` | 5 — declarations |
+| `section7MilitaryService` | 7 — military service |
+| `section8DemographicInfo` | 8 — demographic information |
+| `section9LoanOriginator` | 9 — loan originator |
+
+<Warning>
+**Section 6 (Acknowledgements and Agreements) is disabled.** `section6Acknowledgements` is commented out of `UrlApplicationView` and the `section6.types` export. Do not expect a section-6 key in the extracted JSON.
+</Warning>
+
+## urla_rules_engine_results
+
+One rules pass per borrower. PK `id`, `audit_run_id`, `loan_id`, `urla_extraction_result_id` → `urla_extraction_results` (cascade), `borrower_label` (NOT NULL, default `BORROWER_1`), `created_at`. Unique `(audit_run_id, borrower_label)`.
+
+## urla_rules_findings
+
+The individual findings. PK `id`, `rules_engine_result_id` → `urla_rules_engine_results` (cascade).
+
+<ParamField path="rule_id" type="rule_id (pgEnum)">31-value enum. See [enums reference](/data-model/enums-reference).</ParamField>
+<ParamField path="rule_category" type="rule_category (pgEnum)">16-value section enum.</ParamField>
+<ParamField path="finding_type" type="finding_type (pgEnum)">`PASS | FAIL | INFO`.</ParamField>
+
+Plus `rule_name`, `message`, `field_path`, `expected_value` jsonb, `actual_value` jsonb, `metadata` jsonb, `created_at`.
+
+<Note>
+`urla_rules_findings` is the **only** place the three URLA pgEnums (`rule_id`, `rule_category`, `finding_type`) are used as actual columns.
+</Note>

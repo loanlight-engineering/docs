@@ -1,0 +1,77 @@
+---
+title: Billing reports
+description: Octy's billing/usage reporting and its known schema drift.
+icon: receipt
+---
+
+Billing Reports at `/billing-reports` count billable usage per lender over a date range. The logic lives in `src/lib/billing.ts`; shared definitions are in `src/lib/billing-shared.ts`.
+
+## The billable unit
+
+A billable unit is **a loan, counted once**. A loan is counted in a period when its **first** completed audit run lands in the window. "First completed" means:
+
+- `audit_runs.status = 'complete'`
+- `completed_at` is not null
+- `is_shadow = false`
+- `completed_at` falls in `[from, to)` (half-open range)
+
+The per-loan agent mix is the union of agents across **all** of that loan's completed runs (not just the first). Results are grouped by lender; loans with no `lender_id` are excluded.
+
+## API
+
+`GET /api/billing-reports?view=summary|detail|lenders` (`src/app/api/billing-reports/route.ts`):
+
+<ParamField query="view" type="string" required>
+`summary`, `detail`, or `lenders`.
+</ParamField>
+<ParamField query="from" type="string (ISO date)">
+Start of the window. Validated so `from <= to`. Defaults to the last full calendar month (`defaultBillingRange`).
+</ParamField>
+<ParamField query="to" type="string (ISO date)">
+End of the window (exclusive).
+</ParamField>
+<ParamField query="agent" type="string (repeated)">
+One or more billing keys to filter on.
+</ParamField>
+<ParamField query="lenderId" type="string (repeated)">
+One or more lender ids to filter on.
+</ParamField>
+
+CSV export is available via `summaryToCsv` and `detailToCsv`.
+
+## How agents are detected
+
+A loan is credited with an agent based on the **presence of rows in that agent's result table** for the loan's completed runs. `BILLING_AGENTS` maps billing keys to those tables:
+
+| Billing key | Result table(s) probed |
+|---|---|
+| `urla` | `urla_extraction_results` |
+| `pii` | `pii_validation_results` |
+| `dochealth` | `doc_completeness_results` / `doc_expiration_results` |
+| `property` | `property_data_runs` |
+| `redflags` | `red_flag_results` |
+| `classification` | `classify_split_runs` (probed with `to_regclass`) |
+
+The `classify_split_runs` probe uses `to_regclass` because that table lags behind in some environments — the query first checks the table exists before joining it.
+
+## Known schema drift
+
+<Note>
+Billing carries documented drift between Octy's vendored schema and the live database. Treat these as caveats when reconciling counts, not as bugs to fix here.
+
+- **No `lenders.is_internal` filter.** That column is not migrated in the database Octy reads, so internal/test lenders are **not** excluded from billing counts.
+- **uuid/text cast on the lender join.** The join `lenders.id = loans.lender_id` casts **both sides to text** to bridge a uuid/text type drift between the two columns.
+- **`classify_split_runs` existence probe.** Classification credit depends on the table existing in the current environment (the `to_regclass` check above).
+- **Property-Red-Flags can under-count clean loans.** Because agent credit is keyed on the presence of result rows, a loan that ran Property-Red-Flags but produced no flagged rows may not be counted for the `redflags` agent.
+</Note>
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Result tables" href="/data-model/result-tables" icon="table">
+The per-agent tables billing probes.
+</Card>
+<Card title="Audit run" href="/concepts/audit-run" icon="play">
+What "complete" and `is_shadow` mean.
+</Card>
+</Columns>

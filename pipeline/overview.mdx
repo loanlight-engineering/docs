@@ -1,0 +1,98 @@
+---
+title: Audit pipeline overview
+description: The two-stage audit pipeline and the orchestrators that drive it.
+icon: workflow
+---
+
+An audit turns a loan package (a MISMO 3.4 XML application plus supporting PDF documents) into a structured set of findings written to per-agent result tables and read back by partners, the lender portal, and Encompass. This page maps the orchestrators that drive that work and the error semantics that govern it.
+
+## The orchestrators
+
+There are three distinct orchestration code paths. They live in different folders, call different services, and should not be conflated. See [Triggering an audit](/pipeline/triggers) for the entry points that reach each one.
+
+<Columns cols={2}>
+  <Card title="Modern pipeline (EPC + Partner)" icon="bolt">
+    `IntegrationOrchestrationService` runs both production paths. `processAuditRequest` handles EPC; `processAuditForPartner` handles the Partner API. Both share `PreAuditStageService` (Phase 1) and `AuditAgentsExecutor` (Phase 2/3).
+  </Card>
+  <Card title="Legacy LOS-pull" icon="history">
+    `EncompassAuditOrchestrationService.perform` and `DevConnectAuditOrchestrationService.perform` pull the loan and documents directly from the LOS provider API rather than from S3. Thinner and older; the Encompass `LosProvider` is now a non-functional stub.
+  </Card>
+</Columns>
+
+<Note>
+A legacy "single audit service" framing is wrong. The modern pipeline is `IntegrationOrchestrationService` split into `PreAuditStageService` (Phase 1) and `AuditAgentsExecutor` (Phase 2/3), with a separate legacy LOS-pull path under `audit/providers/`.
+</Note>
+
+## The two stages
+
+`IntegrationOrchestrationService` drives a run through two stages once an `audit_runs` row exists.
+
+<Steps>
+  <Step title="Phase 1 — pre-audit stage">
+    `PreAuditStageService.executePreAuditStage` fires three independent branches in parallel: pre-audit classification, URLA preprocessing, and LlamaCloud document indexing. A phase barrier awaits classification before any audit agent runs. See [Pre-audit stage](/pipeline/pre-audit-stage).
+  </Step>
+  <Step title="Phase 2/3 — audit agents stage">
+    `AuditAgentsExecutor.executeAuditAgents` runs PII, property-data, and credit in Phase 2, then document-health and red-flags in Phase 3, each batch via `Promise.allSettled`. See [Audit agents stage](/pipeline/audit-agents-stage).
+  </Step>
+  <Step title="Complete">
+    `AuditService.completeAuditRun` flips the run to `complete` and the loan status to `ready`. A progress `WORKFLOW.COMPLETE` event is emitted.
+  </Step>
+</Steps>
+
+## End-to-end flow (EPC path)
+
+```text
+EventBridge "Audit Requested"
+  → SQS audit-requested-events
+    → QueueConsumerService.handleAuditRequested
+      → IntegrationOrchestrationService.processAuditRequest
+          ├─ download files from S3 (downloadTransactionFiles)
+          ├─ resolveLender → upsertLoan (loan.id == correlationId)
+          ├─ createAuditRun (dedup guard; status=processing)
+          ├─ registerDocuments
+          ├─ PreAuditStageService.executePreAuditStage   ── Phase 1
+          │     ├─ Branch C: pre-audit classification (barrier target)
+          │     ├─ Branch A: URLA preprocessing
+          │     └─ Branch B: LlamaCloud indexing (awaited first)
+          ├─ AuditAgentsExecutor.executeAuditAgents       ── Phase 2/3
+          │     ├─ Phase 2: piiValidation, propertyData, creditEvaluation
+          │     └─ Phase 3: documentHealth, redFlags
+          ├─ completeAuditRun
+          └─ WORKFLOW.COMPLETE event
+```
+
+The Partner API path is the same shape with two differences: it is triggered by `POST /api/v1/partner/audits` instead of SQS, and its Phase 1 is URLA preprocessing only (classification and Llama indexing already happened at document-upload time).
+
+## Error semantics
+
+The pipeline draws a hard line between infrastructure failures and per-agent failures. This distinction is the single most important rule when reading run outcomes. The canonical reference is `docs/adr/ADR-audit-pipeline-error-semantics.md`.
+
+<Columns cols={2}>
+  <Card title="Per-agent failures — never fail the run">
+    A rejected agent in `Promise.allSettled` is recorded in `audit_errors` (one row per failure, or per inner error for credit's `AggregateError`). The run still reaches `complete`. Partners and the portal read these errors alongside successful results.
+  </Card>
+  <Card title="Infrastructure failures — fail the run">
+    Errors in the outer orchestrator try/catch (XML download, lender resolution, classification, S3 retrieval) trigger `failAuditRun` and a `WORKFLOW.ERROR` event. `failAuditRun` is reserved for these only.
+  </Card>
+</Columns>
+
+The orchestrator's catch block wraps each persistence step independently and applies a fixed priority — `saveAuditError` → `failAuditRun` → `emitEvent(WORKFLOW.ERROR)` — so a DB blip mid-cleanup cannot leave a non-terminal run or skip the error emit. The loan status is best-effort set to `error` on failure.
+
+See [Run lifecycle and deduplication](/pipeline/lifecycle-and-dedup) for how statuses transition and how `completeAuditRun` is guarded against late-success races.
+
+## Where to go next
+
+<Columns cols={2}>
+  <Card title="Triggering an audit" href="/pipeline/triggers" icon="play">
+    The three entry paths and their request shapes.
+  </Card>
+  <Card title="Reading audit results" href="/pipeline/results" icon="file-text">
+    The endpoints that expose results to partners, the portal, and internal tools.
+  </Card>
+  <Card title="Progress tracking" href="/pipeline/progress-tracking" icon="activity">
+    SSE, polling, and EventBridge progress events.
+  </Card>
+  <Card title="Agent platform overview" href="/agents/platform-overview" icon="boxes">
+    The agent catalog, router, and runs ledger.
+  </Card>
+</Columns>

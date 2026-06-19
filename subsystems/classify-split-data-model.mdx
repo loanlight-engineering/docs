@@ -1,0 +1,153 @@
+---
+title: Classify-split data model
+description: Runs, segments, the classification_decision blob, and the config tables.
+icon: database
+---
+
+Classify-split persists into two run/segment tables plus a set of config tables, all defined in
+`database/schema/classify-split.ts` and `database/schema/classify-split-config.ts`. For where these
+sit in the wider schema, see [data model overview](/data-model/overview).
+
+## classify_split_runs
+
+One row per classification run.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `audit_run_id` | uuid FK → `audit_runs.id` (cascade) | Set for EPC runs only; NULL for partner/income runs |
+| `loan_id` | uuid FK → `loans.id` (cascade) | Set on all new runs; drives loan-level lookups |
+| `triggered_by` | varchar(30) | CHECK ∈ `epc_audit_run`, `partner_create_loan`, `partner_upload_documents`, `income_run` |
+| `status` | varchar(20) default `'pending'` | CHECK ∈ `pending`, `running`, `complete`, `failed`, `skipped`, `partial` |
+| `classification_mode` | text NOT NULL default `'per_segment'` | The mode the run actually used. CHECK ∈ `per_segment`, `majority_bucket`, `two_pass` |
+| `is_dry_run` | boolean NOT NULL default `false` | True for octy dry-runs; stamped at INSERT |
+| `started_at`, `completed_at`, `error_message`, `created_at` | timestamps / text | |
+
+Indexes: `uq_classify_split_runs_audit` (unique on `audit_run_id` where not null — one run per audit),
+`idx_classify_split_runs_loan_id`, `idx_classify_split_runs_status`.
+
+<Note>
+`pending` is the column default but the **code never writes it**. New runs start at `running`
+(skipped runs at `skipped` via `createSkippedRun`); the TS `ClassifySplitRunStatus` union is
+`running | complete | partial | failed | skipped`. The CHECK still lists `pending`.
+</Note>
+
+Run-status rollup at the end of Phase 2: `totalFailedCount = splitFailCount + classifyFailCount`;
+`complete` when there are no failures, `failed` when every document failed at split
+(`splitSucceededCount === 0`), otherwise `partial`.
+
+## document_classifications
+
+One row per **segment** — a page range with a bucket and a subtype.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `classify_split_run_id` | uuid FK NOT NULL | |
+| `loan_document_id` | uuid FK → `loan_documents.id` NOT NULL | |
+| `segment_index` | integer NOT NULL | 0-based within the run + document |
+| `split_type` | text NOT NULL | The bucket (a `DocumentBucket` value). Phase 2 may overwrite with the resolved bucket |
+| `classification_type` | text nullable | The resolved subtype; NULL until classified |
+| `llm_raw_classification` | text nullable | Raw pre-resolution subtype from the classifier |
+| `classification_resolution_context` | jsonb nullable | Resolver audit trail (`ResolutionContextSchema`) |
+| `extracted_metadata` | jsonb nullable | Per-extractor `{ fields, confidences }` map (`ExtractedMetadataSchema`) |
+| `classification_decision` | jsonb nullable | Provenance blob (`ClassificationDecisionSchema`) |
+| `classification_confidence`, `split_confidence` | text nullable | `high` / `medium` / `low` |
+| `split_confidence_score` | real nullable | Discretized 0–1: `{0.85, 0.6, 0}` |
+| `classification_confidence_score` | real nullable | 0–1 from the classifier |
+| `classification_reasoning` | text nullable | Classifier reasoning |
+| `page_start`, `page_end` | integer nullable | Inclusive, 1-based |
+| `requires_review` | boolean NOT NULL default false | |
+| `split_job_id`, `classify_job_id` | text nullable | LlamaSplit / LlamaClassify job ids |
+| `classification_status` | varchar(30) NOT NULL default `'split'` | `split` → `classified` → `classification_failed` |
+| `created_at` | timestamp | |
+
+Unique index `uq_doc_classification_segment` on `(classify_split_run_id, loan_document_id,
+segment_index)` — this triple is a total order within a run. Also `idx_doc_classifications_run_id`,
+`_doc_id`, `_split_type`, and `_review` (partial, where `requires_review = TRUE`).
+
+<Warning>
+Ordering trap door: every `SELECT … FROM document_classifications` must
+`orderBy(asc(loan_document_id), asc(segment_index))`. The raw-SQL `getActive*` variants add
+`csr.started_at DESC, dc.id DESC` so `DISTINCT ON` is deterministic across concurrent audit retries
+that share a `started_at`. Removing the `dc.id DESC` tiebreaker leaks heap order into the partner API
+`documents[]` array.
+</Warning>
+
+## The classification_decision blob
+
+The `classification_decision` column holds the provenance blob, contracted by
+`ClassificationDecisionSchema` (`.strict()`, all keys snake_case) in `llama/classify-split.types.ts`.
+It is written across both phases.
+
+| Field | Phase | Notes |
+|---|---|---|
+| `mode` | 1 | The run's mode |
+| `decision_path` | 1 | One of 11 `DECISION_PATHS` |
+| `decision_detail` | 1 | Human-readable what + why, with numbers |
+| `split_bucket_coverage` | 1 | `Record<bucket, fraction>` (`{}` for two_pass) |
+| `original_segments` | 1 | Pre-collapse split trace (`[]` for two_pass/degraded) |
+| `dominant_bucket`, `dominant_coverage`, `runner_up_bucket`, `runner_up_coverage` | 1 | Majority facets (zeroed for two_pass) |
+| `bundled_detected` | 1 | True only for majority 2b |
+| `pass1_bucket` | 1 | two_pass resolved only; null otherwise |
+| `split_fail_count` | 1 | Degraded paths |
+| `review_reasons` | both | Ordered (declaration order = render order); Phase-1 + classify-time merged |
+| `decision_complete` | 2 | `true` **only** after a successful Phase-2 classify |
+
+<Warning>
+`decision_complete` is **never written `false`** — absence is the incomplete/crashed signal.
+Consumers must check `=== true`. `per_segment` rows legitimately never carry it: they keep their
+Phase-1 blob and have no Phase-2 refinement to merge (`buildPhase2Decision` runs only for
+non-`per_segment` modes).
+</Warning>
+
+For the full enum sets (`DECISION_PATHS`, `REVIEW_REASONS`, `DocumentBucket`) see the
+[enums reference](/data-model/enums-reference) and the [modes page](/subsystems/classify-split-modes).
+
+## Config tables
+
+These drive the split-job categories, the classify subtype rules, and the confusion neighbors. The
+run's `ConfigSnapshot` (`ClassifySplitConfigService.loadConfig`) reads them in one transaction and
+returns only `is_active = true` rows, throwing `ActiveConfigMissingError` if no active categories
+exist.
+
+<AccordionGroup>
+  <Accordion title="split_categories — the split buckets">
+    Columns: `category_code` (the `DocumentBucket` code, e.g. `BANK_STATEMENT`; unique),
+    `display_name`, `llama_split_name` (sent to the LlamaSplit job), `llama_split_description` (sent
+    to the split job and reused as the `two_pass` pass-1 category description), `is_active`.
+  </Accordion>
+  <Accordion title="classify_rules — the subtype rules per bucket">
+    Columns: `split_category_id` FK → `split_categories.id`, `llama_classify_type` (the subtype label,
+    e.g. `chase_bank_statement`), `llama_classify_description`, `is_active`. The rule's category is the
+    subtype's "correct bucket" used by `resolveBucket`. Unique `uq_classify_rules_category_type`.
+  </Accordion>
+  <Accordion title="split_confusion_edges — low-confidence neighbors">
+    Directed neighbor edges for low-confidence expansion. Columns: `source_category_id`,
+    `target_category_id` (both FK → split category). Unique `uq_split_confusion_edges_pair`, CHECK no
+    self-edge. This is the **real, DB-driven confusion map** — not the dead static
+    `llama/classify-split.confusion-map.ts`.
+  </Accordion>
+  <Accordion title="classify_split_config_audit — config mutation log">
+    Columns: `action` (`created` / `updated` / `deleted`), `actor_email`, `mutation_source`
+    (`octy-direct-db` / `api-internal` / `migration-seed`; default `octy-direct-db`), `diff` jsonb
+    (CHECK ≤ 1 MiB). Written by octy's config UI when an operator edits categories, rules, or edges.
+  </Accordion>
+</AccordionGroup>
+
+## Dry-runs write real rows
+
+octy dry-runs (`POST /internal/dry-run/classify-split`) run the real agent against a tracked loan
+document and write **real `classify_split_runs` rows** with `is_dry_run = true`, plus their
+`document_classifications`. The dry-run path deletes those artifacts in a `finally`, but even if the
+delete fails, the `is_dry_run = true` flag keeps them out of every loan-level read.
+
+<Warning>
+Every loan-level read and every mode-scoped metrics query **must filter `is_dry_run = false`**. This
+is the single most important "do not pollute production" rule in the subsystem. The loan/run reads
+(`getLatestRunForLoan`, `getActiveClassificationsForLoan`, the classifications API queries) already do.
+</Warning>
+
+The lender mode column and `classify_split_runs.classification_mode` were added in migration
+`0161_classification_split_modes.sql` using `ADD CONSTRAINT … NOT VALID` then `VALIDATE CONSTRAINT`
+to avoid a blocking lock on the high-volume runs table.

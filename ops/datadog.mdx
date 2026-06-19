@@ -1,0 +1,179 @@
+---
+title: Datadog
+description: Services, APM, the agent sidecar, and pipeline metrics.
+icon: line-chart
+---
+
+Datadog is the source of truth for **system behaviour around the agents**: HTTP
+traffic, errors, infrastructure and ECS metrics, third-party calls, logs, RUM, and
+node-level timing. Reach for it after LangSmith and the code, when you need a
+concrete runtime fact. See [Observability overview](/ops/observability) for the
+doctrine.
+
+## Service names: APM vs logs
+
+The single most important Datadog fact for LoanLight is that **APM service names do
+not match log service tags.**
+
+| Repo | APM `DD_SERVICE` | Log service tag |
+|---|---|---|
+| loanlight-api | `loanlight-api` | `llapi` |
+| loanlight-integrations | `loanlight-integrations` | `llintegrations` |
+
+<Warning>
+When you query logs, filter on the **log** tag (`llapi`, `llintegrations`), not the
+APM service name. The committed dashboard
+(`packages/api/observability/datadog/README.md`) notes that appraisal milestone
+logs surfaced under `service:llapi`, so its log panels query
+`service:(llapi OR loanlight-api)` to be safe. Mirror that pattern in ad-hoc
+queries.
+</Warning>
+
+### Other registered services
+
+APM `DD_SERVICE` names also exist for the API Gateway authorizer lambdas and the
+integrations stack:
+
+| Service | Where |
+|---|---|
+| `api-auth` | `packages/api/infra/lib/api-gateway-stack.ts` |
+| `api-encompass-auth` | same file |
+| `api-partner-auth` | same file |
+| `encompass-auth` / `encompass-epc-auth` | integrations encompass api-gateway-stack |
+| `encompass-db-init` / `encompass-db-migrate` | encompass database-stack |
+| `PortalFrontend` | RUM (portal) |
+| `frontend` | RUM (integrations frontend) |
+
+The Octy RCA prompt lists the log services to filter on: primary `llapi`,
+`llintegrations`, `frontend`; secondary `agentless-scanner`, `encompass-auth`,
+`encompass-epc-auth`, `api-auth`.
+
+<Note>
+`agentless-scanner` appears only as a Datadog **log service** in the Octy prompt.
+There is no CDK stack of that name in these repos; it is an external (Datadog-side)
+scanner. Do not go looking for a service to deploy or fix.
+</Note>
+
+<Note>
+**Octy emits no APM.** Its CDK uses a plain `FargateTaskDefinition` with no Datadog
+sidecar, so it does not send its own traces. Octy's `OCTY_DATADOG_API_KEY` and
+`OCTY_DATADOG_APPLICATION_KEY` secrets are read-side credentials for the Datadog
+MCP that Oz RCA uses to query Datadog. Octy still surfaces under the `octy` log
+service.
+</Note>
+
+## APM tracing
+
+`dd-trace/init` is the very first import in `packages/api/src/main.ts` (with the
+comment "Must be first import!"). It auto-starts APM and, when
+`DD_PROFILING_ENABLED=true`, the Continuous Profiler. There is no explicit
+`tracer.init({...})`; configuration is entirely env-driven.
+
+The portal initializes tracing in `packages/app/src/instrumentation.ts`
+(`register()` imports `dd-trace/init` only when `NEXT_RUNTIME === "nodejs"`), and
+also defines `onRequestError()` for server-error logging.
+
+`main.ts` adds the Datadog distributed-trace headers to its CORS allowlist:
+`traceparent`, `tracestate`, `x-datadog-trace-id`, `x-datadog-parent-id`,
+`x-datadog-sampling-priority`, `x-datadog-tags`, `x-datadog-origin`.
+
+Extra DD env on the API app (`getApplicationEnvironment()`):
+
+- `DD_PROFILING_ENABLED=true` (continuous profiler)
+- `DD_GIT_COMMIT_SHA` and `DD_GIT_REPOSITORY_URL` (source code integration)
+- `DD_DBM_PROPAGATION_MODE=full` (SQL-to-trace linking)
+
+## The Datadog agent sidecar
+
+ECS Fargate services that emit telemetry use the
+`FargateTaskDefinitionWithDataDog` construct from
+[shared-cdk](/ops/shared-packages)
+(`loanlight-shared/packages/shared-cdk/src/compute/fargate-task-definition-with-datadog.ts`).
+It runs a `public.ecr.aws/datadog/agent:latest` sidecar (512 MiB) alongside the app
+container.
+
+- App container port `3000`; agent ports `8126` (APM) and `8125` (DogStatsD).
+- App container env injected by the construct: `DD_AGENT_HOST=localhost`,
+  `DD_TRACE_AGENT_PORT=8126`, `DD_APM_ENABLED=true`, `DD_SERVICE`, `DD_ENV`,
+  `DD_VERSION`, `DD_TAGS`.
+- DD API key from Secrets Manager secret `LoanLightDatadogAPIKey`.
+- `DD_TAGS` always includes `env:<environment>`, `service:<serviceName>`,
+  `version:<sha>`, `commit:<sha>`, plus `project:loanlight`, `component:ecs`.
+- Logs subscribe to the Datadog Forwarder Lambda via the CFN export
+  `DatadogIntegration-DatadogForwarderArn`. App log retention defaults to 30 days,
+  agent logs to 7 days.
+
+Octy is the exception: it uses the plain `FargateTaskDefinition` (no sidecar) and
+therefore has no APM, as noted above.
+
+## RUM and browser logs
+
+| Surface | RUM service | Notes |
+|---|---|---|
+| Portal | `PortalFrontend` | `@datadog/browser-rum` + `browser-logs`, `sessionSampleRate:100`, `sessionReplaySampleRate:0`, `defaultPrivacyLevel:"mask"`, heavy `beforeSend` PII scrub. `packages/app/src/lib/datadog/datadog.service.ts` |
+| Integrations frontend | `frontend` | RUM + logs proxied through a shared-services Datadog proxy (`/datadog<path>`), partitioned cross-site cookie, `allowedTracingUrls` for the Encompass and AUS API hosts. |
+
+## LangGraph node spans
+
+Central instrumentation gives every agent node a Datadog span with zero per-agent
+code. `instrumentLangGraphNodes()`
+(`packages/api/src/langgraph/observability/instrument-langgraph.ts`)
+monkey-patches `StateGraph.prototype.addNode` once (idempotent via a `Symbol`),
+called at import time in `langgraph.module.ts`.
+
+`traceNode(nodeName, fn)`
+(`packages/api/src/langgraph/observability/trace-node.ts`) does the work per node:
+
+- Opens a `langgraph.node` span with `resource = nodeName` and tag
+  `langgraph.node=<nodeName>`.
+- Lifts state fields onto the span as searchable `langgraph.<key>` tags:
+  `loanId`, `auditRunId`, `documentId`, `pipelineId`, `classifySplitRunId`,
+  `runId`, `lenderId`.
+- **Stall watchdog** — `LANGGRAPH_NODE_STALL_MS` (default 5 min; `0` disables). On a
+  stall it tags `langgraph.node.stalled=true` and `error.type=LangGraphNodeStall`
+  and force-closes the span so APM records the hang (the underlying work keeps
+  running). The per-node override `NODE_STALL_OVERRIDES_MS = { reductoExtract: 95 *
+  60_000 }` gives Reducto extraction 95 minutes, just above the 90-minute BullMQ
+  appraisal worker lock.
+- On error it tags `error`, `error.type`, `error.message`, `error.stack`, plus
+  facet tags (`agent`, `step`, `lender`, `run_id`, `audit_id`, `error_class`), and
+  emits a structured `langgraph.node.terminal_failure` log event.
+
+<Tip>
+To find hung agents, search APM for `langgraph.node.stalled:true`. To find node
+failures, search the `langgraph.node.terminal_failure` log event or filter the
+`langgraph.node` resource by `error:true`. Cross-reference the same node in
+[LangSmith](/ops/langsmith) to see what it was reasoning about.
+</Tip>
+
+## Pipeline metrics
+
+Custom point-in-time gauges live under the `loanlight.pipeline.*` namespace
+(`packages/api/src/modules/pipeline-metrics/pipeline-metrics.constants.ts`),
+emitted via dd-trace DogStatsD on a cadence of `PIPELINE_METRICS_INTERVAL_MS`
+(default 15s, floor 1s).
+
+| Metric | Tags |
+|---|---|
+| `loanlight.pipeline.queue.depth` | `pipeline` + `queue_state` (waiting/active/delayed/failed) |
+| `loanlight.pipeline.jobs.in_flight` | `pipeline` |
+| `loanlight.pipeline.worker.concurrency` | `pipeline` |
+| `loanlight.pipeline.runs.by_status` | `pipeline` + `run_status` |
+| `loanlight.pipeline.runs.stuck` | `pipeline` |
+
+`pipeline` is either `appraisal` or `credit`. The constants file also defines
+`QUEUE_STATES` and `APPRAISAL_RUN_STATUSES` for zero-filling gauges.
+
+## Dashboards as code
+
+The committed dashboard lives in `packages/api/observability/datadog/`:
+
+- `appraisal-credit-pipelines.dashboard.json` — the source-of-truth definition.
+- `apply-dashboard.ts` — applies it (POST on first create, PUT thereafter):
+
+```bash
+DD_API_KEY=… DD_APP_KEY=… pnpm exec tsx observability/datadog/apply-dashboard.ts
+```
+
+  Supports `--dry-run`, `--id`, `--site` (default `datadoghq.com`).
+- `README.md` — the operational runbook, including the APM-vs-log service tag note.

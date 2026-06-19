@@ -1,0 +1,69 @@
+---
+title: Infrastructure and deployment
+description: Octy's AWS CDK stacks and deploy flow.
+icon: server
+---
+
+Octy deploys to AWS as an ECS Fargate service fronted by an ALB, defined with AWS CDK in `infra/` and shipped by GitHub Actions. It runs in two environments, `int` and `prod`. For how Octy fits the wider LoanLight infrastructure, see [Infrastructure](/ops/infrastructure).
+
+## CDK stacks
+
+The CDK app (`infra/bin/app.ts`) defines three stacks, built on `@loanlight-engineering/shared-cdk` (`BaseStack`, `FargateTaskDefinition`, `FargateService`, `EcsSecurityGroup`, `NetworkStack`). Per-environment values come from `cdk.context.{int,prod}.json`; CDK is pinned to `aws-cdk-lib@2.214.0`.
+
+| Stack | Role |
+|---|---|
+| **EcrStack** | The ECR repository the container image is pushed to. |
+| **NetworkStack** | The VPC and networking. |
+| **ApplicationStack** | The ECS service, ALB, task definition, and DNS. Depends on the other two. |
+
+### ApplicationStack
+
+`infra/lib/application-stack.ts`:
+
+- **ALB** — internet-facing, HTTPS:443 with an ACM cert, forwarding to a target group on port **3000**. Health check is `GET /api/health` (expects 200).
+- **ECS Fargate** — cpu 512 / mem 1024, desiredCount 2, min 2 / max 4, autoscaling on 60% CPU and 80% memory. Image tag `{env}-latest` pulled from ECR.
+- **DNS** — `octy.{zone}`, a Route53 A record aliased to the ALB.
+
+<Note>
+Octy uses a plain `FargateTaskDefinition` with **no Datadog APM sidecar**. Unlike loanlight-api and loanlight-integrations, Octy is log-only in Datadog — it has no APM service. (Octy attaches the Datadog MCP server to Oz runs, which is a separate concern from emitting its own APM traces.)
+</Note>
+
+### Network wiring
+
+- Attaches the API's DB client security group (`LLApiDatabaseStack-DatabaseClientSecurityGroupId`) so the task can reach Aurora on 5432.
+- Publishes the Octy ECS security group id to SSM so loanlight-api permits it on its internal NLB (`api-internal.{zone}` on 443), giving Octy `LOANLIGHT_API_URL=https://api-internal.{zone}`.
+
+### Environment and secrets injected by CDK
+
+`getEnvironment` sets, among others: `NODE_ENV=production`, `PORT=3000`, the imported `DB_HOST`/`DB_PORT`/`DB_NAME`, `NEXT_PUBLIC_APP_URL` and WorkOS redirect URIs (`https://{fqdn}`), `OCTY_WEBHOOK_BASE_URL` (`https://{fqdn}`), `DEPLOYED_ENVIRONMENT`, `CI=true`, the LangSmith project, `WARP_ENVIRONMENT_ID`, the three S3 buckets, and `LOANLIGHT_API_URL`.
+
+`getSecrets` pulls from Secrets Manager: the DB credentials (`Octy/{env}/DbSecret`), `Octy/WorkosApiKey`, `Octy/WorkosCookiePassword`, `Octy/ServerActionsEncryptionKey`, `Octy/WarpApiKey`, the shared `LLApi/LANGSMITH_API_KEY`, `LLApi/LANGSMITH_ORG_ID`, `LLApi/LLC_PROJECT`, `LLApi/LLC_ORG_ID`, `LLApi/OCTY_INTERNAL_API_KEY`, plus `OCTY_DATADOG_API_KEY` and `OCTY_DATADOG_APPLICATION_KEY`.
+
+The task role is granted **read** on the three buckets plus KMS decrypt on the integration-files and portal-upload keys. See [Environment variables](/octy/environment-variables) for what each value drives.
+
+## Deploy flow
+
+The GitHub Actions workflows are `.github/workflows/deploy-octy-int.yml` and `deploy-octy-prod.yml`:
+
+<Steps>
+<Step title="Build">
+Checkout, `pnpm install --frozen-lockfile`, configure AWS credentials, ECR login.
+</Step>
+<Step title="Push image to ECR">
+`docker buildx` builds and pushes `octy:{env}-latest` (e.g. `octy:int-latest`) using `Dockerfile.prod` (Next.js standalone output). `NEXT_PUBLIC_*` values are passed as build-args because they are inlined at build time.
+</Step>
+<Step title="Deploy with CDK">
+`cd infra && tsc`, then `cdk deploy --all --require-approval never`, which rolls the ECS service onto the new image tag.
+</Step>
+</Steps>
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Infrastructure (LoanLight)" href="/ops/infrastructure" icon="server">
+The wider system Octy plugs into.
+</Card>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+The values CDK injects.
+</Card>
+</Columns>

@@ -1,0 +1,73 @@
+---
+title: Repositories
+description: The LoanLight repositories and the packages within each.
+icon: folder-tree
+---
+
+LoanLight is spread across four Git repositories. Three publish or consume shared npm packages; one (`octy`) is a standalone app. This page maps each repo to its packages, tech, and Datadog service names.
+
+## At a glance
+
+| Repository | Role | Datadog APM service | Datadog log tag |
+|---|---|---|---|
+| `loanlight-api` | AUS backend + lender portal | `loanlight-api` | `llapi` |
+| `loanlight-integrations` | Encompass (EPC) bridge | `loanlight-integrations` | `llintegrations` |
+| `loanlight-shared` | Versioned npm packages | n/a (library) | n/a |
+| `octy` | Self-healing AI command center | n/a (no APM sidecar) | `octy` (log only) |
+
+<Note>
+Datadog APM service names differ from log service tags. APM reports `loanlight-api` / `loanlight-integrations`, but logs surface under `llapi` / `llintegrations`. Keep the two distinct when building queries. See [Datadog](/ops/datadog).
+</Note>
+
+## loanlight-api
+
+The NestJS (Fastify) monorepo that hosts the AUS backend and the lender portal.
+
+| Package | What it is | Tech |
+|---|---|---|
+| `packages/api` | The AUS backend: audit orchestration, LangGraph agents, Partner API, portal API, internal API. | NestJS, Fastify, Drizzle ORM, LangGraph |
+| `packages/app` | The lender portal: a stateless Backend-For-Frontend that proxies to the backend under `/api/v1/portal/*`. | Next.js 15 App Router |
+| `packages/auth` | Auth helpers used by the portal and backend. | TypeScript |
+
+Frontmatter detail lives in [portal architecture](/portal/architecture-bff) and the [data model](/data-model/overview). The backend Datadog service is `loanlight-api`; the portal RUM service is `PortalFrontend`.
+
+## loanlight-integrations
+
+Bridges the AUS to ICE / Ellie Mae Encompass via Encompass Partner Connect (EPC).
+
+| Package | What it is | Tech |
+|---|---|---|
+| `packages/encompass` | The live EPC service (npm `loanlight-epc-integration`). Pushes loan packages to S3 and publishes audit-requested events. | NestJS, Fargate |
+| `packages/frontend` | The live Encompass plug-in UI (RUM service `frontend`). | Next.js |
+| `packages/audit-pdf` | The audit PDF rendering library. | TypeScript |
+| `packages/web-app` | Deleted legacy package — ignore. | n/a |
+
+See [Encompass overview](/integrations/encompass-overview) and [audit PDF](/integrations/audit-pdf).
+
+## loanlight-shared
+
+A pnpm-workspace monorepo that publishes versioned, scoped npm packages (`@loanlight-engineering/*`) to GitHub Packages. Every other repo consumes them as normal dependencies. It is the single source of truth for cross-repo TypeScript contracts, reusable AWS CDK constructs, and LocalStack dev tooling.
+
+| Package | Purpose |
+|---|---|
+| `shared-types` | Cross-repo TypeScript contracts (audit/finding response shapes, the Octy bug-report contract, `Role`). |
+| `shared-cdk` | Reusable AWS CDK L2/L3 constructs (API Gateway, Fargate + Datadog, NLB + VPC link, SQS, bastion). |
+| `shared-local` | LocalStack dev tooling (queues, buckets, EventBridge bus). |
+| `shared-auth` | WorkOS AuthKit wrapper for Next.js apps (published only). |
+| `shared-api-auth` | NestJS WorkOS auth module (published only). |
+| `shared-lambda-auth` | API Gateway authorizer handler (published only). |
+| `shared-ui` | Shared React UI components, primitives, and design tokens (published only). |
+
+<Warning>
+The on-disk checkout of `loanlight-shared` is significantly behind what is actually published and consumed. The local checkout contains only `shared-types` (1.3.3), `shared-cdk` (1.9.2), and `shared-local` (0.1.0); the published repo also includes `shared-auth`, `shared-api-auth`, `shared-ui`, and `shared-lambda-auth`, and the published `shared-types`/`shared-cdk` are at much higher versions (consumers pin `shared-types@^1.12.0`). Types such as `RelatedTrace`, `BugReportPayload`, and `Role` exist only in the published artifact, not in the on-disk source. Read published `node_modules` copies, not the on-disk source, when in doubt.
+</Warning>
+
+See [shared packages](/ops/shared-packages) for the full contract and construct reference.
+
+## octy
+
+LoanLight's internal self-healing AI command center: a Next.js 16 app that turns reported audit bugs into autonomous Oz-agent investigations. It owns its own `octy_*` Postgres tables and reads the rest of the schema read-only. It runs without a Datadog APM sidecar (it carries Datadog keys only for the read-side MCP used by Oz). See [Octy overview](/octy/overview).
+
+## Not in scope
+
+`loanlight-poc` is a proof-of-concept classifier and is not part of production. Ignore it for documentation purposes.

@@ -1,0 +1,187 @@
+---
+title: Shared packages
+description: The @loanlight-engineering/* packages and how repos consume them.
+icon: package
+---
+
+`loanlight-shared` is a pnpm-workspace monorepo that publishes versioned, scoped
+npm packages under `@loanlight-engineering/*` to **GitHub Packages**
+(`https://npm.pkg.github.com`). Every other LoanLight repo consumes them as normal
+versioned dependencies. The repo is the single source of truth for cross-repo
+TypeScript contracts, reusable CDK constructs, and LocalStack dev tooling.
+
+<Warning>
+The local on-disk checkout of `loanlight-shared` is **significantly behind what is
+published and consumed.** On disk there are only three packages
+(`shared-types@1.3.3`, `shared-cdk@1.9.2`, `shared-local@0.1.0`). The published
+repo additionally contains `shared-auth`, `shared-api-auth`, `shared-ui`, and
+`shared-lambda-auth`, and the published `shared-types`/`shared-cdk` are at much
+higher versions. Document behaviour from the **published/consumed** versions, not
+from the local source. Some types the rest of the system depends on (for example
+`RelatedTrace`) do not exist in the on-disk source at all.
+</Warning>
+
+## The packages
+
+| Package | Role | On disk? |
+|---|---|---|
+| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, Octy bug-report contract, roles) | Yes (stale 1.3.3) |
+| `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | Yes (stale 1.9.2) |
+| `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | Yes (0.1.0) |
+| `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | Published only |
+| `@loanlight-engineering/shared-api-auth` | NestJS WorkOS auth module | Published only |
+| `@loanlight-engineering/shared-lambda-auth` | API Gateway authorizer handler | Published only |
+| `@loanlight-engineering/shared-ui` | Shared React UI components and design tokens | Published only |
+
+## Who consumes what
+
+Versions below show how stale the local checkout is relative to what is installed.
+
+| Consumer | shared-types | shared-cdk | other |
+|---|---|---|---|
+| `loanlight-api/packages/app` (portal) | `^1.12.0` | — | `shared-ui ^0.7.43`, `shared-auth ^0.2.0` |
+| `loanlight-api/packages/app/infra` | — | `1.13.0` | — |
+| `loanlight-api/packages/api` (backend) | `^1.12.0` | `1.15.0` | `shared-api-auth 0.1.0` |
+| `loanlight-api/packages/api/infra/lambda/auth` | — | — | `shared-lambda-auth 0.2.0` |
+| `loanlight-integrations` (root) | — | `1.12.2` | — |
+| `loanlight-integrations/packages/frontend` | `^1.7.3` | `1.12.2` | `shared-ui ^0.7.40` |
+| `loanlight-integrations/packages/encompass` | `^1.7.3` | `1.14.0` | — |
+| `loanlight-integrations/packages/audit-pdf` | `^1.7.3` | — | — |
+| `octy` (root) | — | — | `shared-auth 0.1.0` |
+| `octy/infra` | — | `1.9.2` | — |
+
+`shared-local` is consumed as a devDependency by `api` and `integrations` for the
+LocalStack bootstrap.
+
+## Publishing and authentication
+
+All packages publish to GitHub Packages under the `@loanlight-engineering` scope
+with `publishConfig.access: "restricted"`. The `.npmrc` wires the registry and
+token:
+
+```ini
+@loanlight-engineering:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+strict-peer-dependencies=false
+auto-install-peers=true
+```
+
+<Info>
+Every consumer needs `GITHUB_PACKAGES_TOKEN` (a GitHub PAT) set in the
+environment: `read:packages` to install, `write:packages` to publish. Without it,
+`pnpm install` cannot resolve `@loanlight-engineering/*`.
+</Info>
+
+### Versioning policy
+
+Every change to a package must include a SemVer bump in that package's
+`package.json`:
+
+- `patch` — non-breaking additions (new optional fields, fixes)
+- `minor` — new features / new exports
+- `major` — breaking changes (removed or renamed fields)
+
+After bumping, consumers update their dependency version and reinstall. Publishing
+is idempotent and gated on a version bump: the `cd.yml` workflow (push to `main`,
+filtered to `packages/**`) runs `npm view <name>@<version>` and publishes only if
+that version does not already exist, otherwise it skips.
+
+<Note>
+The on-disk `cd.yml` publishes only the three local packages. The four
+published-only packages are released by a newer workflow not present in the local
+checkout.
+</Note>
+
+### Local dev override
+
+To point a consumer at local source, use pnpm overrides:
+
+```json
+{ "pnpm": { "overrides": {
+  "@loanlight-engineering/shared-types": "file:../loanlight-shared/packages/shared-types",
+  "@loanlight-engineering/shared-cdk": "file:../loanlight-shared/packages/shared-cdk"
+}}}
+```
+
+## shared-types: the cross-repo contract
+
+`shared-types` is the contract the audit pipeline produces and the portals
+consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
+`DocumentHealthResponse`, `PropertyDataResult` / `RedFlagResult`,
+`UrlaRulesEngineResult`, and more; the portals render them into tables.
+
+The published `shared-types@1.8.0+` exports three modules absent from the on-disk
+1.3.3 source:
+
+<AccordionGroup>
+  <Accordion title="octy.types — the Octy bug-report contract">
+    Producer: loanlight-api. Consumers: integrations frontend and the Octy
+    dashboard.
+
+    - `BUG_REPORT_AGENT_TYPES = ["URLA-Extraction", "PII-Validation",
+      "Document-Health", "Property-Data", "Property-Red-Flags"]` and the derived
+      `BugReportAgentType`.
+    - **`RelatedTrace`** = `{ trace_id: string; agent_type: BugReportAgentType;
+      run_name: string }` — links an Octy issue to a LangSmith run, where
+      `run_name` is typically `"{agentType}-Loan-{loanId}"`. This type exists only
+      in the published artifact, not in the on-disk source.
+    - `BugReportPayload` = `{ description: string; selected_agent_types:
+      BugReportAgentType[] }`.
+    - `BugReportResult` = `{ id, audit_run_id, loan_id, description, intake_status,
+      created_at }`.
+    - `BugReportAgentOption` and `BUG_REPORT_AGENT_OPTIONS` map UI labels
+      ("1003 Completeness", "Data Consistency", "Document Health", "Property
+      Data") to agent types.
+  </Accordion>
+  <Accordion title="role.types">
+    `Role = "client_admin" | "client_user" | "read_only" | "super_admin"`.
+  </Accordion>
+  <Accordion title="portal-audits.types">
+    `SectionName = "document-health" | "data-consistency" | "property-data" |
+    "urla-completeness" | "checks-completed"`; `SECTIONS`; `PortalAuditsErrorCode`
+    (`missing_lender_id | missing_token | invalid_token | expired_token |
+    audit_scope_mismatch | audit_not_found | upstream_error`); `PortalAuditsError`;
+    `ChecksCompletedResponse = { checksCompleted: number; checksTotal: 4 }`.
+  </Accordion>
+</AccordionGroup>
+
+The on-disk 1.3.3 source has only the audit response/table types
+(`api-response.types`, `common.types`, `table.types`, `audit-response.types`,
+`property-data.types`, `urla-completeness.types`) — no agent types.
+
+## shared-cdk: reusable constructs
+
+`shared-cdk` is consumed by each repo's `infra/` app to build identical, hardened
+AWS resources. Its peer dependencies pin `aws-cdk-lib@2.214.0`, `constructs@^10`,
+and `@aws-sdk/client-eventbridge@^3.916.0`, and it ships CloudFormation snapshot
+tests. See [Infrastructure and CI/CD](/ops/infrastructure) for how the constructs
+compose into stacks, and [Datadog](/ops/datadog) for the
+`FargateTaskDefinitionWithDataDog` sidecar.
+
+Construct families (`shared-cdk/src/`): `base` (`BaseStack`), `compute`
+(`FargateService`, `FargateTaskDefinition`, `FargateTaskDefinitionWithDataDog`,
+`EcsSecurityGroup`), `networking` (`NetworkStack`, `NetworkLoadBalancer`),
+`api-gateway` (`LoanLightApiGateway`, `ApiGatewayDomain`, `ApiGatewayVpcLink`,
+`AuthLambda`, CORS helpers), `messaging` (`SqsQueue`,
+`publishEventToEventBridge`), `database` (`DatabaseBastionHost`), and `common`
+(`applyStandardTags`, snapshot helpers).
+
+## shared-local: LocalStack tooling
+
+`shared-local` standardizes the LocalStack bootstrap so api, integrations, and
+octy all talk to the same local event-driven topology. `setupLocalstack()`
+idempotently provisions:
+
+- S3 buckets `loanlight-integration-files` and `loanlight-web-app-local`.
+- SQS queues `audit-requested-events`, `health-check`,
+  `transaction-event-handling`, `handle-aus-updates`.
+- EventBridge bus `loanlight-events` with the
+  `loanlight-encompass-audit-requested-rule` (source `loanlight.encompass`,
+  detail-type `Audit Requested` → `audit-requested-events`) and
+  `loanlight-aus-all-events-rule` (source `loanlight.aus` → `handle-aus-updates`)
+  rules.
+- A `.init-complete` marker object.
+
+It also exports docker/env helpers and ships the LocalStack `docker-compose` file
+(`localstack/localstack:latest`, container `loanlight-localstack`, services
+`sqs,s3,events,secretsmanager`).

@@ -1,0 +1,168 @@
+---
+title: LlamaCloud retrieval
+description: The 1:1 loan-to-pipeline RAG layer, ingestion, and hybrid retrieval.
+icon: search
+---
+
+LlamaCloud is LoanLight's retrieval-augmented generation (RAG) layer. Every loan maps **1:1** to one
+managed LlamaCloud pipeline (a vector index). Loan documents are uploaded and attached to that
+pipeline; LlamaCloud parses, chunks, and embeds them; and the audit agents query the pipeline by id
+to pull supporting-document snippets for field validation.
+
+The single HTTP gateway is `LlamaRestClient` (`llama/llama-rest.client.ts`). Base URL is chosen by
+`LLC_REGION` (`EU` → `api.cloud.eu.llamaindex.ai/api`, else `api.cloud.llamaindex.ai/api`); auth is a
+Bearer `LLC_API_KEY` on every call.
+
+## The 1:1 loan-to-pipeline model
+
+Each loan stores its pipeline id in **`loans.llc_pipeline_id`** (uuid, nullable).
+`PipelineService.getOrCreatePipeline(loanId, metadata)` returns `{ pipelineId, isNewPipeline }` and
+reuses an existing pipeline when possible:
+
+- It looks for another `loans` row with the same `loan_number` **within the same `lender_id` scope**
+  that already has a non-null `llc_pipeline_id`. Reuse across lenders is a tenant-isolation bug and is
+  explicitly prevented.
+- Null-lender guard: if `lender_id` is null, the predicate is forced to `false` so null-lender loans
+  never reuse each other's pipelines.
+- A candidate is validated against LlamaCloud (`validatePipelineExists` → `listPipelines`). If it
+  still exists, reuse; if confirmed deleted, create a new one named `loan_{loanNumber}_{ts}`. On a
+  transient list error the reference is **not** cleared.
+
+## Pipeline creation config
+
+`createPipeline` issues `POST /v1/pipelines?project_name={LLC_PROJECT}` with this parse/chunk/embed
+config:
+
+```jsonc
+{
+  "transform_config": {
+    "mode": "auto",
+    "config": { "chunk_size": 2048, "chunk_overlap": 200 }
+  },
+  "data_source": { "type": "files" },
+  "llama_parse_parameters": { "take_screenshot": true, "tier": "agentic", "version": "latest" },
+  "pipeline_type": "MANAGED",
+  // only when OPENAI_API_KEY is set:
+  "embedding_config": {
+    "type": "OPENAI_EMBEDDING",
+    "component": { "model_name": "text-embedding-3-small", "api_key": "***" }
+  }
+}
+```
+
+Key constants: **chunk_size 2048, chunk_overlap 200, agentic LlamaParse, page screenshots on, MANAGED
+pipeline, OpenAI `text-embedding-3-small` embeddings** (when the key is present; otherwise LlamaCloud
+managed defaults). A 409 conflict reuses by exact name or recurses with a random name.
+
+Relevant environment variables: `LLC_REGION`, `LLC_API_KEY`, `LLC_PROJECT`
+(`project_name`/`project_id` query param), `LLC_ORG_ID` (`organization_id` in the creation body), and
+`OPENAI_API_KEY` (selects the embedding config).
+
+## Ingestion and dedup
+
+`PipelineService.uploadDocumentsWithStrategy` drives both Encompass and partner ingestion. Per
+document it computes the file size, looks up an active `loan_documents` row by the strategy key
+(Encompass: `encompass_attachment_id`; partner: `partner_s3_key`), then decides:
+
+- existing + has `llama_cloud_file_id` + size matches + already attached → **skip**
+- existing + size matches + not attached → **re-attach** the existing LlamaCloud file
+- otherwise → **upload** a new file and queue the attach
+
+After the loop it flushes pending attachments and calls `syncPipeline` only if something changed
+(`uploadedCount > 0 || newlyAttachedCount > 0`), since syncing an unchanged pipeline can make
+LlamaCloud error.
+
+Ingestion state is tracked on `loan_documents`:
+
+| Column | Set by | Meaning |
+|---|---|---|
+| `llama_cloud_file_id` | upload/save | LlamaCloud file id; used directly as the `file_id` metadata key in retrieval scoping |
+| `llama_pipeline_id` | upload/save | string copy of the loan's pipeline id |
+| `llama_ingested_at` | upload/save | when ingested |
+| `llama_ingestion_status` | upload/save | only ever written as the literal `"ingested"` |
+
+<Note>
+`llama_ingestion_status` is not a multi-state lifecycle column in this code path — it is only ever set
+to `"ingested"`. Pipeline-level readiness (running/success/failed) lives in `processing_jobs`, not on
+`loan_documents`.
+</Note>
+
+## Readiness gating
+
+Retrieval is only valid once LlamaCloud finishes indexing. Two mechanisms cooperate:
+
+<Steps>
+  <Step title="processing_jobs row">
+    `llama-upload.service.ts::uploadAndWaitForDocuments` uploads documents, sets
+    `loans.processing_status = "processing"`, and registers a `processing_jobs` row
+    (`status: "running"`, `llama_job_id = pipelineId`).
+  </Step>
+  <Step title="waitForPollerReadiness">
+    It then polls `processing_jobs.status` every `POLL_INTERVAL_MS = 10_000` until `succeeded` /
+    `failed`, a per-iteration hard deadline (+60s grace), or `ABSOLUTE_CEILING_MS = 57 min`.
+  </Step>
+  <Step title="30s poller cron">
+    `llama-poller.service.ts::poll` runs on `@Cron("*/30 * * * * *")`. It reads each running job's
+    `getStatus`; on `success` with all files `SUCCESS` it sets `loans.processing_status =
+    "ready_for_audit"` and the job to `succeeded`. Errored files trigger a rescue
+    (`resyncPipelineFile`).
+  </Step>
+  <Step title="Retrieval sanity check">
+    On readiness it issues a bare `retrieve(pipelineId, "loan document")` up to 3 times (5s apart),
+    proceeding even if still empty. This bare call is the one that uses the default retrieval params.
+  </Step>
+</Steps>
+
+Audit start gates on `loans.processing_status = "ready_for_audit"`.
+
+## Hybrid retrieval
+
+The retrieval call is `retrieve(pipelineId, q, params?)` → `POST /v1/retrievers/retrieve`. It blends
+**dense** (semantic) and **sparse** (lexical/keyword) results, then reranks. On any non-2xx or error
+it returns `{ results: [] }` — retrieval failures degrade to empty, never throw.
+
+### DEFAULT_LOAN_RETRIEVAL_PARAMS
+
+These defaults apply **only** when `retrieve()` is called without a `params` argument:
+
+| Param | Value | Meaning |
+|---|---|---|
+| `dense_similarity_top_k` | `10` | Semantic matches for recall on paraphrases |
+| `sparse_similarity_top_k` | `24` | Higher lexical hits to catch exact field names and IDs |
+| `alpha` | `0.35` | Dense/sparse blend |
+| `enable_reranking` | `true` | |
+| `rerank_config` | `{ top_n: 30, type: "system_default" }` | Rerank the best ~30 raw hits |
+| `retrieval_mode` | `"chunks"` | Chunk-level granularity |
+| `files_top_k` | `5` | Files to return |
+| `retrieve_image_nodes` | `false` | Skip images to save tokens |
+
+<Warning>
+Two myths to correct:
+
+- **`files_top_k` is `5`, not `3`.** The inline code comment says "Return up to 3 files" but the value
+  is `5`. Any prompt or PRD citing 3 is wrong.
+- **`alpha` direction**: the convention is `0.0 = pure sparse/keyword`, `1.0 = pure dense/semantic`.
+  So `alpha 0.35` is roughly 35% dense / 65% sparse — keyword-leaning, matching the intent of catching
+  exact field names and IDs. (The inline "~35% dense / 65% sparse" comment is correct; descriptions
+  that invert it are not.)
+</Warning>
+
+<Warning>
+**These defaults are not what the agents use.** They apply only to the bare `retrieve()` call (the
+post-readiness sanity check in `llama-upload.service.ts`). The audit agents go through the
+[LangChain retrieval tools](/subsystems/retrieval-tools-and-scoping), which always pass an explicit
+`params` object with their own per-agent knobs. Do not assume PII or signature retrieval runs at
+`alpha 0.35` / dense 10 / sparse 24.
+</Warning>
+
+<Note>
+Each `retrieve` request actually carries **two** `rerank_config` blocks: a top-level one (defaulting
+to `{ top_n: 6, type: "system_default" }`) and a per-pipeline one inside
+`preset_retrieval_parameters` (the `top_n: 30` above when defaults apply). The effective rerank is
+governed by the params the caller sets. Note also the per-pipeline `description: "PII-validator
+retrieval"` is hardcoded on **every** request regardless of caller — it is a misnomer, not a per-agent
+label.
+</Note>
+
+Continue to [retrieval tools and PII scoping](/subsystems/retrieval-tools-and-scoping) for the
+LangChain tools and the deterministic `file_id` + page-range push-down.

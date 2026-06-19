@@ -1,0 +1,115 @@
+---
+title: The Oz run lifecycle
+description: From a reported issue to a completed investigation.
+icon: workflow
+---
+
+An Oz run is one autonomous investigation launched for an issue. It starts when an engineer triggers a run from the [bug reports console](/octy/bug-reports-console), runs inside Warp's sandbox, calls back into Octy through the [Oz tool API](/octy/oz-tool-api), and ends when the agent posts to the [completion webhook](/octy/completion-webhook). Each run is one row in `octy_runs`.
+
+## Trigger
+
+`POST /api/octy-issues/[id]/oz-run` launches a run. The route is WorkOS auth-gated. The request body is all-optional:
+
+```json
+{
+  "skillId": "root-cause-analysis",
+  "customPrompt": null,
+  "userInstructions": null,
+  "modelId": null,
+  "runName": null,
+  "contextRunIds": [],
+  "attachComments": false
+}
+```
+
+- `skillId` defaults to `root-cause-analysis`. Valid values: `root-cause-analysis`, `rca-fix-and-pr`, `ad-hoc`. See [Oz skills](/octy/oz-skills).
+- `customPrompt` — the full free-form task prompt, used only for `ad-hoc`.
+- `userInstructions` — free text appended to the fixed skills (RCA / fix-and-PR) as an "Additional User Instructions" section. Ignored for `ad-hoc`.
+- `contextRunIds` — UUIDs of prior runs on the same issue; only those with a non-null `summary` are loaded into a "Previous Run Context" section.
+- `attachComments` — when true, all issue comments are formatted into a "Comments Context" section.
+- `modelId` — a Warp model id passed straight through to `config.model_id`. Defaults to `claude-4-8-opus-xhigh`.
+
+## What the server does
+
+<Steps>
+  <Step title="Authenticate and load the issue">
+    `requireAuth()` runs, then the issue is fetched joined to its `loans` and `audit_runs` rows. A missing issue returns 404. The route requires `LANGSMITH_API_KEY` (or `LANGCHAIN_API_KEY`) and `OCTY_WEBHOOK_BASE_URL`, returning 500 if either is missing.
+  </Step>
+  <Step title="Pre-generate IDs and tokens">
+    The server generates `runId = crypto.randomUUID()` up front so it can be embedded in the prompt, plus a raw access token and a raw refresh token. Only the SHA-256 hashes are stored in `octy_runs`; the raw tokens go into the prompt the agent sees.
+  </Step>
+  <Step title="Build the prompt">
+    The task prompt is `[previousRunContext, commentsContext, skillPrompt]` joined with blank lines. The base prompt is `buildBasePrompt(webhookContext)`. The full prompt stored in DB is `base + "\n\n" + task`, mirroring exactly what the agent receives.
+  </Step>
+  <Step title="Launch the Warp run">
+    `ozClient.agent.run({ prompt: taskPrompt, title, config })` is called. `config` carries the `base_prompt`, optional `environment_id` (from `WARP_ENVIRONMENT_ID`), optional `model_id`, and `mcp_servers`.
+  </Step>
+  <Step title="Persist the run and advance the issue">
+    The initial Warp state is mapped to `oz_run_status`, an `octy_runs` row is inserted (run id, Warp run id, token hashes, expiries, context run ids, full prompt), and the issue moves to `intake_status: delegated`. The response is `{ run, issue }`.
+  </Step>
+</Steps>
+
+### What the prompt contains
+
+`buildBasePrompt` joins these sections in order (empty sections dropped):
+
+1. **Identity** — `OZ_AGENT_IDENTITY` ("You are Octy, LoanLight's self-healing AI...").
+2. **Ground rules** — "Never stop at the surface" and "Always request a PR review" (every PR requests review from `@loanlight-engineering/eng-team`).
+3. **Inspecting third-party library behaviour** — always read `node_modules`.
+4. **LangSmith access** — verify the CLI, look for project `loanlight-aus`, retry with backoff; embeds the LangSmith CLI reference. `LANGCHAIN_API_KEY` is pre-set in the agent runtime.
+5. **Datadog access** — only when both Datadog keys are present; env-aware (`env:int` / `env:prod`), framed as a last resort.
+6. **LangChain / LangSmith documentation** — the `docs-langchain` MCP server.
+7. **LoanLight system architecture** — a large orientation section that explicitly says the code wins. {/* TODO: verify — this set of docs is intended to eventually replace this inline architecture section via the Mintlify MCP. */}
+8. **Authentication** — embeds the live access token, run id, and refresh token, and documents the 408 refresh flow.
+9. **Available data tools** — generated from `OZ_TOOL_REGISTRY`; notes responses are `{ table, data[] }` capped at 200 rows with automatic scoping.
+10. **Completion tool** — the [completion contract](/octy/completion-webhook).
+11. **Self-correction** — the HTTP status table (400/404/408/410/401/5xx).
+
+### MCP servers attached
+
+`mcp_servers` always includes `docs-langchain` (`https://docs.langchain.com/mcp`). When both `OCTY_DATADOG_API_KEY` and `OCTY_DATADOG_APPLICATION_KEY` are set, a `datadog` server is added (`https://mcp.datadoghq.com/...`) with the keys passed as `DD_API_KEY` / `DD_APPLICATION_KEY` headers.
+
+## Running and calling back
+
+Inside Warp's sandbox the agent uses the LangSmith CLI, the LangChain docs MCP, optionally Datadog MCP, reads the loanlight-api codebase, and calls back into Octy's [Oz tool API](/octy/oz-tool-api) for audit data and S3 objects. Every data and completion call sends two headers:
+
+```http
+Authorization: Bearer <access_token>
+X-Oz-Run-Id: <run_id>
+```
+
+The agent never supplies the `audit_run_id` — the server derives it from the run's parent issue, so the agent only ever sees data scoped to its own issue.
+
+## The token model
+
+Tokens are bearer credentials embedded verbatim in the prompt and stored only as SHA-256 hashes (`src/lib/oz-token.ts`).
+
+| Token | TTL | Behavior |
+|---|---|---|
+| Access token | 60 minutes (`TOKEN_TTL_MINUTES`) | Used on every data and completion call. Each valid call updates `token_last_used_at`. |
+| Refresh token | 4 hours / 240 minutes (`REFRESH_TOKEN_TTL_MINUTES`) | Non-rotating — reusable until it expires or the run completes. Exchanged for a fresh access token. |
+
+`validateOzToken(run_id, raw_token)` checks, in order: the run exists (else **401**), the hash matches `webhook_token` (else **401**), `token_expires_at` is in the future (else **408**), and `token_consumed_at` is null (else **410**).
+
+<Note>
+The 401 is deliberately ambiguous (anti-oracle): a missing run and a bad hash both return 401 with the same message. The 408 and 410 are explicit lifecycle states the agent is told how to act on.
+</Note>
+
+When a call returns 408, the agent posts to `POST /api/oz/tools/token-refresh` with `X-Oz-Run-Id` and `X-Oz-Refresh-Token`. `validateAndRefreshToken` gates the refresh token the same way, then generates a new access token (stores the hash, resets `token_expires_at`) and returns `{ access_token, expires_at }`.
+
+## Completion and status
+
+The run ends when the agent calls `POST /api/oz/tools/octy-run-complete` exactly once. On success the summary and PR URLs are stored, `token_consumed_at` is set (the token is permanently dead), and the issue advances from `delegated` to `ai_complete`. See the [completion webhook contract](/octy/completion-webhook).
+
+While a run is live, the UI polls `GET /api/octy-runs/[runId]/status`, which retrieves the Warp run, maps its `state` to `oz_run_status`, captures the `session_link`, and persists changes. The run is active while the Warp state is one of `QUEUED`, `PENDING`, `CLAIMED`, `INPROGRESS`.
+
+### Status mapping
+
+| Warp state | `oz_run_status` |
+|---|---|
+| `QUEUED` | `queued` |
+| `PENDING` | `pending` |
+| `CLAIMED` | `claimed` |
+| `INPROGRESS` | `in_progress` |
+| `SUCCEEDED` | `succeeded` |
+| anything else | `failed` |

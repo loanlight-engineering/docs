@@ -1,0 +1,119 @@
+---
+title: Results access URLs
+description: Short-lived results-access URLs and the documents.classified push-back.
+icon: link
+---
+
+After an EPC audit completes, two mechanisms push results back toward Encompass: the
+`loanlight.documents.classified` event (which lets the integrations server carve classified
+documents back into Encompass) and a short-lived, single-use **results-access URL** the
+Encompass Plugin Client (EPC) uses to open the completed audit.
+
+## EPC results-access URL
+
+The read-side EPC controller mints the URL.
+
+### POST /api/v1/encompass/audits/:auditId/results/access-url
+
+`EncompassAuditsController.generateResultsAccessUrl`
+(`encompass/controllers/encompass-audits.controller.ts`). Guarded by
+`EncompassRequestorAuthGuard`, returns HTTP 200.
+
+<ParamField path="auditId" type="string (uuid)" required>
+  The audit run id (validated by `ParseUUIDPipe`).
+</ParamField>
+<ParamField query="embedContext" type="&quot;top&quot; | &quot;iframe&quot;" default="top">
+  Rendering context. `top` opens a new browser tab; `iframe` embeds inside Encompass. Any other
+  value → 400 `{ error: "invalid_embed_context" }`.
+</ParamField>
+
+The guard populates `req.user.{lenderId, lenderCode}` from the requestor id (see
+[Lender resolution](/integrations/lender-resolution)). The controller then:
+
+<Steps>
+  <Step title="Verify ownership">
+    `auditService.getAuditRunByLender(auditId, lenderId)` → 404 `{ error: "audit_not_found" }`
+    if the run is not owned by this lender.
+  </Step>
+  <Step title="Verify completion">
+    `auditRun.status !== "complete"` → 409 `{ error: "audit_not_complete" }`.
+  </Step>
+  <Step title="Mint the URL">
+    `resultsAccessService.generateAccessUrl(auditId, lenderId, lenderCode, loan_id, embedContext,
+    "epc-results-exchange")` returns `{ url, expiresAt }`.
+  </Step>
+</Steps>
+
+It emits a structured log `event: "epc_access_url_minted"` (`auditId, lenderId, requestorId,
+sourceIp, expiresAt`).
+
+<Note>
+The **EPC-source predicate** (only EPC-originated audits may be opened this way) is enforced
+**upstream** in `ResultsAccessService.mintExternalUrl` via `getAuditDetailScopedByClient` in
+`loanlight-integrations`, not in this controller. LOA-1075 removed a dead
+`encompass_document_id` null-check that had blocked all EPC requests since that column lost its
+writers on 2025-08-05.
+</Note>
+
+<ResponseField name="url" type="string">
+  Full URL with the embedded JWT, for example
+  `https://portal.loanlight.com/results/audits/{auditId}?token=eyJhbG...`.
+</ResponseField>
+<ResponseField name="expiresAt" type="string (ISO 8601)">
+  When the URL expires.
+</ResponseField>
+
+### Token mechanics
+
+`ResultsAccessService.generateAccessUrl` (`partner-api/services/results-access.service.ts`)
+signs an **HS256** JWT with claims `{ auditId, lenderId, lenderCode, loanId, purpose,
+embedContext }`. For EPC the `purpose` is `epc-results-exchange`. The URL is
+`${baseUrl}/audits/${auditId}?token=${token}`.
+
+The exchange token is single-use: the portal consumes it with a one-shot Redis `SET-NX`, then
+mints a longer-lived view token (`purpose: epc-results-view`, same HS256 secret) for subsequent
+`/api/v1/portal/audits/...` requests.
+
+Configuration:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `PARTNER_RESULTS_BASE_URL` | `http://localhost:3001/results` (dev) | URL base. Unset in production → endpoints return 503. |
+| `PARTNER_RESULTS_JWT_SECRET` | dev-only well-known secret | Signing secret. Unset in production → 503. |
+| `PARTNER_RESULTS_TOKEN_TTL_MINUTES` | `60` | Exchange-token lifetime. |
+
+### Partner equivalent
+
+The Partner API exposes the same minting at
+`POST /api/v1/partner/audits/:auditId/results/access-url`
+(`PartnerAuditsController.generateResultsAccessUrl`), which calls `generateAccessUrl` with the
+default `purpose` of `partner-results-exchange` and `embedContext: "top"`. Same ownership (404)
+and completion (409) checks. See [Results and access URLs](/partner-api/results-and-access-urls).
+
+## documents.classified push-back
+
+At the Phase 1 settle barrier (LOA-1041 / LOA-743), `DocumentsClassifiedEmitter`
+(`classify-split/documents-classified.emitter.ts`) publishes the
+`loanlight.documents.classified` EventBridge event via
+`EventPublishingService.publishDocumentsClassified`:
+
+- `DetailType` = `DOCUMENTS_CLASSIFIED_DETAIL_TYPE` (a shared-types constant).
+- `Source` = `loanlight.aus`.
+- The `Detail` is the raw event (the classified-document set for the loan).
+
+The `loanlight-integrations` side (LOA-1102) consumes it and carves each classified document
+back into Encompass, gated per-lender by an `encompass_document_push` flag keyed on `lender_id`
+(the emitter's `clientId`). This push-back is best-effort by contract — it never fails the
+audit. Emission is fire-and-forget (`fireDocumentsClassified` → `emitForLoan`) so it never
+blocks the run.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Orchestration pipeline" href="/integrations/orchestration-pipeline" icon="workflow">
+    Where documents.classified fires in Phase 1.
+  </Card>
+  <Card title="Partner results and access URLs" href="/partner-api/results-and-access-urls" icon="key">
+    The partner-facing equivalent.
+  </Card>
+</Columns>

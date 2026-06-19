@@ -1,0 +1,83 @@
+---
+title: Pre-audit stage
+description: "Phase 1: three parallel branches and the phase barrier."
+icon: layers
+---
+
+Phase 1 is owned by `PreAuditStageService.executePreAuditStage` (`integration-events/services/pre-audit-stage.service.ts`). It fires three independent branches in parallel and applies a barrier before any audit agent runs.
+
+`executePreAuditStage` returns `PreAuditStageResult { pipelineId, isNewPipeline, urlaPreprocessingData?, skipAgents }`.
+
+## The three branches
+
+<Columns cols={3}>
+  <Card title="Branch C — classification" icon="scan-line">
+    Runs the [Pre-Audit-Classification agent](/agents/pre-audit-classification) (`langGraph.runPreAuditClassification`) to split and classify the PDFs. This is the barrier target.
+  </Card>
+  <Card title="Branch A — URLA preprocessing" icon="file-text">
+    [URLA extraction](/agents/urla-extraction) over the MISMO XML into per-borrower structured JSON, plus the rules engine.
+  </Card>
+  <Card title="Branch B — Llama indexing" icon="database">
+    Ingests the documents into the loan's [LlamaCloud pipeline](/subsystems/llamacloud-retrieval) for retrieval.
+  </Card>
+</Columns>
+
+## Sequence
+
+<Steps>
+  <Step title="Register and detect changes">
+    Emit `CLASSIFYING_DOCUMENTS` (`progress: 18`). Build `classifyDocs` from the registered `loan_documents`, then run `classifySplitPersistence.shouldReclassify(...)` to compute `{ needsClassification, documentsToClassify }`. See [Run lifecycle and deduplication](/pipeline/lifecycle-and-dedup) for the change-detection rules.
+  </Step>
+  <Step title="Resolve the loan program once">
+    `lenderConfigService.resolveProgram(...)` produces `resolvedPreAuditLoanProgram` before launching branches, so classification (bank-statement assets-vs-income bucketing) and URLA preprocessing see the same alias-resolved program code.
+  </Step>
+  <Step title="Launch Branch C (classification)">
+    If `needsClassification`, run `runPreAuditClassification`. On success, record a terminal ledger row; on failure, write an `audit_errors` row (`agentName: "classifySplit"`) and still record a terminal `failed` ledger row — the phase-0 ledger row must reach terminal or it deadlocks Phase-2 completion.
+  </Step>
+  <Step title="Prepare the pipeline">
+    Emit `PREPARING_PIPELINE` (`progress: 20`). `pipelineService.getOrCreatePipeline(loanId, loanMetadata)` returns `{ pipelineId, isNewPipeline }` and the association is persisted on `loans.llc_pipeline_id`.
+  </Step>
+  <Step title="Launch Branch A (URLA preprocessing)">
+    Skipped if `SKIP_LANGGRAPH_AGENTS`; otherwise `urlaPreprocessing.runUrlaExtractionPreprocessing(...)`.
+  </Step>
+  <Step title="Launch Branch B (Llama indexing)">
+    Emit `UPLOADING_DOCUMENTS`. `llamaUpload.uploadAndWaitForDocuments(...)`. On a `PIPELINE_NOT_FOUND:<id>` error, clear the stale reference, recreate the pipeline, and retry the upload once.
+  </Step>
+  <Step title="Await Branch B first">
+    `await llamaIndexingPromise`. If it rejects, `Promise.allSettled` the other two branches to drain them before rethrowing, so straggler writes do not land after the run is failed.
+  </Step>
+  <Step title="Phase 1 → Phase 2 barrier">
+    Emit `DOCUMENTS_READY` (`progress: 50`), then `await preAuditClassificationPromise`. Classification must settle before any audit agent runs.
+  </Step>
+  <Step title="Finalize">
+    Fire the `documents.classified` event (best-effort). Await `urlaPreprocessingPromise` to produce `urlaPreprocessingData`. Return with `skipAgents: false`.
+  </Step>
+</Steps>
+
+<Note>
+Document split happens **inside** the Pre-Audit-Classification agent (the `splitDocuments` node), not as an orchestrator pre-step. Document buffers are handed straight to the agent and never enter graph state or LangSmith traces.
+</Note>
+
+## The phase barrier
+
+Branch B (Llama) is awaited first because the audit agents need indexed documents. Branch C (classification) is the explicit barrier: `await preAuditClassificationPromise` gates Phase 2 so no agent runs against unclassified documents. Branch A (URLA) is awaited last because its `urlaPreprocessingData` is passed into the agents stage to avoid re-extraction.
+
+## SKIP environment short-circuits
+
+Three env flags short-circuit Phase 1 for testing and partial runs:
+
+| Env var | Effect |
+|---|---|
+| `SKIP_LLAMA_INGESTION` | Classify-only. Awaits classification, fires `documents.classified`, and returns `{ pipelineId: "", isNewPipeline: false, skipAgents: true }` — the orchestrator then completes the run and skips agents. |
+| `SKIP_LANGGRAPH_AGENTS` | Skips URLA preprocessing in Phase 1 and agent execution in Phase 2 (the audit still completes). |
+| `SKIP_AI_PIPELINE` | Handled in the orchestrator before Phase 1: `"true"` completes immediately, `"error"` simulates a failure. |
+
+## MISMO-hash caching
+
+URLA preprocessing reuses prior extraction work when the input is byte-identical. `UrlaPreprocessingService.checkForCachedUrlaExtraction(loanId, mismoXmlHash)` looks for a prior completed `audit_runs` row with the same loan and `mismo_xml_hash` (`orderBy(desc(started_at), desc(id)).limit(1)`) and reuses its `urla_extraction_results` via `reuseUrlaExtractionResults` plus the rules engine. A cache miss runs `createUrlaExtractionGraphWithSharedAuditRun`. See [Run lifecycle and deduplication](/pipeline/lifecycle-and-dedup#mismo-xml-hash).
+
+`UrlaPreprocessingData` carries `loanContext` (derived via `extractLoanContextFromUrla`) plus `transformedPiiFields` (reused by the PII agent) and `transformedPropertyAddresses` (reused by the property-data agent), so those agents do not re-extract from the MISMO XML.
+
+## Partner pre-audit
+
+`executePartnerPreAuditStage` is URLA preprocessing only. Partner classification and Llama indexing already happened at document-upload time (`partner-loans.controller`), so this branch just runs `runUrlaExtractionPreprocessing(params)`.

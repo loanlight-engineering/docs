@@ -1,0 +1,97 @@
+---
+title: "Portal API: per-lender configuration"
+description: Key fields, deny lists, and guideline documents.
+icon: sliders-horizontal
+---
+
+These modules manage per-lender configuration that shapes how audits run and how results are reviewed: key-field sets per agent, appraiser deny lists (per-lender and global), and uploaded guideline documents. All endpoints use [`PortalAuthGuard`](/portal/api-auth). For how this configuration layers onto YAML config and rule overrides, see [overrides and guidelines](/lender-config/overrides-and-guidelines).
+
+## portal-key-field-config
+
+Controller: `portal-key-field-config/portal-key-field-config.controller.ts` at `api/v1/portal`. Agents are validated against `["appraisal", "credit", "income"]`. `assertAdmin(ctx)` requires `client_admin` or internal. Key-field sets define which extracted fields are surfaced for human review on a run.
+
+### Session-scoped (effective lender)
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/key-field-catalog?agent=` | Available fields catalog |
+| `GET /api/v1/portal/key-field-sets/:agent` | Get the configured set |
+| `PUT /api/v1/portal/key-field-sets/:agent` | Upsert the set (`UpsertSetDto`; admin) |
+| `POST /api/v1/portal/key-field-sets/:agent/dismiss-banner` | Dismiss banner (HTTP 200, `{ dismissedVersion }` positive int) |
+| `POST /api/v1/portal/key-field-sets/:agent/fields` | Create a field (`CreateFieldDto`) |
+| `PATCH /api/v1/portal/key-field-sets/:agent/fields/:fieldId` | Update a field (`UpdateFieldDto`) |
+| `DELETE /api/v1/portal/key-field-sets/:agent/fields/:fieldId` | Delete a field |
+| `PATCH /api/v1/portal/key-field-sets/:agent/reorder` | Reorder (`ReorderFieldsDto { fieldIds }`) |
+
+### Admin (explicit `:lenderId`)
+
+All `@Roles("super_admin")`, gated by `requireLenderAccess`.
+
+| Method / path |
+|---|
+| `GET /api/v1/portal/lenders/:lenderId/key-field-catalog?agent=` |
+| `GET /api/v1/portal/lenders/:lenderId/key-field-sets/:agent` |
+| `PUT /api/v1/portal/lenders/:lenderId/key-field-sets/:agent` |
+| `POST /api/v1/portal/lenders/:lenderId/key-field-sets/:agent/fields` |
+| `PATCH /api/v1/portal/lenders/:lenderId/key-field-sets/:agent/fields/:fieldId` |
+| `DELETE /api/v1/portal/lenders/:lenderId/key-field-sets/:agent/fields/:fieldId` |
+| `PATCH /api/v1/portal/lenders/:lenderId/key-field-sets/:agent/reorder` |
+
+## portal-appraiser-deny-list
+
+Controller: `portal-appraiser-deny-list/portal-appraiser-deny-list.controller.ts` at `api/v1/portal/appraiser-deny-list`. Class throttle 100/min. Writes are gated `@Roles("client_user")` — any non-`read_only` company member can edit the list.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/appraiser-deny-list` | auth | List entries |
+| `POST /api/v1/portal/appraiser-deny-list` | client_user | Add an entry (HTTP 201) |
+| `POST /api/v1/portal/appraiser-deny-list/bulk` | client_user | Bulk add (HTTP 201) |
+| `PUT /api/v1/portal/appraiser-deny-list/:id` | client_user | Update |
+| `DELETE /api/v1/portal/appraiser-deny-list/:id` | client_user | Remove |
+
+## portal-global-appraiser-deny-list
+
+Controller: `portal-global-appraiser-deny-list/portal-global-appraiser-deny-list.controller.ts` at `api/v1/portal/global-appraiser-deny-list`. Class-level `@Roles("super_admin")`, throttle 100/min. This is the LoanLight-wide deny list applied across all lenders.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/global-appraiser-deny-list` | List global entries |
+| `POST /api/v1/portal/global-appraiser-deny-list` | Add (HTTP 201) |
+| `POST /api/v1/portal/global-appraiser-deny-list/bulk` | Bulk add (HTTP 201) |
+| `PUT /api/v1/portal/global-appraiser-deny-list/:id` | Update |
+| `DELETE /api/v1/portal/global-appraiser-deny-list/:id` | Remove |
+
+## lender-guideline-documents
+
+Controller: `lender-guideline-documents/lender-guideline-documents.controller.ts` at `api/v1/portal/lender-guideline-documents`. Class throttle 100/min. Feature-gated by `guidelineUploads` — when disabled the service `assertEnabled()` throws `404` rather than returning an empty list.
+
+<Warning>
+Uploads use Fastify `req.parts()` multipart parsing (the API runs on the Fastify adapter), not Express multer. The 50MB cap is `MAX_FILE_SIZE_BYTES`. The create handler does an S3 PUT then a DB INSERT, with a compensating S3 DELETE on INSERT failure — there is no transaction across the two stores.
+</Warning>
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `POST /api/v1/portal/lender-guideline-documents` | client_admin | Multipart `file` + fields validated to `UploadGuidelineDocumentDto { lenderId, ... }` (HTTP 201) |
+| `GET /api/v1/portal/lender-guideline-documents?lenderId=` | auth | List for a lender (`resolveLenderId` cross-tenant guard) |
+| `GET /api/v1/portal/lender-guideline-documents/me` | auth | List for the effective lender (`?documentType=`) |
+| `GET /api/v1/portal/lender-guideline-documents/:id/stream` | auth | Stream inline (`StreamableFile`) |
+| `DELETE /api/v1/portal/lender-guideline-documents/:id` | client_admin | Delete |
+
+Loan programs link to these documents through the program-document endpoints on `portal-lenders` and `portal-loan-programs`; see [lenders, users, and programs](/portal/api-lenders-users-programs).
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Overrides and guidelines" icon="file-pen" href="/lender-config/overrides-and-guidelines">
+    How guideline docs and overrides feed the agents.
+  </Card>
+  <Card title="Lender config overview" icon="sliders-horizontal" href="/lender-config/overview">
+    YAML config, flags, and entitlements.
+  </Card>
+  <Card title="Appraisal runs" icon="house" href="/portal/api-appraisal">
+    Where deny lists and key fields appear.
+  </Card>
+  <Card title="Property red flags agent" icon="flag" href="/agents/property-red-flags">
+    The deny-list consumer in the pipeline.
+  </Card>
+</Columns>

@@ -1,62 +1,294 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "LoanLight",
+  "description": "Internal engineering documentation for the LoanLight automated underwriting system, its AI agents, integrations, and the Octy self-healing platform.",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#4A6C7F",
+    "light": "#92ADBA",
+    "dark": "#37535F"
   },
   "favicon": "/favicon.svg",
+  "icons": {
+    "library": "lucide"
+  },
   "navigation": {
-    "pages": [
+    "tabs": [
       {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
+        "tab": "Overview",
+        "icon": "house",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "index",
+              "overview/system-architecture",
+              "overview/repositories",
+              "overview/environments",
+              "overview/using-these-docs",
+              "overview/glossary"
+            ]
+          },
+          {
+            "group": "Core concepts",
+            "pages": [
+              "concepts/loans-and-lenders",
+              "concepts/audit-run",
+              "concepts/data-flow",
+              "concepts/identity-and-auth"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Audit pipeline",
+        "icon": "workflow",
+        "groups": [
+          {
+            "group": "Pipeline",
+            "pages": [
+              "pipeline/overview",
+              "pipeline/triggers",
+              "pipeline/pre-audit-stage",
+              "pipeline/audit-agents-stage",
+              "pipeline/lifecycle-and-dedup",
+              "pipeline/results",
+              "pipeline/issue-kinds",
+              "pipeline/progress-tracking"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Agents",
+        "icon": "bot",
+        "groups": [
+          {
+            "group": "Agent platform",
+            "pages": [
+              "agents/platform-overview",
+              "agents/catalog-and-dependencies",
+              "agents/router-and-entitlements",
+              "agents/runs-ledger",
+              "agents/feature-flags-and-rollout",
+              "agents/observability"
+            ]
+          },
+          {
+            "group": "Agent catalog",
+            "pages": [
+              "agents/pre-audit-classification",
+              "agents/urla-extraction",
+              "agents/pii-validation",
+              "agents/urla-completeness",
+              "agents/document-health",
+              "agents/property-data",
+              "agents/property-red-flags",
+              "agents/credit-evaluation",
+              "agents/income-analysis",
+              "agents/appraisal-evaluation",
+              "agents/liabilities-assessment"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Subsystems",
+        "icon": "layers",
+        "groups": [
+          {
+            "group": "Documents & retrieval",
+            "pages": [
+              "subsystems/classify-split",
+              "subsystems/classify-split-modes",
+              "subsystems/classify-split-data-model",
+              "subsystems/llamacloud-retrieval",
+              "subsystems/retrieval-tools-and-scoping"
+            ]
+          },
+          {
+            "group": "Data model",
+            "pages": [
+              "data-model/overview",
+              "data-model/core-tables",
+              "data-model/result-tables",
+              "data-model/urla-data-model",
+              "data-model/agent-platform-schema",
+              "data-model/financial-data-model",
+              "data-model/enums-reference",
+              "data-model/migrations"
+            ]
+          },
+          {
+            "group": "Lender configuration",
+            "pages": [
+              "lender-config/overview",
+              "lender-config/yaml-config",
+              "lender-config/feature-flags-and-entitlements",
+              "lender-config/overrides-and-guidelines"
+            ]
+          },
+          {
+            "group": "Storage & reporting",
+            "pages": [
+              "storage/s3-layout",
+              "storage/pdf-reports",
+              "storage/property-data-module"
+            ]
+          },
+          {
+            "group": "Observability & infrastructure",
+            "pages": [
+              "ops/observability",
+              "ops/langsmith",
+              "ops/datadog",
+              "ops/infrastructure",
+              "ops/shared-packages"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Integrations",
+        "icon": "plug",
+        "groups": [
+          {
+            "group": "Encompass & EPC",
+            "pages": [
+              "integrations/encompass-overview",
+              "integrations/epc-webhook-security",
+              "integrations/audit-request-schema",
+              "integrations/lender-resolution",
+              "integrations/orchestration-pipeline",
+              "integrations/results-access",
+              "integrations/legacy-dev-connect"
+            ]
+          },
+          {
+            "group": "Integrations service",
+            "pages": [
+              "integrations/service-overview",
+              "integrations/audit-lifecycle",
+              "integrations/http-api",
+              "integrations/messaging",
+              "integrations/database-schema",
+              "integrations/shadow-audits",
+              "integrations/audit-pdf",
+              "integrations/frontend-plugin",
+              "integrations/infrastructure"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Partner API",
+        "icon": "webhook",
+        "groups": [
+          {
+            "group": "Partner API",
+            "pages": [
+              "partner-api/overview",
+              "partner-api/authentication",
+              "partner-api/rate-limits-and-errors",
+              "partner-api/loans",
+              "partner-api/audits",
+              "partner-api/results-and-access-urls",
+              "partner-api/data-model",
+              "partner-api/integration-guide"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Portal",
+        "icon": "layout-dashboard",
+        "groups": [
+          {
+            "group": "Lender portal",
+            "pages": [
+              "portal/overview",
+              "portal/architecture-bff",
+              "portal/auth-and-roles",
+              "portal/impersonation",
+              "portal/feature-map",
+              "portal/file-uploads",
+              "portal/partner-results-viewer"
+            ]
+          },
+          {
+            "group": "Portal API",
+            "pages": [
+              "portal/api-auth",
+              "portal/api-lenders-users-programs",
+              "portal/api-appraisal",
+              "portal/api-credit-income",
+              "portal/api-bank-statement-dscr",
+              "portal/api-rules-authoring",
+              "portal/api-config",
+              "portal/api-audit-results",
+              "portal/api-admin-observability"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Octy",
+        "icon": "bug",
+        "groups": [
+          {
+            "group": "Octy platform",
+            "pages": [
+              "octy/overview",
+              "octy/oz-run-lifecycle",
+              "octy/oz-skills",
+              "octy/oz-tool-api",
+              "octy/completion-webhook",
+              "octy/issues-runs-labels-api"
+            ]
+          },
+          {
+            "group": "Octy application",
+            "pages": [
+              "octy/bug-reports-console",
+              "octy/db-studio",
+              "octy/classify-split-config",
+              "octy/billing",
+              "octy/auth-and-access",
+              "octy/environment-variables",
+              "octy/infrastructure"
+            ]
+          },
+          {
+            "group": "Debugging runbooks",
+            "pages": [
+              "runbooks/overview",
+              "runbooks/tracing-a-bad-field",
+              "runbooks/investigating-a-failed-run",
+              "runbooks/pii-scoping-debug",
+              "runbooks/prompt-tuning"
+            ]
+          }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
+    ]
   },
   "logo": {
     "light": "/logo/light.svg",
     "dark": "/logo/dark.svg"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
       "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "label": "Open Octy",
+      "href": "https://octy.loanlight.com"
     }
   },
   "contextual": {
     "options": [
       "copy",
       "view",
-      "chatgpt",
       "claude",
-      "perplexity",
+      "chatgpt",
       "mcp",
       "cursor",
       "vscode"
@@ -64,9 +296,7 @@
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "website": "https://loanlight.com"
     }
   }
 }

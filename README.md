@@ -1,55 +1,41 @@
-# Mintlify Starter Kit
+# LoanLight engineering documentation
 
-Use the starter kit to get your docs deployed and ready to customize.
+Internal engineering documentation for **LoanLight** — the AI-powered automated underwriting system (AUS) — its audit pipeline, AI agents, integrations, lender portal, Partner API, and the **Octy** self-healing platform.
 
-Click the green **Use this template** button at the top of this repo to copy the Mintlify starter kit. The starter kit contains examples with
+This site is built with [Mintlify](https://mintlify.com). It is the externalized knowledge base that the Octy AI agent consumes via the Mintlify MCP server, and the reference engineers use day to day.
 
-- Guide pages
-- Navigation
-- Customizations
-- API reference pages
-- Use of popular components
+> The documented systems live in sibling repositories (`loanlight-api`, `loanlight-integrations`, `loanlight-shared`, `octy`). **The source code is the source of truth.** When a doc and the code disagree, fix the doc.
 
-**[Follow the full quickstart guide](https://starter.mintlify.com/quickstart)**
+## Structure
 
-## AI-assisted writing
+- `docs.json` — site configuration and navigation (tabs → groups → pages).
+- `*.mdx` — documentation pages, organized by area: `overview/`, `concepts/`, `pipeline/`, `agents/`, `subsystems/`, `data-model/`, `lender-config/`, `storage/`, `ops/`, `integrations/`, `partner-api/`, `portal/`, `octy/`, `runbooks/`.
+- `AGENTS.md` — terminology, style, and content boundaries for any AI tool editing these docs.
+- `logo/`, `favicon.svg` — LoanLight branding.
 
-Set up your AI coding tool to work with Mintlify:
+## Local development
+
+Install the [Mintlify CLI](https://www.npmjs.com/package/mint):
 
 ```bash
-npx skills add https://mintlify.com/docs
-```
-
-This command installs Mintlify's documentation skill for your configured AI tools like Claude Code, Cursor, Windsurf, and others. The skill includes component reference, writing standards, and workflow guidance.
-
-See the [AI tools guides](/ai-tools) for tool-specific setup.
-
-## Development
-
-Install the [Mintlify CLI](https://www.npmjs.com/package/mint) to preview your documentation changes locally. To install, use the following command:
-
-```
 npm i -g mint
 ```
 
-Run the following command at the root of your documentation, where your `docs.json` is located:
+Then, from the repo root (where `docs.json` lives):
 
+```bash
+mint dev              # preview at http://localhost:3000
+mint broken-links     # check internal links
+mint validate         # validate the build
 ```
-mint dev
-```
 
-View your local preview at `http://localhost:3000`.
+## Publishing
 
-## Publishing changes
+Changes deploy automatically after pushing to the default branch once the Mintlify GitHub app is installed. The docs are internal (not public-facing yet) but are written to a publishable standard.
 
-Install our GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app) to propagate changes from your repo to your deployment. Changes are deployed to production automatically after pushing to the default branch.
+## Contributing
 
-## Need help?
-
-### Troubleshooting
-
-- If your dev environment isn't running: Run `mint update` to ensure you have the most recent version of the CLI.
-- If a page loads as a 404: Make sure you are running in a folder with a valid `docs.json`.
-
-### Resources
-- [Mintlify documentation](https://mintlify.com/docs)
+- Match the conventions in `AGENTS.md`: second person, sentence-case headings, code formatting for names, no marketing language or decorative emoji.
+- Every page needs `title` and `description` frontmatter.
+- Add new pages to `docs.json` navigation or they stay hidden.
+- Ground every claim in the source. Flag common misconceptions with a `<Note>`; mark anything unverified with a `{/* TODO */}` comment.

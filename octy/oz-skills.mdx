@@ -1,0 +1,87 @@
+---
+title: Oz skills
+description: The three skills and the on-demand prompt-tuning instructions.
+icon: list-checks
+---
+
+A **skill** (sometimes called a "tentacle") is the task an Oz run is launched to perform. It produces the task prompt that follows the [base prompt](/octy/oz-run-lifecycle). There are exactly three skills, defined in `src/lib/oz-skills/` and registered as `OZ_SKILLS = [rootCauseAnalysis, fixAndPr, adHoc]`. The canonical id type is `OzSkillId` in `src/lib/oz-skills/types.ts`:
+
+```ts
+export type OzSkillId =
+  | "root-cause-analysis"
+  | "rca-fix-and-pr"
+  | "ad-hoc";
+```
+
+<Warning>
+`CLAUDE.md` still describes **four** skills, listing `prompt-tuning` as the fourth, and states the webhook payload is `{ run_id, token, summary, pr_url?, run_name? }`. Both are stale. There are only three skills; prompt-tuning is an on-demand instruction set fetched mid-run (see below), not a skill. The real completion fields are `summary`, `pr_urls` (array), and `run_name` — see the [completion webhook contract](/octy/completion-webhook).
+</Warning>
+
+## The three skills
+
+Each skill is an `OzSkill` of shape `{ id, label, description, buildPrompt(issue) }`. `getSkill(id)` throws on an unknown id.
+
+<AccordionGroup>
+  <Accordion title="root-cause-analysis — Root Cause Analysis">
+    Investigate and report findings only. **No fix, no PR.** The prompt walks the agent through investigation heuristics and then phased work: Phase 1 LangSmith, Phase 2 trace navigation, Phase 3 upstream trace, Phase 4 code/prompt investigation, Phase 5 report (root cause, evidence, impact, recommended fix, remaining unknowns).
+  </Accordion>
+  <Accordion title="rca-fix-and-pr — RCA, Fix & PR">
+    A full RCA, then implement the fix and open a PR. If a prior RCA is supplied in the "Previous Run Context" section, the agent may skip Phases 1–4 and jump to fix design and implementation (including tests and the `pnpm lint:all` / `pnpm test:all` pre-PR checks for loanlight-api), then open a PR (branch `fix/<desc>`, semantic commit, structured PR body, the mandatory Octy footer, and a review request to `@loanlight-engineering/eng-team`).
+
+    Prompt-tuning fixes are a special case: the agent must first call `fetch-instructions` with `{ type: "prompt-tuning" }` and follow the returned workflow.
+  </Accordion>
+  <Accordion title="ad-hoc — Ad Hoc">
+    Pre-fills issue context, related runs, and audit-run metadata, then leaves an empty "Your Task" for the operator to fill in. The bug reports UI seeds an editable textarea with this pre-fill, and the operator's text is sent as `customPrompt`. Unlike the fixed skills, `userInstructions` is ignored for ad-hoc because the custom prompt already carries the task.
+  </Accordion>
+</AccordionGroup>
+
+## Shared prompt fragments
+
+The fixed skills compose reusable fragments from `src/lib/oz-skills/shared.ts`:
+
+- `buildAuditRunMetadataSection` — renders the `AuditRunMetadata` (audit run started/completed/status plus the matching classify-split run timing).
+- `buildTraceLines` — renders the related LangSmith trace chips.
+- `buildUrlaContextSection` — auto-attaches the URLA-Extraction trace as extra context when it appears in `audit_run_traces` and is not already attached.
+- `buildUserInstructionsSection` — wraps `userInstructions` as an "Additional User Instructions" section.
+- `LANGSMITH_CONNECTION`, `INVESTIGATION_HEURISTICS`, `TRACE_NAVIGATION`, `UPSTREAM_TRACE`, `CODE_INVESTIGATION` — the shared phase text that both RCA and fix-and-PR draw from.
+
+`SKILL_LABELS` (in `oz-skills/index.ts`) maps skill ids to display names, and `buildPreviousRunsContextSection()` renders selected prior-run summaries.
+
+## Prompt-tuning instructions (on-demand, not a skill)
+
+Prompt tuning is delivered as a methodology fetched mid-run, not as a skill. The agent calls:
+
+```http
+POST /api/oz/tools/fetch-instructions
+Authorization: Bearer <access_token>
+X-Oz-Run-Id: <run_id>
+Content-Type: application/json
+
+{ "type": "prompt-tuning" }
+```
+
+The response is `{ type, instructions }`, where `instructions` is `PROMPT_TUNING_INSTRUCTIONS` from `src/lib/oz-skills/prompt-tuning-instructions.ts`. An unsupported `type` returns 400 with the list of `supported_types` (currently only `prompt-tuning`).
+
+The returned workflow is multi-phase:
+
+<Steps>
+  <Step title="Investigate the failing trace">
+    Pull the failing LangSmith trace for the target node.
+  </Step>
+  <Step title="Add a fixture">
+    Capture the trace input verbatim as a fixture under the node's `eval/fixtures/` directory.
+  </Step>
+  <Step title="Tune iteratively">
+    Run the tuning loop until the target eval passes 3 consecutive times. Progress is tracked in a `prompt-tuning-log.md` that is never committed.
+  </Step>
+  <Step title="Commit and open a PR">
+    Commit only the fixture and prompt files, then open a PR against loanlight-api `main`.
+  </Step>
+  <Step title="Report">
+    Close out via the completion webhook.
+  </Step>
+</Steps>
+
+<Note>
+The reason prompt tuning is on-demand rather than a skill: it is only relevant inside a fix-and-PR run that has already localized the problem to a node's prompt. Fetching it mid-run keeps the base prompt smaller and lets the agent pull the full methodology only when it needs it. See the [prompt tuning runbook](/runbooks/prompt-tuning).
+</Note>

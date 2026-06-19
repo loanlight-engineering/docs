@@ -1,0 +1,81 @@
+---
+title: Portal architecture (BFF)
+description: The stateless Backend-For-Frontend and portalApiClient proxy.
+icon: route
+---
+
+The portal is a stateless Backend-For-Frontend. Pages render against Next.js Route Handlers under `src/app/api/**`, which proxy to the [loanlight-api backend](/overview/repositories). The portal holds no pipeline business logic and no database.
+
+## How a request flows
+
+<Steps>
+  <Step title="Page or client calls a Next route handler">
+    A server component or client fetch hits a route under `src/app/api/**` (for example `/api/v2/audits/[auditRunId]/overview`).
+  </Step>
+  <Step title="The handler proxies via portalApiClient">
+    The handler resolves the caller's bearer token and lender id, then calls the backend through `portalApiClient`.
+  </Step>
+  <Step title="The backend serves /api/v1/portal/*">
+    `portalApiClient` targets `LOANLIGHT_API_URL` (default `http://localhost:3000`) with the prefix `/api/v1/portal`. The backend's `PortalAuthGuard`-protected modules do the real work.
+  </Step>
+  <Step title="The handler returns JSON to the page">
+    Responses flow back unchanged (or lightly shaped) to the page or client.
+  </Step>
+</Steps>
+
+## portalApiClient
+
+`src/lib/portal-api-client.ts` is the single proxy client.
+
+- **Base:** `LOANLIGHT_API_URL` + prefix `/api/v1/portal`.
+- **Methods:** `get`, `post`, `put`, `patch`, `delete`, `stream`, `formData`. Options: `{ headers, params, body, signal, token, lenderId }`. It sets `Authorization: Bearer <token>` and, when given, `x-lender-id`.
+- **Retry:** GET only, up to `MAX_RETRIES + 1 = 4` attempts on 5xx or network errors, exponential backoff (`BASE_DELAY_MS = 200`). Mutating methods (POST/PATCH/PUT/DELETE) are never retried, to preserve idempotency.
+- **Timeouts:** `REQUEST_TIMEOUT_MS = STREAM_TIMEOUT_MS = 30_000`.
+- **Errors:** `PortalApiError(statusCode, message, error, body?)`; `isPortalApiError` duck-types so it survives bundling. A network/unreachable error maps to `502` (never `0`, which is not a valid HTTP status); a timeout or abort maps to `408`.
+
+A sibling client `src/lib/guideline-client.ts` targets the separate guideline-chat module (`GUIDELINE_CHAT_API_URL`); it also retries GETs only.
+
+Supporting proxy helpers: `internal-admin-proxy.ts`, `portal-route-helpers.ts`, `portal-audits-proxy.ts` (partner audits auth resolution), and `results-exchange.ts`.
+
+## Stateless: no DB
+
+The portal has no `src/db` directory.
+
+<Warning>
+The App `CLAUDE.md` claim of `Schema: src/db/schema/*.ts` and `pnpm db:push` is wrong. The portal's only persistence touchpoints are S3 (`src/lib/s3.ts` uploads), SES (`src/lib/email/ses.ts` invite/reset emails), and JWT cookies. All real data lives in [loanlight-api](/overview/repositories).
+</Warning>
+
+## API route families
+
+Route handlers under `src/app/api/` are grouped roughly by feature:
+
+| Family | Covers |
+|---|---|
+| `auth/*` | callback, login, logout, me, sign-in |
+| `admin/*` | clients, users, lenders, rule-sets, staged-rules, staged-credit-rules, yaml-configs, shadow-audit-diffs, appraisal-runs, audit-log, dashboard, impersonate, widget-token, appraiser-deny-list |
+| `appraisal/*`, `appraisal-runs/*`, `appraisal-rules/*` | runs, pages, photos, pdf/pdf-url, corrections, key-field-reviews, rules, rule-overrides, re-extract, comment-chat, executive-metrics, metrics, comparison |
+| `credit/*`, `credit-rules/*` | credit runs and rules |
+| `income/*`, `bank-statements/*` | income analyses |
+| `classification/*` | document classification |
+| `chat/*` | guideline chat sessions, messages, feedback, current-documents |
+| `documents/*`, `feedback/*`, `lenders/*`, `lender-guideline-documents/*`, `dscr-agent/*`, `health` | misc |
+| `settings/*` | users, rules, rule-sets, credit-rule-sets, loan-programs, key-field-sets, key-field-catalog, agency-adoptions, appraiser-deny-list, lender-guideline-documents |
+| `v2/audits/[auditRunId]/*` | overview, credit, data-consistency, document-health, property-data, urla-completeness, documents/[filename]/pdf, checks-completed — the partner + staff results surface |
+
+## Every section needs a matching proxy route
+
+The results surface is served under `/api/v2/audits/:id/<section>`. Each backend section needs a matching Next proxy route handler. If the backend adds a new `api/v2/audits/:id/<section>`, the portal needs the corresponding handler under `src/app/api/v2/audits/[auditRunId]/<section>/` or the page cannot fetch it.
+
+<Note>
+The `/api/v2/audits/:id/*` family is special for auth: it has a middleware carve-out for partner GETs that requires a sub-segment past the id. See [authentication and roles](/portal/auth-and-roles) and the [partner results viewer](/portal/partner-results-viewer).
+</Note>
+
+## Tenant isolation (IDOR guards)
+
+Data is scoped by `lender_id` from the session; route handlers never trust a lender id from request params. A few load-bearing rules:
+
+- `lib/api/agency-adoptions.ts` intentionally omits `lenderId` (resolved server-side via `getPortalLenderId`).
+- `lib/api/admin-client-rules.ts` does accept `clientId` because admin proxies enforce `requireLenderAccess` on the backend. Keep it separate from the session-scoped file.
+- `scripts/check-no-x-lender-id.sh` is a CI guard: no `x-lender-id`/`x-user-id` forwarding under `app/api/v2/**`, `(detail)/loan-audits/**`, or `portal-audits-proxy.ts` (legitimate doc references must carry a `// CI-ALLOW:` marker).
+
+See [data flow](/concepts/data-flow) and [identity and auth](/concepts/identity-and-auth) for the wider picture.

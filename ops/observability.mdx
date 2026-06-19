@@ -1,0 +1,83 @@
+---
+title: Observability overview
+description: The LangSmith vs Datadog doctrine.
+icon: telescope
+---
+
+LoanLight runs two complementary observability planes. Knowing which one answers a
+given question is the difference between a 5-minute investigation and an hour of
+guessing.
+
+<Columns cols={2}>
+  <Card title="LangSmith" icon="brain" href="/ops/langsmith">
+    Source of truth for **agent reasoning**: prompts, model inputs and outputs,
+    and node-by-node LangGraph state. Use it when the question is "why did the
+    agent decide this?"
+  </Card>
+  <Card title="Datadog" icon="line-chart" href="/ops/datadog">
+    Source of truth for **system behaviour around the agents**: HTTP traffic,
+    errors, infrastructure and ECS metrics, third-party calls, logs, and RUM.
+    Use it when the question is "what happened in the system at runtime?"
+  </Card>
+</Columns>
+
+## The doctrine: LangSmith first, Datadog last
+
+The investigation order is codified in Octy's RCA system prompt
+(`octy/src/lib/oz-skills/index.ts`): exhaust LangSmith and the codebase first,
+and only open Datadog for a specific, concrete runtime question.
+
+This ordering exists because most reported audit bugs are reasoning problems, not
+infrastructure problems. A field came out wrong, a finding fired that should not
+have, a document was misclassified. Those answers live in the agent's trace, not
+in an APM flame graph.
+
+<Steps>
+  <Step title="Read the trace in LangSmith">
+    Find the run for the agent and loan. Read the node-by-node state, the prompt,
+    and the model output. Most field-level and finding-level bugs are explained
+    here. See [Tracing a bad field](/runbooks/tracing-a-bad-field).
+  </Step>
+  <Step title="Read the code">
+    Confirm what the node is supposed to do. The code is the source of truth when
+    a trace looks ambiguous.
+  </Step>
+  <Step title="Only then open Datadog">
+    Go to Datadog when you need a concrete runtime fact the trace cannot give
+    you: a vendor API timed out, the task ran out of memory, a queue backed up,
+    an HTTP request 500'd, or a node stalled. See
+    [Datadog](/ops/datadog).
+  </Step>
+</Steps>
+
+## When to use each
+
+| Question | Plane |
+|---|---|
+| Why did URLA extraction produce this value? | LangSmith |
+| Why did a PII finding fire on this field? | LangSmith |
+| Which prompt and model variant ran? | LangSmith |
+| Did a node stall or hang? | Datadog (`langgraph.node.stalled`) |
+| Did the appraisal worker OOM? | Datadog (ECS metrics) |
+| Did an ATTOM / HasData call fail or time out? | Datadog (APM third-party spans) |
+| Is the credit pipeline queue backed up? | Datadog (`loanlight.pipeline.*`) |
+| Did a portal page throw a 500? | Datadog (RUM + logs) |
+
+<Note>
+Datadog also wraps every LangGraph node in a span, so the two planes overlap at
+the node boundary. LangSmith tells you what the node *reasoned*; the Datadog
+`langgraph.node` span tells you how long it *took* and whether it errored or
+stalled. Use LangSmith for content, Datadog for behaviour.
+</Note>
+
+## What each plane is named
+
+The naming differs by plane and is a frequent source of confusion. The summary:
+
+- LangSmith projects are `loanlight-aus` (int/prod) and `loanlight-studio`
+  (LangGraph Studio). Runs are named `${agentType}-Loan-${loanId}`.
+- Datadog **APM service** names are `loanlight-api` and `loanlight-integrations`,
+  but Datadog **log service** tags are `llapi` and `llintegrations`.
+
+Both naming schemes are detailed on the per-plane pages:
+[LangSmith](/ops/langsmith) and [Datadog](/ops/datadog).

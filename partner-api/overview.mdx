@@ -1,0 +1,75 @@
+---
+title: Partner API overview
+description: The external lender/LOS-facing REST API under /api/v1/partner.
+icon: plug
+---
+
+The Partner API is the direct REST integration that external lenders and loan origination systems (LOS) use to run automated underwriting against LoanLight. It is one of the [three audit entry paths](/pipeline/triggers) into the audit pipeline (alongside the [Encompass EPC path](/integrations/encompass-overview) and the legacy LOS-pull path).
+
+All routes are mounted under the base path `/api/v1/partner`. The surface is implemented by two NestJS controllers in `loanlight-api/packages/api/src/partner-api`:
+
+- `PartnerLoansController` — `@Controller("api/v1/partner/loans")` — create loans, upload documents, and check loan readiness.
+- `PartnerAuditsController` — `@Controller("api/v1/partner/audits")` — trigger audits and retrieve results, errors, and classifications.
+
+Both controllers are decorated with `@UseInterceptors(PartnerAuthInterceptor, PartnerRateLimitInterceptor)` and `@ApiSecurity("partner-api-key")`. [Authentication](/partner-api/authentication) runs first and attaches the lender context to the request; [rate limiting](/partner-api/rate-limits-and-errors) runs second and reads that context.
+
+<Info>
+**Audience.** The Partner API is customer-facing — it is consumed by external lenders and LOS vendors. This page set currently lives in the internal engineering docs, but the API behaviour it documents is the same surface partners integrate against.
+</Info>
+
+## The flow: loan to audit to results
+
+A partner integration follows the same lifecycle every time: register a loan and its documents, wait for the loan to become audit-ready, trigger an audit, then poll for and read the results.
+
+<Steps>
+  <Step title="Create a loan">
+    `POST /api/v1/partner/loans` with the borrower's MISMO 3.4 XML (base64) plus supporting PDFs (base64). The loan row is created with `processing_status: "processing"`. This call does **not** trigger an audit. See [Loans API](/partner-api/loans).
+  </Step>
+  <Step title="Wait for readiness">
+    LoanLight asynchronously classifies the documents and indexes them into the loan's [LlamaCloud pipeline](/subsystems/llamacloud-retrieval). Poll `GET /api/v1/partner/loans/:loanId/status` until `status` is `ready_for_audit` (or `ready`) and classification is no longer in progress.
+  </Step>
+  <Step title="Trigger an audit">
+    `POST /api/v1/partner/audits` with the `loanId` and an optional `agents` allow-list. The audit run is created and the [agent pipeline](/pipeline/overview) executes in the background. See [Audits API](/partner-api/audits).
+  </Step>
+  <Step title="Poll the audit">
+    Poll `GET /api/v1/partner/audits/:auditId` until `status` is `complete`.
+  </Step>
+  <Step title="Read results">
+    `GET /api/v1/partner/audits/:auditId/results` for the structured findings, or `POST /api/v1/partner/audits/:auditId/results/access-url` for a short-lived portal viewer link. See [Results and access URLs](/partner-api/results-and-access-urls).
+  </Step>
+</Steps>
+
+For a runnable curl walkthrough of this exact flow, see the [Integration guide](/partner-api/integration-guide).
+
+## What the Partner API does (and does not) do
+
+- It owns loan ingest (loan row + S3 upload + pipeline + document registry), audit triggering, and result retrieval, all scoped to the authenticated lender.
+- It does **not** run the agents itself — it hands work to `IntegrationOrchestrationService.processAuditForPartner`, the same orchestrator the EPC path uses. See the [audit run pipeline](/pipeline/overview).
+- It does **not** block on document processing. Classification and indexing happen asynchronously at upload time; an external poller advances the loan to `ready_for_audit`. The partner path is deliberately poller-driven, not blocking.
+
+## Tenant isolation
+
+Every read is scoped by the `lenderId` resolved from the API key. `getLoanByIdAndLender`, `getAuditRunByLender`, `getAuditsByLoanAndLender`, and `getLoansForLender` all filter by lender, so cross-tenant access returns `404`, not `403`. The S3 prefix for every partner loan is `partner/{lenderId}/{loanId}`.
+
+## Navigation
+
+<Columns cols={2}>
+  <Card title="Authentication" icon="key" href="/partner-api/authentication">
+    The x-api-key header, WorkOS sk_* keys, and legacy hashed keys.
+  </Card>
+  <Card title="Rate limits and errors" icon="gauge" href="/partner-api/rate-limits-and-errors">
+    The 100 req/min sliding window and error responses.
+  </Card>
+  <Card title="Loans API" icon="file-text" href="/partner-api/loans">
+    Create loans, upload documents, and check status.
+  </Card>
+  <Card title="Audits API" icon="clipboard-check" href="/partner-api/audits">
+    Trigger audits and retrieve results, errors, and classifications.
+  </Card>
+  <Card title="Results and access URLs" icon="link" href="/partner-api/results-and-access-urls">
+    Result payload shape and short-lived viewer URLs.
+  </Card>
+  <Card title="Data model" icon="table" href="/partner-api/data-model">
+    Request and response schemas.
+  </Card>
+</Columns>

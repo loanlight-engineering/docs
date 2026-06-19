@@ -1,0 +1,115 @@
+---
+title: Lender configuration overview
+description: The per-tenant config mechanisms and how a lender is resolved per loan.
+icon: sliders-horizontal
+---
+
+A lender (DB table `lenders`) is the tenant boundary in LoanLight. Almost every per-lender behavior is driven by one of several independently-evolving configuration mechanisms. This page maps them and explains how a loan resolves to the right lender configuration at audit time.
+
+## The configuration mechanisms
+
+<CardGroup cols={2}>
+  <Card title="YAML config" icon="file-code" href="/lender-config/yaml-config">
+    Three structured sections (`document_expiration`, `red_flags`, `urla_completeness_rules`) that tune the document-health, property-red-flags, and URLA-completeness agents. Backed by either a DB store or legacy on-disk YAML.
+  </Card>
+  <Card title="Feature flags" icon="toggle-left" href="/lender-config/feature-flags-and-entitlements">
+    Per-lender `lender_feature_flags` rows that gate whole capabilities (appraisal review, credit review, guideline uploads, DSCR agent) and carry tunable thresholds.
+  </Card>
+  <Card title="Agent entitlements" icon="route" href="/lender-config/feature-flags-and-entitlements">
+    Per-(lender, agent) enable/disable rows in `lender_agent_entitlements`, read by the agent router to compute which agents run.
+  </Card>
+  <Card title="Overrides and guidelines" icon="list-checks" href="/lender-config/overrides-and-guidelines">
+    PII severity overrides, income rule overrides, appraiser deny lists, daily token budgets, guideline documents, and agency adoptions.
+  </Card>
+</CardGroup>
+
+These mechanisms do not share a single config object. They are separate tables and code paths that each read the lender independently. The only thing they have in common is the lender they key off.
+
+## How a lender is resolved per loan
+
+### The lender code lives in `lenders.config_profile`
+
+The lender-level code used for YAML config lookup is `lenders.config_profile` (text, nullable), for example `"LUXURY"` or `"luxury"`.
+
+<Warning>
+There is **no `lenders.lender_code` column**. A stale prompt or doc may claim one. The loan-level code is `loans.lender_code` (text); the lender-level config code is `lenders.config_profile`. The distinction is documented inline in `appraisal.processor.ts`.
+</Warning>
+
+`config_profile` has only a partial, **non-unique** index (`idx_lenders_config_profile`, `WHERE config_profile IS NOT NULL`), so collisions are schema-permitted. Resolution code that reads it pins ordering (`orderBy(asc(lenders.id)) limit 1`) to keep collisions deterministic.
+
+### Resolution path
+
+At audit time the code joins `audit_runs → loans → lenders`, reads `lenders.config_profile`, and falls back to the literal string `"DEFAULT"` (or `"default"`) when null. That string is the `lenderCode` passed to the config loader.
+
+| Call site | Fallback |
+|---|---|
+| `audit/services/audit-data-mapper.service.ts` | `config_profile \|\| "DEFAULT"` |
+| `integration-events/services/integration-orchestration.service.ts` | `config_profile \|\| "default"` |
+| `partner-api/services/authentication.service.ts` | `config_profile \|\| "default"` |
+| `integration-events/services/audit-agents-executor.service.ts` | selects `lenderConfigProfile: lenders.config_profile` |
+| `encompass/guards/encompass-requestor-auth.guard.ts` | selects `configProfile` |
+
+The fallback is case-insensitive in effect: `LenderConfigLoaderService` normalizes the code to uppercase before lookup, so `"default"` and `"DEFAULT"` resolve to the same `default.yaml` / DEFAULT rows.
+
+### String to UUID resolution
+
+`LenderIdentityService` (`langgraph/shared/lender-identity.service.ts`) turns a code string into a `lenders.id` UUID for the DB config path. It tries each of these in order (each pinned to `limit 1`):
+
+<Steps>
+  <Step title="UUID passthrough">A UUID input (matches `UUID_REGEX`) is returned as-is.</Step>
+  <Step title="config_profile">Exact match on `lenders.config_profile`.</Step>
+  <Step title="slug">Exact match on `lenders.slug`.</Step>
+  <Step title="name">Case-insensitive match on `lower(lenders.name)`.</Step>
+  <Step title="loan lender_code">`loans.lender_code` → `loans.lender_id` → `lenders.id`.</Step>
+  <Step title="YAML filename stem">Strip `.yaml`/`.yml` and match case-insensitively against `config_profile` or `name`.</Step>
+</Steps>
+
+`resolve(input)` throws `LenderIdentityNotFoundError` if nothing matches; in-flight lookups are deduped by `input.toLowerCase().trim()`. `resolveToId(input)` returns `null` instead of throwing, so a missing lender degrades to DEFAULT rather than crashing the audit.
+
+## Config loader and adapter architecture
+
+The public entry point is `LenderConfigLoaderService.loadConfig(lenderCode)` (`langgraph/shared/lender-config-loader.service.ts`). It stitches a `LenderConfig` envelope from up to three sections, asking `LenderAdapterResolver` per lender whether to read from disk or DB.
+
+```text
+loadConfig(lenderCode)
+  └─ normalize to UPPERCASE, check cache
+     └─ LenderAdapterResolver.resolve(code) → "disk" | "db"
+        ├─ "disk" → YamlFileAdapter (reads src/langgraph/lenders/<code>.yaml)
+        └─ "db"   → resolveToId(code) → YamlDbAdapter (reads lender_yaml_configs)
+     └─ if no section found anywhere → recurse loadConfig("DEFAULT")
+```
+
+`LenderAdapterResolver` (`langgraph/shared/lender-adapter-resolver.ts`) returns:
+
+1. `"db"` if the `FORCE_YAML_DB_LENDERS` env allowlist contains the code (reason `env-override`).
+2. `"disk"` if `fileAdapter.hasLender(code)` finds an on-disk YAML (reason `auto-detect-disk`).
+3. `"db"` otherwise (reason `auto-detect-db`).
+
+Because absence of a disk file auto-routes to DB, a **new lender can onboard purely by inserting `lender_yaml_configs` rows — no code deploy**. See [Lender YAML config](/lender-config/yaml-config) for the two stores and the parity monitor that compares them.
+
+<Warning>
+**The `sharedLenderConfigLoader` singleton trap.** `lender-config-loader.module.ts` builds a module-level singleton (`sharedLenderConfigLoader`) **without** the DB adapter or `LenderIdentityService`, for non-DI consumers (the LangGraph `propertyRedFlags` and `documentHealth` build functions when no DI loader is passed). That singleton cannot dispatch to the DB — a DB-routed lender silently degrades to the file adapter and then to DEFAULT.
+
+Production DB dispatch requires the NestJS DI instance of `LenderConfigLoaderService` from `LenderConfigLoaderModule` (which imports `DatabaseModule` and provides `YamlFileAdapter`, `YamlDbAdapter`, `LenderAdapterResolver`, and `LenderIdentityService`). `buildRedFlagsGraph(configLoader?)` and `buildDocumentHealthGraph(...configLoader?)` log a warning when called without a DI loader.
+</Warning>
+
+### Cache invalidation
+
+`loadConfig` caches per normalized code (the cached value may be `null`). `POST /api/v1/internal-admin/clear-cache` (`@Roles("super_admin")`, `modules/admin/cache-invalidation.controller.ts`) clears **both** the DI service cache and the `sharedLenderConfigLoader` singleton cache.
+
+## What reads what
+
+| Mechanism | Primary consumer |
+|---|---|
+| YAML `document_expiration` | Document-Health agent (`config.service.ts`), `LenderConfigService` |
+| YAML `red_flags` | Property-Red-Flags agent (`red-flags-config.service.ts`) |
+| YAML `urla_completeness_rules` | URLA completeness rules engine (`completeness-rules-config.service.ts`) |
+| `lender_feature_flags` | Appraisal pipeline, credit review, guideline docs, DSCR/key-field/income services, agent-router flags |
+| `lender_agent_entitlements` | [AgentRouterService](/agents/router-and-entitlements) |
+| `lender_pii_severity_overrides` | PII severity at audit write time (snapshotted onto findings) |
+| `lender_appraiser_deny_list` | Appraisal pipeline deny-list match |
+| `lender_daily_token_usage` | `BudgetGuardService` (comment chat/summary budgets) |
+| `lender_guideline_documents` | Guideline document upload/list/stream (gated by `enable_guideline_uploads`) |
+| `lender_agency_adoptions` | Appraisal agency-rules evaluation |
+
+Most CRUD that exists is on `PortalLendersController` (`/api/v1/portal/lenders/...`); agent entitlements have no portal CRUD and are seeded by migration.

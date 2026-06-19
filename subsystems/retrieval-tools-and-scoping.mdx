@@ -1,0 +1,166 @@
+---
+title: Retrieval tools and PII scoping
+description: The llc_retrieve tools and the deterministic file_id + page-range scoping push-down.
+icon: filter
+---
+
+The audit agents do not call `LlamaRestClient.retrieve` directly. They use two LangChain tools that
+wrap it (`langgraph/utils/retrieval.tools.ts`), and the [PII-Validation agent](/agents/pii-validation)
+layers a deterministic scoping push-down on top so retrieval only sees the documents a field is
+allowed to be validated against.
+
+For the underlying pipeline model and the `retrieve` defaults, see
+[LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
+
+## The retrieval tools
+
+<Tabs>
+  <Tab title="llc_retrieve (chunk-level)">
+    `createLlamaCloudRetrievalTool(llamaClient, pipelineId)`. Schema
+    `llamaCloudRetrievalToolSchema`: `{ query, params? }`, where `params` exposes `rerank_config`,
+    `alpha`, `files_top_k`, `hybrid`, `vector_top_k`, `bm25_top_k`, and `search_filters` (recursive
+    `MetadataFilters`). The `rerank_config.type` enum is `system_default | llm | cohere | bedrock |
+    score | disabled`.
+
+    Default `rerank_config` when the caller omits it: **`{ top_n: 100, type: "score" }`**. Each node
+    is normalized to `{ text, score, rerank_score, boost_detail, metadata, source }`; empty text is
+    filtered and the result is **capped at 50 snippets**.
+  </Tab>
+  <Tab title="llc_retrieve_full_file (file-level)">
+    `createLlamaCloudFullFileRetrievalTool(...)`. Schema `llamaCloudFullFileRetrievalToolSchema`:
+    `{ query, document_id?, params? }` with `dense_similarity_top_k`, `sparse_similarity_top_k`,
+    `alpha`, `files_top_k`, `rerank_config`, `search_filters`.
+
+    Default `rerank_config` when omitted: **`{ top_n: 15, type: "score" }`**. When `document_id` is
+    provided it injects `search_filters = { filters: [{ key: "file_id", value: document_id, operator:
+    "==" }], condition: "and" }`. Node cap: when `document_id` is set, **all** nodes are returned (the
+    retrieval is already single-file scoped); otherwise `min(2, files_top_k || 2)`.
+  </Tab>
+</Tabs>
+
+`executeRetrievalToolCalls` runs each tool call, filters empty text, slices to 50 per call, dedups by
+`text`, and slices the total to 100.
+
+## Filter primitives
+
+The `search_filters` payload is built from these primitives (`retrieval.tools.ts` /
+`retrieval.helpers.ts`):
+
+- `MetadataFilter = { key, value, operator }`. The full operator surface is `== > < != >= <= in nin
+  any all text_match text_match_insensitive contains is_empty`. `value` is a scalar, or an array for
+  `in/nin/any/all`.
+- `MetadataFilters = { filters: Array<MetadataFilter | MetadataFilters>, condition: "and" | "or" |
+  "not" }` — recursive, so nested boolean groups are supported.
+
+The keys that matter for PII scoping are **`file_id`** and **`page_label`** (the LlamaCloud chunk
+metadata keys).
+
+## Deterministic PII scoping (LOA-564)
+
+PII validation must not let the model choose which documents a field is checked against. It builds a
+deterministic doc-type + page-range filter from [classify-split](/subsystems/classify-split) segments
+and overrides whatever filter the LLM tried to set.
+
+<Steps>
+  <Step title="Build the classification map">
+    `prepare/node.ts::loadClassificationMap(loanId)` calls
+    `ClassifySplitPersistenceService.getActiveClassificationsForLoan(loanId)` and projects each
+    segment to `{ file_id (= loan_documents.llama_cloud_file_id), loan_document_id, segment_index,
+    split_type, classification_type, classification_status, requires_review, page_start, page_end,
+    file_name }`. Segments whose document has no `llama_cloud_file_id` yet are dropped (nothing to
+    filter on). It also loads the most recent non-dry-run `classify_split_runs.status`.
+  </Step>
+  <Step title="Select eligible segments">
+    `selectAllowSegments` keeps segments whose `split_type` or `classification_type` is in the field's
+    allow-list (`PiiDocTypeRulesService.getAllowedDocTypes(canonicalField, loanPurpose)`), excluding
+    `split_type === "UNKNOWN"` and `classification_type === "unknown"`. `isSalvageSegment` (a
+    `classification_failed` segment) is always included so PII coverage is not lost on un-typable
+    segments.
+  </Step>
+  <Step title="Build the search filter">
+    `buildEligibleFiles` unions per-file page ranges (overlapping ranges merged; adjacent kept
+    separate; a file with no numeric boundaries means "trust all pages"). `buildSearchFilter` then
+    produces the payload — top-level `condition: "or"`, all-pages files coalesced into one
+    `file_id ==`/`in` branch, and each ranged file as an `and` of `file_id ==` plus an `or` of its
+    page ranges using `page_label` comparisons.
+  </Step>
+</Steps>
+
+Example payload shape:
+
+```jsonc
+{
+  "condition": "or",
+  "filters": [
+    { "key": "file_id", "value": ["A", "B"], "operator": "in" },   // all-pages files
+    { "condition": "and", "filters": [                              // ranged file C
+      { "key": "file_id", "value": "C", "operator": "==" },
+      { "condition": "or", "filters": [
+        { "condition": "and", "filters": [
+          { "key": "page_label", "value": 1, "operator": ">=" },
+          { "key": "page_label", "value": 5, "operator": "<=" }
+        ]},
+        { "condition": "and", "filters": [
+          { "key": "page_label", "value": 7, "operator": ">=" },
+          { "key": "page_label", "value": 8, "operator": "<=" }
+        ]}
+      ]}
+    ]}
+  ]
+}
+```
+
+## The override
+
+In `retrieval.helpers.ts::retrieveDocumentSnippets`, the model emits `llc_retrieve` tool calls and the
+node applies:
+
+```ts
+const params = args.searchFilters
+  ? { ...baseParams, search_filters: args.searchFilters }
+  : baseParams;
+```
+
+<Warning>
+`args.searchFilters` here is the **deterministic** doc-type filter, and it overrides any
+`search_filters` the LLM tried to set. PII scoping must not depend on model behavior. The override is
+recorded as `search_filters_overridden` in LangSmith metadata.
+</Warning>
+
+## Scoping decision tree
+
+`validateField/node.ts::computeScoping` decides whether a field is scoped, whole-index, or skipped:
+
+| Situation | Outcome |
+|---|---|
+| No `PiiDocTypeRulesService` (studio/test DI gap) | whole-index, WARN `pii.scoping_skipped` |
+| Field does not canonicalize, or has no rules | whole-index |
+| `eligibleFiles` empty, classification map empty (Scenario A — classify-split never ran) | whole-index fallback, WARN |
+| `eligibleFiles` empty, map non-empty but run status ≠ `complete` | whole-index fallback, WARN `pii.scoping_skipped_classify_split_incomplete` |
+| `eligibleFiles` empty, map non-empty and run status = `complete` (Scenario B) | field **skipped** entirely, WARN `pii.scoping_no_eligible_docs` |
+| Otherwise | `searchFilters = buildSearchFilter(eligibleFiles)`, LOG `pii.scoping_active` |
+
+The filter is **trusted** — there is no post-retrieval eligibility filtering of snippets. As a smoke
+alarm, any returned snippet whose `metadata.file_id` falls outside the eligible set raises WARN
+`pii.pushdown_leak` (LlamaCloud not honoring `search_filters`).
+
+## Replaying a scoping decision
+
+The `pii-scoping-decision` is replayable from these same inputs: the field's allow-list, the active
+classification map, and the run status. See the
+[PII scoping debug runbook](/runbooks/pii-scoping-debug) for tracing why a field was scoped,
+whole-indexed, or skipped, and [PII-Validation agent](/agents/pii-validation) for the agent context.
+
+## Other agents' retrieval params
+
+For reference, the per-agent params that flow through these tools (none use the bare defaults):
+
+| Call site | Params | search_filters |
+|---|---|---|
+| PII core retrieval prompt | model hints: `alpha 0.3, hybrid true, rerank true, top_k 64, bm25_top_k 100, files_top_k 5` | deterministically overridden (above) |
+| Signature verification | `vector_top_k 24, bm25_top_k 80, alpha 0.35, rerank_config { top_n 50, type score }` | `or` of `document_id == docId` and `file_id == docId` |
+| Doc-expiration strategy probe | `vector_top_k 1, bm25_top_k 1, rerank_config { top_n 1, type disabled }` | `file_id == fileId` |
+| Doc-expiration retrieval prompt | 42 fixed full-text searches; "do not use search_filters" | none |
+| Dedupe arbitration | `{ files_top_k: 1 }` | none |
+
+The `pipelineId` is threaded into each agent's graph state and originates from `loans.llc_pipeline_id`.

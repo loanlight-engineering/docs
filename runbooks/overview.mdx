@@ -1,0 +1,60 @@
+---
+title: Debugging runbooks
+description: Practical playbooks for investigating audit issues with Octy and the traces.
+icon: book-open-check
+---
+
+These runbooks are the step-by-step methodology for investigating audit problems in LoanLight. They are written for engineers debugging by hand and for the [Octy](/octy/overview) Oz agent investigating a reported issue. Each one walks a specific failure shape from symptom to root cause.
+
+Every audit run leaves two kinds of evidence behind: the agents' reasoning (in LangSmith) and the system behaviour around them (in Datadog). The runbooks lean on both, in a deliberate order.
+
+## Root-cause discipline
+
+The single most important rule, baked into the Oz base prompt as "Never stop at the surface": a wrong field, a missing verdict, or a failed run is a symptom. Do not stop when you can describe the symptom. Stop only when you can point at the exact node, prompt, line of code, or library default that first produced the wrong value, and explain why it did so.
+
+A finding such as "the SSN is wrong in the URLA extraction output" is a symptom. The root cause is the specific reason the value became wrong — for example, an XML parser coercing a leading-zero SSN to a number, or a per-field scoping rule excluding the only document that carried the correct value. The runbooks exist to push you from the first to the second.
+
+<Warning>
+  When the evidence runs out, say so explicitly. Record what you could not verify rather than guessing a plausible cause. A confident wrong root cause is worse than an honest "unknown — here is what I ruled out."
+</Warning>
+
+## LangSmith first, Datadog last
+
+LoanLight has two observability planes, and they answer different questions. Reach for them in this order.
+
+<Steps>
+  <Step title="LangSmith — agent reasoning">
+    LangSmith is the source of truth for what an agent thought: prompts, model inputs and outputs, and node-by-node state. Runs live in project `loanlight-aus` and are named `${agentType}-Loan-${loanId}`. Almost every "the agent produced the wrong answer" question is answered here. Start here for any field-level or verdict-level problem. See [LangSmith](/ops/langsmith).
+  </Step>
+  <Step title="Code and node_modules — the implementation">
+    Once the trace points at a node, map that node to its source under `packages/api/src/langgraph/agents/` and read the prompt and code that produced the output. When a value looks like a library artefact (a coerced number, a default, a dropped field), read the third-party library in `node_modules` rather than assuming its behaviour.
+  </Step>
+  <Step title="Datadog — system behaviour, last resort">
+    Datadog is the source of truth for HTTP, errors, infrastructure, and third-party call behaviour around the agents. Use it when the problem is not in the reasoning: a run that never started, an S3 download that failed, a LlamaCloud timeout, a queue that did not drain. It is the last resort for agent-output bugs, not the first. See [Datadog](/ops/datadog) and [observability overview](/ops/observability).
+  </Step>
+</Steps>
+
+The ordering is not arbitrary. Most reported issues are "this field is wrong" or "this verdict is missing," and both are reasoning problems whose evidence is in LangSmith. Datadog tells you the pipeline ran; LangSmith tells you what it concluded and why.
+
+## The runbooks
+
+<Columns cols={2}>
+  <Card title="Tracing a bad field value" icon="crosshair" href="/runbooks/tracing-a-bad-field">
+    Follow a wrong value back to where it first became wrong, across both sides of a mismatch.
+  </Card>
+  <Card title="Investigating a failed or incomplete run" icon="circle-x" href="/runbooks/investigating-a-failed-run">
+    Diagnose missing verdicts and failed runs. Check `audit_errors` first; per-agent failures do not fail the run.
+  </Card>
+  <Card title="Debugging PII retrieval scoping" icon="filter" href="/runbooks/pii-scoping-debug">
+    Inspect why a PII field was scoped to specific documents or fell back to whole-loan search.
+  </Card>
+  <Card title="Prompt tuning workflow" icon="sliders-horizontal" href="/runbooks/prompt-tuning">
+    Fix agent behaviour with a prompt change plus an eval fixture, validated by an iterative loop.
+  </Card>
+</Columns>
+
+## Before you start
+
+Most investigations need three identifiers: the `audit_run_id`, the `loan_id`, and one or more LangSmith trace references. A reported issue in Octy already carries these — they are stored on the `octy_issues` row (`audit_run_id`, `loan_id`, `related_traces[]`, and the broader `audit_run_traces[]`). If you are debugging without an Octy issue, pull them from the portal loan-lookup or from the [audit run](/concepts/audit-run) record.
+
+Keep the pipeline shape in mind as you go: Phase 1 runs classification, URLA extraction, and LlamaCloud indexing in parallel; a barrier waits for classification; then the Phase 2/3 audit agents run. See the [pipeline overview](/pipeline/overview) and [lifecycle and dedup](/pipeline/lifecycle-and-dedup) for the full flow.

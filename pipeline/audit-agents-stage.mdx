@@ -1,0 +1,94 @@
+---
+title: Audit agents stage
+description: "Phase 2/3: agent selection, execution order, and error handling."
+icon: boxes
+---
+
+Phase 2/3 is owned by `AuditAgentsExecutor.executeAuditAgents` (`integration-events/services/audit-agents-executor.service.ts`). It runs the audit agents in two parallel batches and records per-agent failures without failing the run.
+
+## Agent selection
+
+When `agents` is empty or undefined, all agents run. Otherwise the executor checks membership against the canonical agent name strings:
+
+| Flag | Agent type string | Agent page |
+|---|---|---|
+| `shouldRunPii` | `piiValidation` | [PII validation](/agents/pii-validation) |
+| `shouldRunDocHealth` | `documentHealth` | [Document health](/agents/document-health) |
+| `shouldRunUrlaExtraction` | `urlaExtraction` | [URLA extraction](/agents/urla-extraction) |
+| `shouldRunPropertyData` | `propertyData` | [Property data](/agents/property-data) |
+| `shouldRunRedFlags` | `redFlags` | [Property red flags](/agents/property-red-flags) |
+| `shouldRunCreditEvaluation` | `creditEvaluation` | [Credit evaluation](/agents/credit-evaluation) |
+
+The `agents` allow-list comes from the Partner DTO, the EPC router flip, or is left undefined to run all. See [Router and entitlements](/agents/router-and-entitlements) for how the flag-gated router populates this.
+
+## Setup
+
+Before launching agents, the executor:
+
+- Generates a shared synthetic `documentId = uuidv4()` passed to the graphs.
+- Resolves and persists the expected closing date: `resolveExpectedClosingDate({ override, estimated, scheduled, closing })` from `loans.{estimated_closing_date, loan_scheduled_closing_date, closing_date}`, written to `audit_runs.expected_closing_date`.
+- Re-resolves the canonical loan program via `lenderConfigService.resolveProgram(...)`.
+- Parses `bottomRatioPercent` and normalizes citizenship countries.
+- Reuses `urlaPreprocessingData` (`loanContext`, `urlaExtractionResultData`) from Phase 1 when present; on targeted or manual paths it runs URLA preprocessing inline as a fallback.
+
+## Phase 2 (parallel via `Promise.allSettled`)
+
+Runs `piiValidation`, `propertyData`, and `creditEvaluation`.
+
+<AccordionGroup>
+  <Accordion title="piiValidation">
+    `createPiiValidationGraphWithSharedAuditRun(...)` with `fieldsOverride = urlaExtractionResultData?.transformedPiiFields`. Falls back to LLM extraction if the override is absent.
+  </Accordion>
+  <Accordion title="propertyData">
+    `createPropertyDataGraphWithSharedAuditRun(...)` with `addressOverrides` and `borrowerHousingExpenseType` (which feeds the refinance ATTOM gate, primary borrower only).
+  </Accordion>
+  <Accordion title="creditEvaluation">
+    Built via `buildCreditEvaluationPhase2Promise(...)`. Income is parsed from the primary borrower's `currentEmployment.monthlyIncome.total`; the borrower address, name, and SSN-last4 are built via `buildCreditLoanContext`. See gating below.
+  </Accordion>
+</AccordionGroup>
+
+After Phase 2, the executor enriches `loanContext.title_held_in_trust` from `propertyData.consolidatedSubject.ownership.trustIndicator` before Phase 3.
+
+## Phase 3 (parallel via `Promise.allSettled`)
+
+Runs the agents that depend on Phase 2 output.
+
+<AccordionGroup>
+  <Accordion title="documentHealth">
+    `createDocumentHealthGraphWithSharedAuditRun(...)` receives the enriched `loanContext`, the resolved expected closing date, and the **raw** `loanProgram` option (plus `obDocType`, `nonQmDocType`, `loanType`) — it resolves the program internally. Property red flags, by contrast, is passed the already-`resolvedLoanProgram`.
+  </Accordion>
+  <Accordion title="redFlags">
+    `runPropertyRedFlags(loanId, auditRunId, propertyData.consolidatedSubject, propertyData.consolidatedBorrower, primaryBorrowerUrla, lenderCode, allBorrowerNames, resolvedLoanProgram)` — depends on the consolidated property output from Phase 2.
+  </Accordion>
+</AccordionGroup>
+
+## Credit gating and fan-out
+
+`buildCreditEvaluationPhase2Promise(...)` returns `undefined` (skip credit) when any of these hold:
+
+- `hasClassifiedCreditReportForLoan(loanId)` is false. This query joins `document_classifications` → `loan_documents` → `classify_split_runs`, requiring `classification_type IN CREDIT_REPORT_CLASSIFICATION_TYPES`, `classification_status = "classified"`, `is_dry_run = false`, `deleted_at IS NULL`, and `superseded_by IS NULL`.
+- `creditS3Bucket` is missing.
+- `getCreditEvaluationLoanContext(loanId, lenderCode)` returns null (fails closed when `loans.lender_id` is null).
+
+<Warning>
+`CREDIT_REPORT_CLASSIFICATION_TYPES` is a three-value allowlist (`integration-events/constants/credit-report-classifications.ts`): `credit_report`, `credit_report_trimerge`, `credit_report_single`. A strict `eq("credit_report")` would silently drop most real credit reports in production.
+</Warning>
+
+When credit runs, `downloadDocumentByLoanIdAndClassification(...)` returns a settled array of per-document results. Each fulfilled document spawns a `createCreditEvaluationGraphWithSharedAuditRun(...)` call; graph rejections are collected into an `AggregateError` with `auditedCreditDocumentId` on each `cause`. Per-document failures write terminal `credit_runs` rows via `writeFailedSharedAuditCreditRun(...)`. Credit runs on shadow audits the same as any other agent.
+
+## Per-agent error handling
+
+For each settled `[agentName, result]`:
+
+- `ledgerObserver.recordSettled(auditRunId, agentName, result)` (flag-gated, best-effort; never changes selection). See [Runs ledger](/agents/runs-ledger).
+- `fulfilled` → log success.
+- `rejected` with an `AggregateError` (credit's per-document fan-out) → one `saveAuditError` row per inner error, carrying `auditedCreditDocumentId` from `err.cause`.
+- Other `rejected` → a single `saveAuditError({ auditRunId, agentName, errorType: classifyAuditError(reason, EXECUTING_AGENTS), errorMessage, errorDetails })`.
+
+<Warning>
+Per-agent rejections do not fail the audit. The run still calls `completeAuditRun`; failures are recorded only in `audit_errors`. `failAuditRun` is reserved for infrastructure failures (XML download, classification, S3 retrieval, lender resolution) caught in the outer orchestrator. The canonical ADR is `docs/adr/ADR-audit-pipeline-error-semantics.md`.
+</Warning>
+
+## Options reference
+
+`ExecuteAuditAgentsOptions` (`integration-orchestration.types.ts`): `auditRunId, loanId, pipelineId, mismoXml, creditS3Bucket?, estimatedClosingDate?, loanScheduledClosingDate?, closingDate?, lenderCode?, agents?, loanProgram?, obDocType?, nonQmDocType?, loanType?, bottomRatioPercent?, borrowerCountryOfCitizenship?, coborrowerCountryOfCitizenship?, urlaPreprocessingData?`.

@@ -1,0 +1,102 @@
+---
+title: Tracing a bad field value
+description: Follow a wrong field value back to where it first became wrong.
+icon: crosshair
+---
+
+A reported issue usually points at a single wrong value: an SSN that lost its leading zero, a borrower name that does not match the documents, an address that came out garbled. Your job is not to confirm the value is wrong — the reporter already did that. Your job is to find the exact place it *first* became wrong and explain why.
+
+## The leading-zero SSN pattern
+
+The canonical example, and the cautionary tale in the Oz base prompt, is a Social Security Number that should be `012-34-5678` but appears as `12-34-5678` (or `12345678`) somewhere downstream. The surface symptom is "the SSN is wrong." There are several distinct root causes that all present this way:
+
+- A MISMO XML parser coerced the `<SSN>` value to a number, dropping the leading zero before extraction ever ran.
+- The URLA extraction prompt or schema accepted a value that had already been coerced upstream.
+- The PII validation comparison normalized the two sides differently, so a correct value was flagged as a mismatch.
+
+These have different fixes. The discipline is to keep asking "where did the zero exist, and where did it disappear?" until you find the single transition.
+
+<Note>
+  LoanLight has a specific defence here: `trimMismoXmlByPartyLabel` (URLA extraction's `preprocess-xml` node) parses MISMO with `fast-xml-parser` configured `parseTagValue: false` precisely so leading zeros in SSN/ITIN survive trimming. URLA extraction also pads 7- or 8-digit SSN/ITIN values to 9 digits with leading zeros (`formatSSNOrITIN`) and never pads values of 6 digits or fewer. If a leading zero is missing, check whether one of these defences was bypassed — for example a code path that re-parses XML with default settings.
+</Note>
+
+## Pull the trace for the agent that owns the field
+
+Map the field to the agent that produced it, then open that agent's LangSmith run. Runs live in project `loanlight-aus` and are named `${agentType}-Loan-${loanId}`. Filter by the `auditRunId` metadata (the portal and Octy surface trace links per audit run via `GET /api/langsmith/runs?auditRunId=`).
+
+| Field family | Owning agent | LangSmith runName |
+|---|---|---|
+| Name, DOB, SSN, ITIN, addresses, marital status, employer | [PII-Validation](/agents/pii-validation) and [URLA-Extraction](/agents/urla-extraction) | `PII-Validation`, `URLA-Extraction` |
+| Any URLA / Form 1003 section value | [URLA-Extraction](/agents/urla-extraction) | `URLA-Extraction` |
+| Document classification / bucket | [Pre-Audit-Classification](/agents/pre-audit-classification) | `Pre-Audit-Classification` |
+
+For PII fields specifically, two agents touch the value: URLA extraction produces the MISMO-side value (`fieldsOverride`/`transformedPiiFields`), and PII validation compares it against the document corpus. A wrong "MISMO value" is an extraction bug; a wrong *verdict* about a correct value is a validation bug. Decide which one you are chasing before going deeper.
+
+<Tip>
+  Octy automatically attaches the URLA-Extraction trace as extra context even when the reporter only linked a PII trace, because PII field values originate from URLA extraction. If you are debugging by hand, open both — the URLA trace is where the value was born.
+</Tip>
+
+## Map the node to code
+
+Once the trace is open, find the node whose output is wrong and map it to its source. The agents live under `loanlight-api/packages/api/src/langgraph/agents/`. The useful node-to-code anchors:
+
+<AccordionGroup>
+  <Accordion title="URLA-Extraction (the MISMO-side value)">
+    - `nodes/preprocessXml/node.ts` — trims MISMO to the target borrower (`trimMismoXmlByPartyLabel`, `parseTagValue: false`). Skipped only for a single standalone borrower.
+    - `nodes/extractSection1/node.ts` — Section 1 borrower info and income; the only node that runs a tool loop (up to 25 iterations) before a structured-output pass. Names, SSN, ITIN, DOB, addresses, employment.
+    - `nodes/merge/node.ts` — combines per-section results into one `UrlApplicationView`.
+    - `transformers/pii-transformer.ts` — `transformAllBorrowersToPiiFields` builds the `PiiField[]` handed to PII validation. ZIP normalized to `XXXXX-XXXX`; 7/8-digit SSN/ITIN padded to `XXX-XX-XXXX`.
+
+    Model: OpenAI `gpt-4.1`, temperature 0. This agent is not Claude-based.
+  </Accordion>
+  <Accordion title="PII-Validation (the verdict about the value)">
+    - `nodes/planValidation/node.ts` — when `fieldsOverride` is present (the production path) the LLM is skipped and the pre-extracted fields are used. `normalizeFieldNames` canonicalizes keys and runs `formatSSNOrITIN`.
+    - `nodes/validateField/node.ts` — the heart of the agent: scoping, retrieval, per-document LLM validation, aggregation. Field comparison mode lives in `registry/index.ts` (`digitsOnly` for SSN/ITIN, `caseInsensitive` for names, `addressNormalized` for addresses, `dateNormalized` for DOB).
+    - `nodes/validateField/normalize/normalize.ts` — the normalizers each comparison mode applies. A false mismatch is often a normalization gap (for example a name suffix or account-titling designation not stripped).
+    - Post-LLM safety nets in `validation.helpers.ts` override the model: digits-only SSN with no mask and not 9 digits is treated as an unreadable OCR artefact (`hasIssue=false`, `issueKind="missing"`), not a mismatch.
+  </Accordion>
+</AccordionGroup>
+
+Read the prompt that drove the node, not just the code. For each section node the prompt injects `SCHEMA_MAPPING_INSTRUCTIONS` with XPath-like mappings; a wrong mapping is a prompt bug, not a parser bug.
+
+## Trace both sides of a mismatch
+
+A PII "inconsistent" finding is an assertion that two values disagree: the MISMO value and a document value. Both can be wrong, and the finding is only as trustworthy as the weaker side. Always pull both:
+
+<Steps>
+  <Step title="The MISMO side">
+    In the PII trace, the `validate-field` state carries `xmlValue` (the value extracted from MISMO via URLA extraction). Confirm it is correct by cross-checking the URLA-Extraction trace and, if needed, the raw `mismo.xml` in S3 (Octy's `loan-s3-object` tool returns a presigned URL; see [the Oz tool API](/octy/oz-tool-api)).
+  </Step>
+  <Step title="The document side">
+    The finding's `documentValidations[]` carry `docValue`, `pageRef`, and a `chunkReference`. Find the retrieved snippet in the trace (the `llc_retrieve` tool calls and the `score_sort`/`rerank`/`dedupe`/`selection` child runs). Confirm the snippet text actually contains what the verdict claims. A wrong `docValue` is a retrieval or per-document-LLM problem, not an extraction problem.
+  </Step>
+  <Step title="Decide which side moved">
+    If the MISMO value is correct and the document genuinely disagrees, the finding is real. If both agree once normalized, you are looking at a normalization or comparison-mode bug. If the document side is empty or unreadable, remember zero-retrieval is deliberately *not* a finding (logged `pii.zero_retrieval`), and unreadable SSN chunks are surfaced as `missing`, not `inconsistent`.
+  </Step>
+</Steps>
+
+## Multi-borrower MISMO caution
+
+MISMO files routinely carry more than one borrower party, and party-mixing is a frequent source of "wrong value" reports that are really "right value, wrong borrower" reports.
+
+- URLA extraction runs **once per borrower party** (`extract-borrower-data` fans out per credit group). Before extraction, `preprocess-xml` trims the MISMO to a single `<PARTY>` matched by `xlink:label == BORROWER_N` so one borrower's fields cannot bleed into another's. Trimming is skipped only when there is exactly one standalone borrower.
+- The PII validation prompts enforce subject attribution: a value found for a *different* borrower is reported `hasIssue=false, issueKind="missing"` (not a mismatch), and a document that belongs to the wrong person is `identity_mismatch`.
+- When a value looks wrong, first confirm you are reading the trace for the *correct borrower label*. A co-borrower's SSN appearing under the primary borrower is an attribution bug, and the fix is usually in trimming or in the subject-attribution prompt rules — not in the value itself.
+
+<Warning>
+  The URLA completeness read API surfaces only `BORROWER_1`'s findings even though findings are persisted per borrower (`urla_rules_engine_results` is unique per `(audit_run_id, borrower_label)`). If a co-borrower problem is invisible in the portal, query `urla-rules-engine-results` and `urla-rules-findings` directly rather than concluding nothing was found. See [URLA completeness](/agents/urla-completeness).
+</Warning>
+
+## Library-default suspects
+
+When a value looks mangled in a way no prompt would produce — a number where a string belongs, a dropped leading zero, a date in the wrong format, a truncated array — suspect a third-party library default before suspecting the model. Read the library in `node_modules`; do not assume its behaviour.
+
+Common offenders in this codebase:
+
+- `fast-xml-parser` coercing numeric-looking tag values when `parseTagValue` is left at its default. This is exactly why URLA trimming sets `parseTagValue: false`.
+- `Buffer.toJSON()` inflating PDF buffers ~280× — the reason raw buffers are kept out of graph state and LangSmith payloads. A trace that looks like it is missing document content may simply never have carried the buffer by design.
+- LlamaCloud retrieval defaults: `files_top_k` is `5`, not `3` (a code comment says "3" and is wrong), and `alpha 0.35` is keyword-leaning (`0.0` = pure keyword, `1.0` = pure semantic). If retrieval missed a document, do not assume the weights are what an out-of-date comment claims. See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
+
+## When the bug is in scoping, not the value
+
+If the document that holds the correct value was never retrieved, the value is not wrong — it was never seen. That is a retrieval scoping problem, and it has its own runbook: [Debugging PII retrieval scoping](/runbooks/pii-scoping-debug).

@@ -1,0 +1,106 @@
+---
+title: Legacy Dev Connect (deprecated)
+description: The deprecated Encompass Dev Connect LOS endpoints and stub provider.
+icon: ban
+---
+
+<Warning>
+This page documents a **deprecated** integration generation. The production path is EPC over
+SQS — see [Encompass and EPC overview](/integrations/encompass-overview). Ignore this path
+unless you are explicitly working on Dev Connect. The Encompass `LosProvider` is a
+non-functional stub, so the webhook path fails at runtime.
+</Warning>
+
+LoanLight's earliest Encompass integration pulled loan data and documents directly from the
+Encompass REST API rather than reading them from S3. Two HTTP endpoints remain wired for it.
+
+## Endpoints
+
+### POST /api/v1/los/aus
+
+`LosController.processAusRequest` — the Dev Connect web-form AUS request (provider
+`dev-connect`).
+
+- Header auth: `authcode` + `clientid` (`@ApiSecurity("encompass-auth")`), validated by
+  `AuthenticationService.validateAuthHeaders` (which accepts many aliases).
+- Calls `DevConnectAuditOrchestrationService.perform(...)` (not awaited), which pulls the loan
+  and documents from the Encompass REST API via `DevConnectProvider`, persists them, processes
+  documents, generates audit reports, and completes the run.
+
+This is the only Dev Connect endpoint with a working provider.
+
+### POST /api/v1/los/aus/webhook
+
+`LosController.processAusWebhook` — the Encompass field-change webhook (provider `encompass`).
+
+- Protected by the interceptor chain documented in
+  [EPC webhook security](/integrations/epc-webhook-security): signature, requestor-id,
+  `CX.LLAUS` field gate, rate limit.
+- Returns HTTP **200** JSON `{ success, message, loanId, originalLoanId }`.
+- Fires `EncompassAuditOrchestrationService.perform(...)` via `void` (fire-and-forget); a code
+  comment flags the inline processing as something to move to a queue.
+
+<Warning>
+`EncompassAuditOrchestrationService.perform` delegates to `LosService.processLoan("encompass")`
+→ the Encompass `LosProvider`, whose `authenticate`, `getLoanData`, `getDocuments`, and
+`downloadDocuments` **all `throw new Error("Not implemented")`**. The webhook path therefore
+fails at runtime. LoanLight does not pull loans or documents from the Encompass REST API on the
+EPC path. Do not confuse this 200 webhook with the internal test shim
+`POST /api/v1/integration-events/process`, which returns 202.
+</Warning>
+
+### POST /api/v1/los/audit/loan/status
+
+`LosController.getLoanAuditStatus` is a shared status poller (POST to dodge CORS), used by older
+clients. Body `{ loanId }`; returns `loanId, originalLoanId, auditRunId, status
+(in_progress | completed | error | no_audits), sseEndpoint (/api/v1/events?loanId=...)`, and
+related fields. It auto-resumes an incomplete run older than 30 minutes via
+`DocumentProcessingService.resumeIncompleteAuditRun` (fire-and-forget). Both `audit_runs`
+SELECTs are pinned to `orderBy(desc(started_at), desc(run_number)).limit(1)`.
+
+## The stub provider
+
+`los/providers/encompass/encompass.provider.ts` is the `EncompassProvider`. Every data method
+throws `Not implemented`:
+
+```ts
+authenticate()      // throw new Error("Not implemented")
+getLoanData()       // throw new Error("Not implemented")
+getDocuments()      // throw new Error("Not implemented")
+downloadDocuments() // throw new Error("Not implemented")
+```
+
+`BaseLosProvider.processLoanRequest` calls `getLoanData` and `getDocuments`, so any path that
+routes to this provider fails. The working Dev Connect flow uses `DevConnectProvider` instead.
+
+`LosService` is a provider registry keyed by `LosProviderType` (`dev-connect | encompass |
+mock`); DevConnect and Encompass providers are registered in `LosModule.onModuleInit`. Note the
+`EncompassRequestorAuthGuard` (used by the modern EPC results-access endpoint) lives in a
+separate `EncompassPluginModule`, distinct from `los/providers/encompass/encompass.module.ts`.
+
+## Dev Connect configuration
+
+`DevConnectConfigService` (`los/providers/dev-connect/dev-connect.config.ts`):
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `ENCOMPASS_STANDARD_URL` | `https://api.elliemae.com` | Standard Encompass API base. |
+| `ENCOMPASS_CONCEPT_URL` | `https://concept.api.elliemae.com` | Concept (sandbox) API base. |
+| `ENCOMPASS_REDIRECT_URL` | — | OAuth redirect URL. |
+| `DEVCONNECT_CLIENT_CREDENTIALS` | — | Auth-code clients (JSON). |
+| `DEVCONNECT_RESOURCE_OWNER_CREDENTIALS` | — | Resource-owner clients (JSON): `{ clientId: { userName, password, oauthClientId, oauthClientSecret, credentialType } }`. `credentialType` ∈ `standard | concept`. |
+
+Secrets are `$`-unescaped after `JSON.parse`. In local dev,
+`DEVCONNECT_RESOURCE_OWNER_CREDENTIALS`'s first key is also used as the default
+`X-Requestor-ID` (see [EPC webhook security](/integrations/epc-webhook-security)).
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Encompass and EPC overview" href="/integrations/encompass-overview" icon="plug">
+    The three integration generations and the production path.
+  </Card>
+  <Card title="EPC webhook security" href="/integrations/epc-webhook-security" icon="shield">
+    The interceptor chain on the webhook endpoint.
+  </Card>
+</Columns>

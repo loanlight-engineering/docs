@@ -1,0 +1,75 @@
+---
+title: Authentication and access control
+description: WorkOS gating and the Oz tool API exception.
+icon: lock
+---
+
+Octy is internal-only. Every protected route requires a WorkOS-authenticated user whose email ends in `@loanlight.com`. The one deliberate exception is the Oz tool callback API, which the running agent authenticates with a per-run bearer token instead.
+
+## WorkOS AuthKit
+
+Authentication runs through `@loanlight-engineering/shared-auth` (a WorkOS AuthKit wrapper). The Next.js middleware (`src/middleware.ts`) calls `withAuth` on covered routes and applies security headers (CSP, `X-Frame-Options: SAMEORIGIN`, HSTS, `X-Content-Type-Options: nosniff`, Referrer-Policy, Permissions-Policy).
+
+The thin auth routes wrap shared-auth:
+
+| Route | Handler |
+|---|---|
+| `GET /api/auth/callback` | `handleAuthCallback` |
+| `GET /api/auth/login` | login redirect |
+| `GET /api/auth/logout` | logout |
+| `GET /api/auth/me` | current user |
+| `GET /api/auth/sign-in` | `handleSignIn` |
+
+`POST /api/auth/sign-in` is deprecated and returns **410** with a `redirectTo` pointing at `GET /api/auth/sign-in`.
+
+## The domain gate
+
+The `@loanlight.com` restriction is enforced in two layers:
+
+1. **Layouts.** Both the `(app)` and `(studio)` layouts force dynamic rendering (`connection()`), redirect to `/login` when there is no user, and redirect to `/login?error=not_authorized` when the user's email is not `@loanlight.com`. The check is `isAllowedDomain(email)` in `src/lib/auth-domain.ts`.
+2. **Every API route.** Route handlers call `requireAuth()` (`src/lib/require-auth.ts`), which returns `{ user, error }`:
+   - `401 { error: "Unauthorized" }` when there is no user.
+   - `403 { error: "Forbidden" }` when the domain is wrong.
+
+Studio routes wrap their handlers with `withStudioAuth` (`src/lib/studio-auth.ts`), which applies the same `requireAuth()` gate.
+
+### Local-auth bypass
+
+`src/lib/auth.ts` re-exports shared-auth `getUser`, but supports a local development bypass: when `USE_LOCAL_AUTH=true` **and** `DEPLOYED_ENVIRONMENT !== "prod"`, it returns a hard-coded `super_admin` user `admin@loanlight.com` (id `local-dev-user`). The middleware mirrors this branch so local dev does not need WorkOS sandbox credentials.
+
+<Warning>
+The local-auth bypass is hard-gated off in production by the `DEPLOYED_ENVIRONMENT !== "prod"` condition in both the middleware and `getUser()`. It can never grant access in prod.
+</Warning>
+
+## The Oz tool API exception
+
+The middleware matcher deliberately excludes two path prefixes from WorkOS:
+
+```text
+/((?!_next/static|_next/image|favicon.ico|api/health|api/oz/tools).*)
+```
+
+- **`/api/oz/tools/*`** — the [Oz tool callback API](/octy/oz-tool-api). The running agent is not a WorkOS user, so these routes use their own **per-run bearer-token** auth (`Authorization: Bearer <token>` + `X-Oz-Run-Id`) validated against the SHA-256 token hash stored on the `octy_runs` row. See [Oz tool API](/octy/oz-tool-api) and [Oz run lifecycle](/octy/oz-run-lifecycle).
+- **`/api/health`** — the public health endpoint used by the ALB target-group health check.
+
+<Note>
+The Oz tool API bypassing WorkOS is by design, not an oversight. It is protected solely by the per-run token, which is hashed at rest, scoped to a single audit run, expires in 60 minutes, and is permanently consumed on completion.
+</Note>
+
+## DB Studio in production
+
+The middleware returns a **404** for any `/db-studio` path when `DEPLOYED_ENVIRONMENT === "prod"`, and the nav link is hidden in prod. DB Studio is an int-only tool. See [DB Studio](/octy/db-studio).
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Oz tool API" href="/octy/oz-tool-api" icon="code">
+The bearer-token callback surface.
+</Card>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+WorkOS and local-auth variables.
+</Card>
+<Card title="Identity and auth" href="/concepts/identity-and-auth" icon="users">
+Identity across the wider LoanLight system.
+</Card>
+</Columns>

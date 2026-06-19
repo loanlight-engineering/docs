@@ -1,0 +1,116 @@
+---
+title: Per-lender overrides and guideline documents
+description: PII severity, income, appraiser deny-list overrides, token budgets, and guideline docs.
+icon: list-checks
+---
+
+Beyond [YAML config](/lender-config/yaml-config) and [feature flags](/lender-config/feature-flags-and-entitlements), several tables hold narrower per-lender overrides and uploaded guideline documents. Each is read by a specific consumer.
+
+## PII severity overrides
+
+Table `lender_pii_severity_overrides` (`database/schema/lender-pii-severity-overrides.ts`): `id`, `lender_id` (cascade), `field` (text), `severity` (text, check `high | medium | low`), timestamps. Unique on `(lender_id, field)`.
+
+Consumed by `PiiSeverityService` (`audit/services/pii-severity.service.ts`). `DEFAULT_PII_SEVERITY` covers 9 canonical PII fields:
+
+| Field | Default severity |
+|---|---|
+| FullName | high |
+| DateOfBirth | medium |
+| SocialSecurityNumber | high |
+| ITIN | high |
+| MailingAddress | medium |
+| PropertyAddress | high |
+| MaritalStatus | medium |
+| EmployerName | high |
+| EmployerAddress | high |
+
+`FALLBACK_SEVERITY` is `medium`. `resolve(lenderId, field)` lets a lender override win, else falls back to the default; `resolveBatch` avoids N+1 lookups.
+
+<Warning>
+PII severity is **snapshotted at audit-generation time and persisted onto the finding row**. Editing an override later does **not** retroactively rewrite historical audits — only future audits pick up the new severity. See the [PII-Validation agent](/agents/pii-validation).
+</Warning>
+
+## Income lender rule overrides
+
+Table `income_lender_rule_overrides` (`database/schema/income-lender-rule-overrides.ts`): `id`, `lender_id` (cascade), `rule_code` (text), `enabled` (bool, default true), `severity_override` (text?), `threshold_override` (jsonb?), `loan_program_id` (uuid → `loan_programs.id`, cascade, nullable), `updated_by`, timestamps. The unique key `(lender_id, rule_code, COALESCE(loan_program_id, nil_uuid))` is defined in migration SQL because Drizzle cannot express the `COALESCE`.
+
+<Note>
+Outside the schema and relations files, **no runtime consumer of `income_lender_rule_overrides` was found**. The table appears to be scaffolded ahead of its consuming ticket. Treat it as not-yet-wired. See [Income analysis](/agents/income-analysis).
+</Note>
+
+## Appraiser deny list
+
+Table `lender_appraiser_deny_list` (`database/schema/lender-appraiser-deny-list.ts`) is discriminated by `entry_type` (check `ladl_entry_type_check`: `appraiser | amc`). Columns: `id`, `lender_id` (cascade), `entry_type`, `appraiser_name?`, `license_number?` (required for `appraiser`), `amc_name?` (required for `amc`), `notes?`, `created_by` → `portal_users` (set null), timestamps.
+
+Partial unique indexes normalize for matching:
+
+- `ladl_appraiser_unique` on `(lender_id, lower(regexp_replace(license_number, '[^a-zA-Z0-9]', '', 'g'))) WHERE entry_type = 'appraiser'`
+- `ladl_amc_unique` on `(lender_id, lower(btrim(amc_name))) WHERE entry_type = 'amc'`
+
+Matched in the appraisal pipeline (`src/lib/appraisal-pipeline/appraiser-deny-match.ts`); a hit sets `reconciliation.appraiser_on_watch_list` and emits a finding. See [Appraisal evaluation](/agents/appraisal-evaluation).
+
+## Daily token budgets
+
+Table `lender_daily_token_usage` (`database/schema/lender-daily-token-usage.ts`) has composite PK `(lender_id, date_utc, feature)`. Columns: `lender_id` (cascade), `date_utc` (date), `feature` (text), and four bigint counters (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, default 0), `updated_at`.
+
+Consumed by `BudgetGuardService` (`modules/portal-appraisal-comments/budget-guard.service.ts`). `BudgetFeature` is `comment_chat | comment_summary`; `LENDER_DAILY_TOKEN_BUDGET = 1_000_000` (`comment-constants.ts`).
+
+- `check(lenderId, feature)` sums all four columns for today's UTC bucket; when the total is `>= budget` it returns `{ allowed: false, reason: 'budget_exhausted', resetAt: <UTC midnight ISO> }`.
+- `record(...)` upserts with additive `sql` increments on conflict.
+
+## Guideline documents
+
+Table `lender_guideline_documents` (`database/schema/lender-guideline-documents.ts`): `id`, `lender_id` (cascade), `filename`, `mime_type`, `size_bytes` (bigint), `s3_key`, `uploaded_by` → `portal_users` (set null), `created_at`, `updated_at`, `version` (int, default 1), `doc_name`, `document_type` (check `lgd_document_type_check`), `investor?`, `effective_date?`. UNIQUE INDEX `lgd_s3_key_unique` on `s3_key`.
+
+`document_type` (`DOCUMENT_TYPES`) is one of `internal-guidelines`, `program-matrix`, `investor-overlay`, `other`.
+
+`LenderGuidelineDocumentsService` enforces:
+
+- `MAX_FILE_SIZE_BYTES = 50MB`, `ALLOWED_MIME_TYPES = ['application/pdf']`, `SAFE_FILENAME_RE = /^[a-zA-Z0-9._-]+$/`.
+- A defense-in-depth PDF magic-byte check (`%PDF-`) via `validatePdfMagicBytes`.
+- S3 prefix `lender-guideline-documents`; bucket from `S3_UPLOAD_BUCKET || PORTAL_S3_BUCKET || PARTNER_S3_BUCKET`.
+- A compensating S3 delete if the DB insert fails after the S3 PUT (logged `_orphan` on failure).
+
+<Warning>
+Every operation calls `assertEnabled(lenderId)` → `isGuidelineUploadsEnabled` (feature flag `enable_guideline_uploads`). When the flag is off it throws `NotFoundException("Not Found")` (a 404, **not** an empty list), so guideline endpoints look absent rather than empty for non-entitled lenders.
+</Warning>
+
+### Endpoints
+
+Controller `/api/v1/portal/lender-guideline-documents` (`PortalAuthGuard` + throttle 100/min, Fastify multipart via `req.parts()`):
+
+| Method + path | Roles | Purpose |
+|---|---|---|
+| `POST /` | `client_admin` | Multipart upload (`UploadGuidelineDocumentDto`); internal may upload for any lender |
+| `GET /` | (lender-scoped) | List by `?lenderId=` |
+| `GET /me` | (lender-scoped) | List for `ctx.effectiveLenderId`, optional `?documentType=` |
+| `GET /:id/stream` | (lender-scoped) | StreamableFile inline |
+| `DELETE /:id` | `client_admin` | Delete S3 object + DB row |
+
+Admin mirror on `PortalLendersController`: `GET /:lenderId/lender-guideline-documents` (`requireInternal`, super-admin only by design, optional `?documentType=`).
+
+## Agency adoptions
+
+Table `lender_agency_adoptions` (`database/schema/lender-agency-adoptions.ts`): `id`, `lender_id` (cascade), `agency_source` (text), `is_enabled` (bool, default true), `adopted_by` → `portal_users` (set null), timestamps. Unique on `(lender_id, agency_source)`.
+
+<Note>
+`VALID_AGENCY_SOURCES = ["fannie_mae", "freddie_mac"]` (`dto/agency-adoption.dto.ts`) — only **Fannie Mae** and **Freddie Mac**. A USPAP source that may appear in older material has been removed; it is not a valid value.
+</Note>
+
+Tracks per-lender adoption of Fannie/Freddie **appraisal** guidelines, gating the agency-rules evaluation (also requires the `appraisal_agency_rules` feature flag). Endpoints on `PortalLendersController`:
+
+<ParamField path="GET /:lenderId/agency-adoptions" type="endpoint">
+  Roles `client_admin`, `client_user`, `read_only`, `super_admin` with `requireLenderAccess`. Lazily materializes the two rows (both default `is_enabled = false` via `ensureLenderAgencyAdoptions`) then returns them ordered by `agency_source`.
+</ParamField>
+
+<ParamField path="POST /:lenderId/agency-adoptions" type="endpoint">
+  Super-admin only. `CreateAgencyAdoptionDto { agencySource, isEnabled? }`. Returns `{ adoption, rulesCount }` where `rulesCount` counts active `appraisal_rule_templates` WHERE `module = 'appraisal' AND source IN (agencySource, 'agency_common')` — the `module` filter is load-bearing because it excludes credit templates.
+</ParamField>
+
+<ParamField path="PATCH /:lenderId/agency-adoptions/:agencySource" type="endpoint">
+  Roles `client_admin`, `super_admin`, throttle 30/min. `UpdateAgencyAdoptionDto { isEnabled }`. Transactional upsert plus audit log `agency_adoption.enabled|disabled`. Validates `agencySource` against `VALID_AGENCY_SOURCES` (400 otherwise). `adoptedBy` uses `COALESCE` to capture the first explicit actor on lazily-materialized null rows.
+</ParamField>
+
+## YAML-embedded overrides
+
+Some overrides live inside the [YAML config](/lender-config/yaml-config) rather than dedicated tables: `urla_completeness_rules.disabled_rules` / `rule_options` (global and per-program), `red_flags.rules.*` toggles and threshold params, and `document_expiration.loan_programs` per-program doc sets. All are per-lender via the disk or DB YAML store.

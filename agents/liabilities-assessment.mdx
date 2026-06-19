@@ -1,0 +1,48 @@
+---
+title: Liabilities-Assessment (stub)
+description: The only genuine agent stub; liabilities are handled inside Credit-Evaluation.
+icon: circle-slash
+---
+
+Liabilities-Assessment (`liabilitiesAssessment`) is the only genuine stub in the agent catalog.
+It is seeded `active = false` with `audit_phase = NULL`, is never executed, and has no nodes,
+schema, rules, module, or DB tables. Liabilities and DTI are handled inside the
+[Credit-Evaluation agent](/agents/credit-evaluation) and the URLA completeness rules.
+
+<Note>
+The legacy Octy system prompt lists both `creditEvaluation` and `liabilitiesAssessment` as
+stubs. Only `liabilitiesAssessment` is actually a stub — Credit-Evaluation is fully
+implemented.
+</Note>
+
+## What the code contains
+
+The agent's only file is `langgraph/agents/liabilitiesAssessment/index.ts`:
+
+```ts
+export function buildGraph() {
+  throw new Error("liabilitiesAssessment agent not yet implemented");
+}
+```
+
+There is no node directory, no state schema, no rule library, no NestJS module, and no
+`liabilities_*` tables. It is not wired into any audit. In the platform catalog (`agents`
+table), the row is seeded `active = false` with `audit_phase = NULL`, so the router and the
+legacy fan-out both skip it.
+
+## Where liabilities actually live
+
+<Columns cols={2}>
+<Card title="Credit-Evaluation agent" href="/agents/credit-evaluation" icon="credit-card">
+Rule CRED_014 (DTI Ratio), the `LiabilitySummary` block in the credit facts `summaries`, and the
+`dti_ratio` / `gross_monthly_income` columns on `credit_runs`. The `generateAiSummary` node
+computes `dtiRatio = totalMonthlyDebt / grossMonthlyIncome`.
+</Card>
+<Card title="URLA completeness rules" href="/agents/urla-completeness" icon="file-check">
+The URLA completeness rules engine covers Section 2c and 2d liabilities via
+`section2c-liabilities.rules.ts` and `section2d-other-liabilities.rules.ts`.
+</Card>
+</Columns>
+
+Document this agent as: liabilities assessment is not a standalone agent. If you are looking for
+liability or DTI findings, go to Credit-Evaluation.

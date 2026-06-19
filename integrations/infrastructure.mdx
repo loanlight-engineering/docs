@@ -1,0 +1,59 @@
+---
+title: Integrations infrastructure
+description: CDK deployment, gateway authorizer, and security for the integration service.
+icon: server
+---
+
+The integration service deploys with AWS CDK from `packages/encompass/infra/`. All stacks are tagged with service name **`LLIntegrations`** (`infra/bin/app.ts` calls `applyStandardTags(app, environmentConfig, "LLIntegrations")`). Deploy with `pnpm --filter loanlight-epc-integration infra:deploy:{int,prod}` using env-specific context (`cdk.context.{int,prod}.json`).
+
+See [Service overview](/integrations/service-overview) for the Datadog service-name split and [Ops infrastructure](/ops/infrastructure) for the wider platform picture.
+
+## Stacks
+
+| Stack | What it provisions |
+|---|---|
+| `EcrStack` | Container registry (`loanlight-integrations:{int,prod}-latest`). |
+| `NetworkStack` | Shared VPC, private subnets, FQDN helper. |
+| `DatabaseStack` | Aurora Serverless v2 PostgreSQL (0.5–4 ACU), KMS-encrypted. `DbInit` + `DbMigrate` Lambda custom resources. Secrets `LLIntegrations/DbMasterSecret` and `LLIntegrations/DbAppSecret` (app user `ll_integrations_app`). |
+| `DatabaseAccessStack` | SSM bastion for tunneled DB access (shared with the API DB). |
+| `WorkerStack` | The SQS queues + DLQ and the two EventBridge rules. See [Messaging](/integrations/messaging). |
+| `ApplicationStack` | ECS Fargate NestJS service (Datadog service `loanlight-integrations`) behind an NLB + VPC Link. Wired with the DB endpoint, all queue URLs, and `loanLightApiUrl = https://<api FQDN>`. |
+| `ApiGatewayStack` | REST API Gateway → NLB via VPC Link; Lambda authorizer; the `auth/encompass` token-exchange route and `integrations/images` proxy resource. |
+| `SharedServicesStack` | `sharedservices` subdomain services. |
+
+## Request path and the gateway authorizer
+
+In production, traffic flows: **API Gateway (REST) → Lambda authorizer → NLB → VPC Link → ECS Fargate**.
+
+The Lambda authorizer (`Bearer-Token-Authorizer` / `EncompassAuthFunction`, in `infra/lambda/auth/`) validates the caller's **FusionAuth RS256 JWT** and forwards the resolved lender identity as the `X-Requestor-ID` header to the Nest app. Because the gateway already authorized the request, the Nest app's `ConditionalJwtAuthGuard` is a **no-op in prod** — `canActivate` returns `true` when `USE_LOCAL_AUTH` is unset.
+
+The gateway has two special-cased resources so they route before the catch-all: the `auth/encompass` token-exchange route and the `integrations/images` proxy. See the [HTTP API](/integrations/http-api).
+
+## Security layers
+
+<AccordionGroup>
+<Accordion title="Webhook HMAC">
+Inbound Encompass webhooks (`integrations/webhooks/events`, `integrations/webhooks/transactions`) are authenticated by `VerifyElliSignatureMiddleware`: it computes `HMAC-SHA256(JSON.stringify(body), SIGNING_KEY)` base64 and compares to the `elli-signature` header, returning `401` on mismatch. It also reads the `elli-environment` header. See [Webhook security](/integrations/epc-webhook-security).
+</Accordion>
+<Accordion title="FusionAuth (two directions)">
+Inbound: the gateway authorizer validates a FusionAuth RS256 JWT and injects `X-Requestor-ID`. Outbound (server-to-server to loanlight-api): `FusionAuthTokenService.getTokenForClientId` mints a client-credentials token per `requestorId`. See [Lender resolution](/integrations/lender-resolution) and [Results access](/integrations/results-access).
+</Accordion>
+<Accordion title="EPC OAuth2">
+The low-level `EpcApiClientService` authenticates to Encompass with OAuth2 client-credentials (`POST {base}/oauth2/v1/token`, `EPC_API_CLIENT_ID` / `EPC_API_CLIENT_SECRET`, `scope=pc pcapi`); the token is cached and auto-refreshed on `401`.
+</Accordion>
+<Accordion title="Secrets and KMS">
+The database is KMS-encrypted. App credentials come from Secrets Manager (`LLIntegrations/DbAppSecret`). `DEPLOYED_ENVIRONMENT` (int/prod/test) is injected at runtime via the ECS task definition.
+</Accordion>
+</AccordionGroup>
+
+## Fargate and Docker
+
+The application runs as an **ECS Fargate** service. The prod image is built from the **workspace root** with `-f packages/encompass/Dockerfile.prod` (the build context needs `pnpm-workspace.yaml`, the lockfile, the root `package.json`, and `packages/encompass`).
+
+## Database access
+
+DB roles: `db_readonly` (all envs) and `db_readwrite` (int only). The bastion is shared with the API DB; tunnel to local port 5433 (the `db:connect:int:read` / `db:connect:int:write` scripts do an SSM port-forward with IAM auth) to avoid the 5432 conflict.
+
+<Warning>
+`DbMigrate` re-runs every `.sql` when the migration content hash changes, with no applied-migrations ledger, so a non-idempotent migration wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004). See [Integrations database schema](/integrations/database-schema).
+</Warning>

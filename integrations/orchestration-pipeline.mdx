@@ -1,0 +1,147 @@
+---
+title: Integration orchestration pipeline
+description: The processAuditRequest steps, phases, events, and error handling.
+icon: workflow
+---
+
+`IntegrationOrchestrationService.processAuditRequest`
+(`integration-events/services/integration-orchestration.service.ts`) is the heart of the EPC
+pipeline. It is triggered by the SQS consumer in production and by the internal test shim
+otherwise. The whole body is wrapped in `try/catch/finally`; the partner equivalent is
+`processAuditForPartner`.
+
+For the audit-pipeline view of the same flow (Phase 1 branches, Phase 2/3 agents, dedup, and
+results), see [Pipeline overview](/pipeline/overview).
+
+## Step machine and progress integers
+
+`currentStep: AuditProcessingStep` is updated throughout and reported in failure events. Each
+step emits a progress event with an incrementing integer that drives the Encompass spinner.
+
+| Step | `progress` | Action |
+|---|---|---|
+| `WORKFLOW.START` | 5 | Begin; warn (not block) if `correlationId` already in the in-memory `processingAudits` set. |
+| `DOWNLOADING_FILES` | 10 | `s3Retrieval.downloadTransactionFiles(bucket, s3PrefixToUse)`; must be `isEncompassS3Contents`. |
+| `CREATING_LOAN` | 15 | `resolveLender` then `loanService.upsertLoan({...loanMetadata, id: correlationId, loanNumber, lenderId})`. |
+| `CREATING_AUDIT_RUN` | — | `computeMismoXmlHash`, build `shadowOptions`, `createAuditRun(...)`. |
+| `CLASSIFYING_DOCUMENTS` | 18 | Register documents, run Phase 1. |
+| `PREPARING_PIPELINE` | 20 | Get or create the LlamaCloud pipeline. |
+| `UPLOADING_DOCUMENTS` / `UPLOADING_TO_AI` | 25 | Upload PDFs to the pipeline. |
+| `WAITING_FOR_PIPELINE` | 50 | Documents ready, barrier reached. |
+| `EXECUTING_AGENTS` | — | Phase 2/3 agents. |
+| `COMPLETING_AUDIT` | — | `completeAuditRun`, then best-effort `updateLoanStatus(loanId, "ready")`, then `WORKFLOW.COMPLETE`. |
+
+`s3PrefixToUse = s3Prefix?.trim() || correlationId`.
+
+## Audit-run creation and dedup
+
+`createAuditRun(correlationId, requestorId, loanId, mismoXmlHash, shadowOptions)` is the real
+duplicate guard (the in-memory `processingAudits` set is warn-only). If it returns
+`created === false`, the orchestrator emits `WORKFLOW.ERROR` with `errorCode: "DUPLICATE_AUDIT"`
+and returns early so Encompass resets its spinner. See
+[Lifecycle and dedup](/pipeline/lifecycle-and-dedup).
+
+Short-circuit env toggles (testing):
+
+- `SKIP_AI_PIPELINE === "true"` → complete the audit and emit `WORKFLOW.COMPLETE`, then return.
+- `SKIP_AI_PIPELINE === "error"` → throw a simulated failure.
+- `SKIP_LLAMA_INGESTION === "true"` (handled in Phase 1) → returns `skipAgents: true`, the
+  orchestrator completes the audit and returns.
+- `SKIP_LANGGRAPH_AGENTS === "true"` → skip agent execution; the audit still completes.
+
+## Phase 1 — pre-audit stage
+
+`preAuditStage.executePreAuditStage({...})` runs three independent branches in parallel and
+applies a Phase 1 → Phase 2 barrier:
+
+<Columns cols={3}>
+  <Card title="Branch A — URLA preprocessing" icon="file-text">
+    `urlaPreprocessing.runUrlaExtractionPreprocessing(...)` extracts structured URLA data from
+    the MISMO XML.
+  </Card>
+  <Card title="Branch B — LlamaCloud indexing" icon="database">
+    `llamaUpload.uploadAndWaitForDocuments(...)` uploads PDFs to the loan's pipeline, recovering
+    once from `PIPELINE_NOT_FOUND` by recreating the pipeline.
+  </Card>
+  <Card title="Branch C — classification" icon="tags">
+    `langGraph.runPreAuditClassification({...})` splits and classifies the PDFs. Split happens
+    inside the agent's `splitDocuments` node.
+  </Card>
+</Columns>
+
+Branch B is awaited first; on its failure the other two branches are drained
+(`Promise.allSettled`) before the error is rethrown, so straggler writes don't land after the
+run is failed. The barrier then awaits classification (Branch C) before any Phase 2 agent runs.
+At the settle barrier the stage fires the `loanlight.documents.classified` event (see
+[Results access URLs](/integrations/results-access)) and resolves URLA data. See
+[Pre-audit stage](/pipeline/pre-audit-stage).
+
+## Phase 2/3 — audit agents
+
+Unless `SKIP_LANGGRAPH_AGENTS === "true"`, the orchestrator calls `routeEpcSelection(...)`
+(per-lender flag `AGENT_ROUTER_EPC_FLAG_KEY`; best-effort, degrades to run-all) then
+`auditAgentsExecutor.executeAuditAgents({...})`. The executor runs the canonical agents —
+`piiValidation`, `propertyData`, `creditEvaluation` (Phase 2, parallel), then `documentHealth`,
+`redFlags` (Phase 3, parallel) — plus `urlaExtraction` reuse, all via `Promise.allSettled`.
+
+<Warning>
+**Per-agent failures never fail the run.** Each rejected agent is recorded in `audit_errors`
+and the run still completes. `failAuditRun` is reserved for infrastructure failures (XML
+download, classification, S3 retrieval, lender resolution) caught in the outer try/catch. See
+[Audit-agents stage](/pipeline/audit-agents-stage).
+</Warning>
+
+## Error handling — the observability cascade
+
+The catch block is load-bearing. Each cleanup step is independently `try/catch`-wrapped, in
+priority order, so a DB blip mid-cleanup cannot leave a non-terminal run or drop the error
+emit (which would stick the Encompass spinner):
+
+<Steps>
+  <Step title="saveAuditError">
+    Records the failure. `classifyAuditError(error, step)` tags it `transient | permanent |
+    validation` by step and message regex.
+  </Step>
+  <Step title="failAuditRun">
+    Flips the run to `failed` (idempotent; only affects `pending`/`processing` rows).
+  </Step>
+  <Step title="updateLoanStatus(loanId, &quot;error&quot;)">
+    Best-effort loan status update.
+  </Step>
+  <Step title="emit WORKFLOW.ERROR">
+    Carries `error, errorCode, errorType, errorStep (currentStep), errorTimestamp, requestorId,
+    correlationId, loanId`.
+  </Step>
+</Steps>
+
+The `finally` block removes `correlationId` from `processingAudits`.
+
+## Progress events back to Encompass
+
+Progress is dual-published via `ProgressEventsService.emitEvent`: to EventBridge (source
+`loanlight.aus`, consumed by the integrations server / Encompass to drive the spinner and reset
+state on error) and to the in-process stream for SSE and polling. Key event types:
+
+- `WORKFLOW.{START, COMPLETE, ERROR}` = `workflow:start | complete | error`.
+- `DOCUMENT_PROCESSING.{INITIALIZATION, DOWNLOADING, UPLOADING_TO_AI, PIPELINE_MONITORING,
+  DOCUMENTS_READY}`.
+
+See [Progress tracking](/pipeline/progress-tracking).
+
+## Partner path
+
+`processAuditForPartner` has the same shape but for partner LOS rather than Encompass: bucket
+`PARTNER_S3_BUCKET`, files under `partner/{partnerId}/{loanId}/...`, classification and Llama
+indexing already done at doc-upload time (so pre-audit is URLA-only), and the same catch
+cascade.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Pipeline overview" href="/pipeline/overview" icon="workflow">
+    The audit pipeline from the run's perspective.
+  </Card>
+  <Card title="Results access URLs" href="/integrations/results-access" icon="link">
+    The documents.classified push-back and results URLs.
+  </Card>
+</Columns>

@@ -1,0 +1,113 @@
+---
+title: Authentication and roles
+description: WorkOS AuthKit, the four roles, RBAC, and CSRF.
+icon: shield-check
+---
+
+The portal authenticates human users with WorkOS AuthKit (via `@loanlight-engineering/shared-auth`) and authorizes them against four roles with route-level RBAC. For the system-wide identity model (partner keys, Octy's shared secret, FusionAuth bridge), see [identity and auth](/concepts/identity-and-auth).
+
+## WorkOS AuthKit
+
+The shared package `@loanlight-engineering/shared-auth` (v0.2.0) wraps `@workos-inc/authkit-nextjs` and `@workos-inc/node`. It exports two entry points:
+
+- **`/server`:** `withAuth`, `handleAuthCallback`, `handleSignIn`, `handleSignOut`, `getUser`, `getUserResult`, `getAccessToken`, `requireUser`, plus WorkOS client factories. Types: `LoanLightUser`, `AuthFailureReason`, `AuthResult`.
+- **`/client`:** `AuthKitProvider`, `SignInForm`, `useUser`, `invalidateUserCache`.
+
+### Sign-in flow
+
+<Steps>
+  <Step title="/login renders SignInForm">
+    The login page links to `GET /api/auth/sign-in`.
+  </Step>
+  <Step title="Redirect to WorkOS">
+    `handleSignIn` calls `getSignInUrl({ returnTo })` and redirects to WorkOS.
+  </Step>
+  <Step title="Callback sets the session cookie">
+    WorkOS redirects to `GET /api/auth/callback` (`handleAuthCallback`), which seals the WorkOS session cookie (`wos-session`, override with `WORKOS_COOKIE_NAME`) and redirects to `/`.
+  </Step>
+  <Step title="Middleware enforces the session">
+    On every request, `middleware.ts` runs `withAuth(request)`; AuthKit's `authkitMiddleware` enforces the session and injects an `x-workos-session` header for downstream `withAuth()` calls.
+  </Step>
+  <Step title="Identity hydration">
+    `getUserResult()` reads the WorkOS session, then fetches `${LOANLIGHT_API_URL}/api/v1/portal/auth/me` (Bearer access token, 5 s timeout) to hydrate role, `lenderId`, `lenderName`, and `isInternal`.
+  </Step>
+</Steps>
+
+Hydration failures map to an `AuthFailureReason`: `401/403` → `portal_access_denied` (special-cased `account_setup_pending` when the body `reason` matches), other non-OK → `portal_auth_unavailable`, missing WorkOS session → `no_workos_session`.
+
+`LoanLightUser` shape: `{ id, workosUserId, email, name, role, lenderId, lenderName, isInternal, isImpersonating, impersonationStartedAt }`.
+
+## The four roles
+
+Roles come from `Role` in `@loanlight-engineering/shared-types` (`src/lib/auth/roles.ts`):
+
+| Role | Scope |
+|---|---|
+| `super_admin` | Internal global admin. Required by all `/admin/*` routes and `/settings/global-appraiser-deny-list`. |
+| `client_admin` | Tenant admin: manages users, programs, and rules within their lender. |
+| `client_user` | Tenant user: runs and reviews tools. |
+| `read_only` | View-only tenant access. |
+
+<Warning>
+The role is `read_only`, NOT `reviewer` (a common misconception called out in the App `CLAUDE.md`). `read_only` is unranked: RBAC uses exact role-set membership, not a hierarchy, so `read_only` only matches routes that explicitly list it. The `constants.ts` `VALID_ROLES` set (the three tenant roles) is what invite flows offer.
+</Warning>
+
+## Route-level RBAC
+
+`ROUTE_ROLES` maps gated routes to `{ roles, requireInternal? }`:
+
+- All `/admin/*` and `/settings/global-appraiser-deny-list`: `["super_admin"]` + `requireInternal: true`.
+- `/settings/users`: `client_admin` + `super_admin`.
+- View routes (`loan-programs`, `rules`, `key-field-review`, `appraiser-deny-list`): all four roles; their `/new` create routes are `client_admin` + `super_admin`.
+
+Helpers:
+
+- `canSee(route, role, isInternal)` enforces `requireInternal`, then role membership.
+- `isHiddenFromGlobalSuperAdmin(route, role, isImpersonating)` is a presentation rule (not an authz change): it hides `/settings/appraiser-deny-list` from a global super admin who is not impersonating; it reappears while impersonating.
+- `canManagePrograms(role)` = `client_admin || super_admin`, mirroring the backend `@Roles("client_admin")`.
+
+Server gates in `src/lib/auth/require-admin.ts`:
+
+- `requireInternalAdmin()` — internal + `client_admin`.
+- `requireSuperAdmin()` — internal + `super_admin`.
+
+Both return `401` when there is no session and **`404`** on denial, so a forbidden route is indistinguishable from a non-existent one.
+
+Client-side role gating uses `components/auth/RequireRole.tsx`.
+
+## Feature flag resolution
+
+`getFeatureFlags(lenderId)` (React `cache`) resolves the bearer token via `getServerAccessToken()`, then GETs the backend `/lenders/${lenderId}/feature-flags`.
+
+<Note>
+`getFeatureFlags` now resolves the AuthKit-sealed token via `getServerAccessToken()`. It previously read the raw `workos-access-token` cookie, which in production was always empty — so lender feature-flag rows in the database were silently ignored. See the [route and feature map](/portal/feature-map) for the flag list.
+</Note>
+
+## Middleware behaviors
+
+`src/middleware.ts` wraps shared-auth's `withAuth`:
+
+- **Per-request logging:** method + path only, JSON, never the query string (LOA-1205 diagnostic).
+- **Resilience:** `withAuth` is wrapped in try/catch. On throw, API routes return `502 {error:"Authentication service unavailable"}` and page routes redirect to `/api/auth/sign-in?returnTo=<path>` (path clamped), preventing Next platform 500s on transient WorkOS failures.
+- **Security headers** on all responses: CSP (allows WorkOS, S3, Datadog, Zillow photos, blob workers), `X-Frame-Options: SAMEORIGIN`, HSTS, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`. For `/results/audits/` paths, `ENCOMPASS_IFRAME_ORIGINS` adds `frame-ancestors` and drops `X-Frame-Options` so EPC can iframe the [results viewer](/portal/partner-results-viewer).
+- **Partner v2-audits carve-out:** `PARTNER_AUDITS_V2_PATH = /^\/api\/v2\/audits\/[^/]+(?:\/[^/]+)+$/`. See the [partner results viewer](/portal/partner-results-viewer) for details.
+
+Public paths (shared-auth `PUBLIC_PATHS`): `/login`, `/api/auth/login`, `/api/auth/sign-in`, `/api/auth/callback`, `/api/health`, and anything under `/results/`.
+
+## CSRF
+
+`src/lib/auth/csrf*.ts` implements a double-submit pattern:
+
+- `csrf-edge.ts` `ensureCsrfCookie` mints a non-httpOnly `csrf_token` cookie (Web Crypto, edge). The constant is `CSRF_COOKIE_NAME = "csrf_token"`.
+- `csrf-client.ts` `getCsrfToken()` reads it; mutating client calls send it as the `x-csrf-token` header.
+- `csrf.ts` `validateCsrf` does a timing-safe compare on the server.
+
+`ensureCsrfCookie` requires the `WORKOS_REDIRECT_URI` env at runtime.
+
+## Session cookies and E2E mock auth
+
+- `WORKOS_ACCESS_TOKEN_COOKIE_NAME = "workos-access-token"` is used directly only in E2E mock mode; in production the access token lives inside AuthKit's sealed session.
+- `getSessionToken(req)` returns `string | undefined` (not `null`).
+- `getServerAccessToken()` is the mock-aware bearer resolver for server components, dual-gated (`E2E_MOCK_AUTH === "true"` AND `NODE_ENV !== "production"`).
+
+When `E2E_MOCK_AUTH === "true"` (CI/local, no WorkOS creds), `POST /api/auth/login {email}` sets the `workos-access-token` cookie to the email, the email acts as the bearer, and `getMockSession(email)` resolves a fake session. This is dual-gated against production.

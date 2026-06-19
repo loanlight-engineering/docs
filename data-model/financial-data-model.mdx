@@ -1,0 +1,96 @@
+---
+title: Financial data model
+description: Credit, income, and appraisal tables.
+icon: dollar-sign
+---
+
+The credit, income, and appraisal subsystems are the three standalone run ledgers. Each owns its own run table, rule engine (`*_rule_sets` + `*_rules`), overrides, corrections, and recovery columns, and each can attach to a parent [`audit_runs`](/data-model/core-tables#audit-runs) row through a nullable `audit_run_id`. The rule-engine pattern is uniform across all three.
+
+## The shared rule-engine pattern
+
+All three subsystems use the same shape (`*_rule_sets.ts` + `*_rules.ts`):
+
+- **`*_rule_sets`** — lender-scoped, versioned. PK `id`, `lender_id` (cascade), `name`, `version`, `template_version`, `is_active`, `created_by` → `portal_users` (NOT NULL), timestamps. Partial unique `(lender_id, name)` where active.
+- **`*_rules`** — `rule_set_id` → the set (cascade), `code`, `name`, `category`, `severity` (CHECK `FAIL | WARNING`), `thresholds` jsonb, `required_fields` text[], `form_types` text[], `evaluate_fn_key`, `operator` / `field_path` / `expected_value` / `condition` jsonb (mutually exclusive — `chk_*_rule_type_exclusive`), `source` (CHECK `loanlight | fannie_mae | freddie_mac | uspap | agency_common`), `fail_message`, `pass_message`, `is_enabled`, `loan_program_id` → `loan_programs` (set null). Each has a **migration-only** COALESCE unique on `(rule_set_id, code, COALESCE(loan_program_id, nil_uuid))` (Drizzle can't express it).
+- The platform-owned catalog **`appraisal_rule_templates`** seeds all three. It has no `lender_id`, a `module` column (CHECK `appraisal | credit | income`, default `appraisal`), and is unique on `(code, module)`.
+
+<Note>
+A program-scoped rule (same `code`, with a `loan_program_id`) overlays/replaces the lender-global rule of the same code at evaluation time. Per-run overrides live in the `*_rule_overrides` tables (outcomes `PASS | FAIL | WARNING | NEEDS_INFO | SKIPPED`); latest row per `(run, rule_code)` wins.
+</Note>
+
+## Credit
+
+See the [Credit-Evaluation agent](/agents/credit-evaluation).
+
+### credit_runs
+
+`credit-runs.ts`. PK `id`, `lender_id` (restrict), `user_id` (set null), `loan_id` (set null).
+
+<ParamField path="status" type="text">Default `pending`. CHECK: `pending | running | completed | failed | reviewed`.</ParamField>
+<ParamField path="rule_set_id" type="uuid → credit_rule_sets (set null)">Repointed to `credit_rule_sets` in migration `0083`.</ParamField>
+<ParamField path="audited_credit_document_id" type="uuid → loan_documents (set null)" />
+<ParamField path="deleted_at" type="timestamptz">Soft-delete tombstone.</ParamField>
+
+Other columns: `input_filename` / `input_s3_key`, `extracted_data` jsonb, `compliance_results` jsonb, `ai_summary`, `is_scanned`, `coverage_percent`, `overall_risk`, `dti_ratio` real, `gross_monthly_income` real, `rule_set_version`, `audit_run_id` → `audit_runs` (set null), `selected_rule_sources` text[], `layers_used` text[], `error_message`, recovery columns (`last_heartbeat_at`, `claim_token`, `recovery_attempts`, `error_category` CHECK `processing_error`), and the usual timestamps.
+
+<Warning>
+**Soft-delete trap-door:** readers filter `isNull(deleted_at)`. Two partial unique indexes — `(audit_run_id, audited_credit_document_id)` and `(audit_run_id)` where doc-id null — are both gated on `deleted_at IS NULL`. The helper `buildCreditRunsConflictArgs()` selects the right upsert target.
+</Warning>
+
+Children: `credit_corrections` (run_id cascade, user_id restrict NOT NULL, field/original/corrected value) and `credit_rule_overrides` (run_id cascade, rule_code, 5-value outcomes, reason).
+
+### credit_rules — the FK difference
+
+`credit_rules` follows the shared shape with two differences:
+
+- **`source_template_id` is intentionally NOT a foreign key** (migration `0080` removed it — credit is decoupled from the appraisal module; pinned by `fk-ondelete-policy.spec.ts`).
+- The `operator` CHECK is the **16-value** union — it does **not** include `abs_less_than` / `abs_less_than_or_equal`.
+
+## Income
+
+See the [Income agent](/agents/income-analysis). Income is a module pipeline (not a LangGraph catalog agent) backed by the `income_runs` family.
+
+### income_runs
+
+`income-runs.ts`. PK `id`, `lender_id` (restrict), `loan_id` (set null), `audit_run_id` (set null).
+
+<ParamField path="family" type="income_family (pgEnum)">`wage_earner | self_employed | rental | asset_based`. User-selected at run creation.</ParamField>
+<ParamField path="status" type="text">Default `pending`.</ParamField>
+<ParamField path="review_state" type="text">Default `none`.</ParamField>
+<ParamField path="total_monthly_income" type="numeric">Null while reviews are pending.</ParamField>
+<ParamField path="blocked_actions" type="jsonb">Default `[]`. e.g. `["export","rule_override"]` when reviews pending.</ParamField>
+
+Plus `borrower_name`, `requires_review`, `pending_review_count`, `failure_reason`, `failure_detail`, `rule_set_id` → `income_rule_sets` (set null), `rule_set_version`, `current_stage`, timestamps, `completed_at`.
+
+Run children (all FK `run_id` → `income_runs`, cascade): `income_run_sources` (links to `loan_documents` + `document_classifications`), `income_extractions` (unique `(run_id, source_id)`), `income_streams`, `income_findings`, `income_conditions`, `income_rule_outcomes` (unique `(run_id, rule_code, rule_set_id)`), `income_run_rule_overrides`, and `income_extraction_corrections` (FK to `income_extractions`). Lender-scoped overrides live in `income_lender_rule_overrides` (migration-only COALESCE unique `(lender_id, rule_code, loan_program_id)`).
+
+`income_rules` matches `appraisal_rules` shape; its `source_template_id` → `appraisal_rule_templates` (set null), and it uses the **16-value** operator union (no `abs_less_than*`).
+
+<Warning>
+Do not confuse the `income_runs` family with the older **bank-statement income pipeline** rooted at `borrower_files` → `bank_statements` → `transactions` (with `income_filters`, `findings`, `ai_summaries`). They are entirely separate table families.
+</Warning>
+
+## Appraisal
+
+See the [Appraisal-Evaluation agent](/agents/appraisal-evaluation).
+
+### appraisal_runs
+
+`appraisal-runs.ts` — a large run ledger. PK `id`, `lender_id` (restrict, NOT NULL), `user_id` (set null), `loan_id` (set null).
+
+<ParamField path="status" type="text">Default `pending`. Service vocabulary: `pending | running | completed | failed | reviewed`.</ParamField>
+<ParamField path="parent_run_id" type="uuid (self-FK, cascade)">For revisions; partial unique `idx_one_child_per_parent`.</ParamField>
+<ParamField path="rule_set_id" type="uuid → appraisal_rule_sets (set null)">Repointed in migration `0083`.</ParamField>
+<ParamField path="audit_run_id" type="uuid → audit_runs (set null)">Phase 0.3 link.</ParamField>
+
+Extraction outputs: `extracted_data`, `field_confidence_map`, `field_status_map`, `field_source_location_map`, `coverage_result`, `coverage_percent`, `comment_summary`, `comment_keywords`, `photo_manifest`, `enrichment_data`, `findings`, `compliance_results`, `output_snapshot`, `difference_summary`. Liveness/recovery (LOA-1101): `last_heartbeat_at`, `recovery_attempts`, `claim_token`. Plus `revision_number`, `input_filename` / `input_s3_key`, `xml_s3_key`, `xml_version`, `agent_version`, `model_version`, `langsmith_url`, `selected_agency_sources` text[], `reviewed_at`.
+
+### appraisal_rules — operator difference
+
+`appraisal_rules` follows the shared shape, but its `operator` CHECK is the **17-value** union — it **does** include `abs_less_than` and `abs_less_than_or_equal` (drift-pinned by `operator-check-drift.spec.ts`). It keeps `source_template_id` → `appraisal_rule_templates` (set null).
+
+Other appraisal tables: `appraisal_run_partials` (per-section partials), `appraisal_rule_sets`, `appraisal_rule_templates`, `appraisal_rule_overrides`, `appraisal_corrections`, `appraisal_field_metrics`, and `appraisal_ssr_documents` (Fannie/Freddie SSR findings).
+
+<Note>
+Two tables were dropped. The `appraisal_langgraph_*` columns were removed in migration `0158`, and `client_rule_sets` was dropped in `0130` — which is why appraisal/credit `rule_set_id` FKs now point at `appraisal_rule_sets` / `credit_rule_sets` rather than the old client table.
+</Note>

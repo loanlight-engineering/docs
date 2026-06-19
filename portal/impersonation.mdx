@@ -1,0 +1,70 @@
+---
+title: Impersonation (View as Client)
+description: The app-side impersonation overlay.
+icon: user-cog
+---
+
+Internal super admins can impersonate a tenant ("View as Client") to reproduce exactly what a lender's staff see. Impersonation is overlaid app-side because the shared-auth identity layer is impersonation-blind.
+
+## Why the overlay is app-side
+
+shared-auth's `getUserResult()` does not know about impersonation (LOA-898). To make "View as Client" work, the portal re-queries the backend's impersonation-aware `/auth/me` endpoint for super admins and overlays the result onto the base session.
+
+<Note>
+There are two `AuthMeResponse` shapes. shared-auth's internal `get-user.ts` `AuthMeResponse` (5 fields) is the older, impersonation-blind shape. The app's own `AuthMeResponse` in `src/lib/api-types.ts` (11 fields, including impersonation and `realLender`) is the impersonation-aware shape used by `/api/auth/me` consumers. Do not confuse the two.
+</Note>
+
+## Session overlay
+
+`src/lib/auth/session.ts` builds `SessionData` from shared-auth's `getUserResult()`. For `super_admin` only, it then calls the backend `/auth/me` (impersonation-aware, 5 s timeout) and `overlayImpersonationOntoSession` mutates the session:
+
+- flips `isImpersonating`,
+- sets `realLender` (the admin's real org),
+- swaps `lender` to the impersonated tenant.
+
+The overlay is best-effort: failures are logged and the base session is preserved.
+
+`SessionData` shape:
+
+```ts
+type SessionData = {
+  user: SessionUser;
+  session: { impersonationStartedAt };
+  lender: LenderInfo;
+  isImpersonating?: boolean;
+  realLender?: LenderInfo;
+  impersonationExpired?: boolean;
+};
+```
+
+## Effective-context helpers
+
+Because impersonation swaps the active lender but keeps the admin's real identity, downstream code reads "effective" context rather than raw fields:
+
+- `getEffectiveLenderId(session)` — the impersonated lender id when impersonating, else the admin's own.
+- `getEffectiveIsInternal(session)` — the admin's REAL internal status, kept so admin tooling stays reachable while impersonating.
+- `getEffectiveContext(session)` → `{ lenderId, isInternal, isImpersonating, bypassFeatureFlags }`.
+
+`bypassFeatureFlags = isInternal && !session.isImpersonating`. This is fail-closed: any sign of impersonation suppresses the internal feature-flag bypass (LOA-998), so an impersonating admin sees the tenant's real flags, not the internal override.
+
+`get-session.ts` wraps these in React `cache()` (`getSession`, `getSessionResult`).
+
+## Starting and ending impersonation
+
+<Steps>
+  <Step title="Start">
+    A super admin starts via the command palette (⌘K, which searches lenders via `/api/admin/clients`) or the "Impersonate" button on a client detail page. The app calls `POST /api/admin/impersonate` → backend `/auth/impersonate`.
+  </Step>
+  <Step title="While active">
+    The `ImpersonationBanner` shows "Viewing as: &lt;lender&gt;" with a 60-minute countdown and an "Exit Impersonation" action.
+  </Step>
+  <Step title="Exit">
+    `DELETE /api/admin/impersonate` → backend `/auth/impersonate`. Logout (`/api/auth/logout`) best-effort issues `DELETE /auth/impersonate` first, because the impersonation row outlives WorkOS sign-out. A `403` for a non-super-admin is silently absorbed.
+  </Step>
+</Steps>
+
+## Backing store and gate
+
+Impersonation is backed by the `portal_impersonation_sessions` table on the backend (LOA-898), keyed by `workos_user_id`. It is gated by the `ENABLE_IMPERSONATION` / `IMPERSONATION_ENABLED` env flag.
+
+See [authentication and roles](/portal/auth-and-roles) for the role model and [identity and auth](/concepts/identity-and-auth) for the system-wide identity picture.

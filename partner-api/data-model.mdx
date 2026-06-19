@@ -1,0 +1,95 @@
+---
+title: Partner API data model
+description: Request and response schemas.
+icon: table
+---
+
+The request schemas for the Partner API are NestJS DTOs in `partner-api/dto/`, validated with `class-validator`. This page is the field-level reference; the endpoint pages ([Loans](/partner-api/loans), [Audits](/partner-api/audits)) describe behaviour.
+
+## CreatePartnerLoanDto
+
+Body of [`POST /api/v1/partner/loans`](/partner-api/loans). File: `create-partner-loan.dto.ts`.
+
+| Field | Type | Required | Validation |
+| --- | --- | --- | --- |
+| `loanNumber` | string | yes | `@IsString @MaxLength(100) @Sanitize(100)` |
+| `mismoXml` | string (base64) | yes | `@IsString @IsSafeBase64()` (Buffer round-trip — stack-safe for multi-MB payloads) |
+| `documents` | `DocumentDto[]` | no (default `[]`) | `@IsArray @ValidateNested({each}) @Type(DocumentDto)` |
+| `metadata` | `LoanMetadataDto` | no | `@ValidateNested @Type(LoanMetadataDto)` |
+| `skipClassification` | boolean | no (default `false`) | `@IsBoolean`. Docs are still registered and uploaded; only classification is skipped. |
+
+### DocumentDto
+
+| Field | Type | Required | Validation |
+| --- | --- | --- | --- |
+| `fileName` | string | yes | `@MaxLength(255) @Sanitize` |
+| `content` | string (base64) | yes | `@IsSafeBase64()` |
+| `mimeType` | string | **yes** | `@IsString() @MaxLength(100) @Sanitize(100)` — no `@IsOptional()`, so omitting it (or sending a value `@Sanitize` wipes) fails validation with `400` |
+| `documentType` | string | no | `@MaxLength(100)`; captured but informational |
+
+### LoanMetadataDto
+
+| Field | Type | Required | Validation |
+| --- | --- | --- | --- |
+| `estimatedClosingDate` | string | no | `@IsDateString` (YYYY-MM-DD) |
+| `lenderCode` | string | no | ≤ 100 chars |
+| `loanType` | string | no | ≤ 100 chars (see note) |
+| `loanProgramName` | string | no | ≤ 255 chars |
+
+<Warning>
+**`loanType` is free-form text (the `LoanTypeSchema` mirrors this).** The DB column is `text`; the value passes through verbatim (`loan.service.ts::resolveLoanType`). There is **no** `@IsEnum` and **no** `@Matches` regex.
+
+This is enforced by design (LOA-1088). The `partner-loans.controller.spec.ts` test group `"LoanTypeSchema (OpenAPI response schema — LOA-1088 contract parity)"` asserts the response schema has no `enum` key, no `pattern` key, `type: "string"`, `maxLength: 100`, and `nullable: true`. Re-adding `enum: Object.values(LoanType)` or a slug regex like `^[A-Za-z0-9_-]+$` re-introduces the contract lie and rejects valid values such as `bank_statement_12mo` or aliased labels like `"Bank Statement - 12 Month"`.
+
+`@Sanitize(100)` runs **before** `@MaxLength(100)` (it truncates to 100 first; non-string inputs are wiped to `undefined` so `@IsOptional` short-circuits). The max lengths differ intentionally: `loanType = 100`, `loanProgramName = 255`.
+</Warning>
+
+## UploadAdditionalDocumentsDto
+
+Body of [`POST /api/v1/partner/loans/:loanId/documents`](/partner-api/loans).
+
+| Field | Type | Required | Validation |
+| --- | --- | --- | --- |
+| `documents` | `DocumentDto[]` | yes | `@IsArray @ValidateNested({each})` |
+| `skipClassification` | boolean | no (default `false`) | `@IsBoolean` |
+
+## CreatePartnerAuditDto
+
+Body of [`POST /api/v1/partner/audits`](/partner-api/audits). File: `create-partner-audit.dto.ts`.
+
+| Field | Type | Required | Validation |
+| --- | --- | --- | --- |
+| `loanId` | string (uuid) | yes | `@IsUUID()` |
+| `agents` | string[] | no | `@IsArray @IsString({each})`. Omitted → all available agents run. |
+| `options` | `AuditOptionsDto` | no | `@ValidateNested @Type` |
+
+Example `agents` values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`. These are the canonical agent name strings used by `AuditAgentsExecutor`.
+
+### AuditOptionsDto
+
+| Field | Type | Required | Validation |
+| --- | --- | --- | --- |
+| `estimatedClosingDate` | string | no | `@IsDateString` (YYYY-MM-DD) — overrides the loan's stored closing dates |
+
+## ResultsAccessUrlResponseDto
+
+Response of [`POST /api/v1/partner/audits/:auditId/results/access-url`](/partner-api/results-and-access-urls). File: `results-access-url.dto.ts`.
+
+```ts
+{
+  url: string;        // https://portal.../results/audits/<auditId>?token=<JWT>
+  expiresAt: string;  // ISO 8601
+}
+```
+
+## Response schemas
+
+The full response shapes are documented on the endpoint pages, since several differ from their Swagger schemas:
+
+- Loan create / detail / status / list, document upload and listing — [Loans API](/partner-api/loans).
+- Audit create / status / errors / classifications — [Audits API](/partner-api/audits).
+- Audit results (`agents`, `creditEvaluations`, `summary`) and access URLs — [Results and access URLs](/partner-api/results-and-access-urls).
+
+<Note>
+**Two known schema/reality gaps to keep in mind:** `GET /loans` returns raw snake_case `LoanRecord` rows (not the camelCase Swagger schema), and document statuses in create/upload responses are `new | updated | existing` (not the Swagger example's `"uploaded"`, which only appears in detail/pipeline responses).
+</Note>

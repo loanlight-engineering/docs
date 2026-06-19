@@ -1,0 +1,108 @@
+---
+title: Encompass and EPC overview
+description: How LoanLight ingests Encompass loans via Encompass Partner Connect.
+icon: plug
+---
+
+LoanLight runs audits on loans that originate in Encompass, ICE Mortgage Technology's
+loan origination system (LOS). The production ingestion path is **Encompass Partner Connect
+(EPC)**: an external plug-in pushes the loan's MISMO XML and supporting PDFs to S3 and
+publishes an event, and the LoanLight backend drains that event from SQS and runs the
+audit pipeline.
+
+<Note>
+There is **no inbound EPC audit-request HTTP webhook** in `loanlight-api`. Production EPC
+audit requests arrive on the SQS queue `audit-requested-events`. The only Encompass-related
+webhook endpoint in the backend (`POST /api/v1/los/aus/webhook`) belongs to the legacy
+Dev Connect path and is effectively non-functional. See
+[Legacy Dev Connect](/integrations/legacy-dev-connect).
+</Note>
+
+## Three generations of integration
+
+The codebase carries three distinct integration generations. Knowing which one a piece of
+code belongs to is the single most important framing for this area.
+
+<AccordionGroup>
+  <Accordion title="EPC / integrations path (current, production)">
+    The external `loanlight-integrations` Encompass plug-in (npm `loanlight-epc-integration`,
+    a NestJS/Fargate service) pushes the loan's `mismo.xml` and documents to an S3 bucket,
+    then publishes an EventBridge "audit requested" event. That event lands on the SQS queue
+    `audit-requested-events` (dev-prefixed `dev-audit-requested-events`). The backend
+    `QueueConsumerService` drains it into
+    `IntegrationOrchestrationService.processAuditRequest`. This is the revenue path.
+
+    See [Integration audit request schema](/integrations/audit-request-schema) and
+    [Integration orchestration pipeline](/integrations/orchestration-pipeline).
+  </Accordion>
+  <Accordion title="Legacy Dev Connect (deprecated)">
+    `POST /api/v1/los/aus` (web-form AUS request) and `POST /api/v1/los/aus/webhook`
+    (Encompass field-change webhook) pull loan data and documents from the Encompass REST API
+    rather than reading them from S3. The webhook path routes to the Encompass `LosProvider`,
+    whose data methods all `throw new Error("Not implemented")`. Treat this generation as
+    deprecated. See [Legacy Dev Connect](/integrations/legacy-dev-connect).
+  </Accordion>
+  <Accordion title="Encompass LosProvider stub">
+    `los/providers/encompass/encompass.provider.ts` is a non-functional stub:
+    `authenticate`, `getLoanData`, `getDocuments`, and `downloadDocuments` all throw
+    `Not implemented`. LoanLight does **not** fetch loans or documents from the Encompass
+    REST API on the EPC path; the integrations plug-in pushes them to S3 instead.
+  </Accordion>
+</AccordionGroup>
+
+## Data flow (EPC)
+
+<Steps>
+  <Step title="Plug-in pushes files to S3">
+    The `loanlight-integrations` plug-in writes `{correlationId}/mismo.xml` and
+    `{correlationId}/documents/{encompassDocId}_{filename}` to the integration-files S3
+    bucket, plus per-transaction snapshots. The bucket env var is
+    `INTEGRATION_FILES_BUCKET_NAME` (with an allowlist via
+    `INTEGRATION_AUDIT_S3_BUCKET_ALLOWLIST`).
+  </Step>
+  <Step title="Plug-in publishes an audit-requested event">
+    An EventBridge event carries the audit request payload in its `detail` envelope.
+  </Step>
+  <Step title="SQS delivers the message">
+    The event lands on `audit-requested-events`. `QueueConsumerService.handleAuditRequested`
+    (one message at a time; thrown errors redeliver to the DLQ) reassembles an
+    `IntegrationAuditRequest` from `detail`, validates it with
+    `IntegrationAuditRequestSchema`, and calls `processAuditRequest`.
+  </Step>
+  <Step title="The orchestrator runs the audit">
+    `IntegrationOrchestrationService.processAuditRequest` resolves the lender, upserts the
+    loan, creates the audit run, runs Phase 1 (pre-audit) and Phase 2/3 (audit agents), and
+    emits progress events back to Encompass via EventBridge. See
+    [Integration orchestration pipeline](/integrations/orchestration-pipeline).
+  </Step>
+  <Step title="Results flow back to Encompass">
+    Classified documents are pushed back into Encompass via the
+    `loanlight.documents.classified` event, and the plug-in can mint short-lived
+    results-access URLs to view the completed audit. See
+    [Results access URLs](/integrations/results-access).
+  </Step>
+</Steps>
+
+## Internal test shim
+
+An internal HTTP shim, `POST /api/v1/integration-events/process`, validates the same Zod
+payload and fires `processAuditRequest` fire-and-forget (HTTP 202). It is guarded by
+`InternalApiKeyGuard` and exists only for internal testing — it is slated for removal under
+LOA-174. SQS is the canonical production entry point.
+
+## Where to go next
+
+<Columns cols={2}>
+  <Card title="Audit request schema" href="/integrations/audit-request-schema" icon="braces">
+    The SQS message contract that drives an audit.
+  </Card>
+  <Card title="Lender resolution" href="/integrations/lender-resolution" icon="building">
+    How an incoming loan is attributed to a lender.
+  </Card>
+  <Card title="Orchestration pipeline" href="/integrations/orchestration-pipeline" icon="workflow">
+    The processAuditRequest steps, phases, and error handling.
+  </Card>
+  <Card title="EPC webhook security" href="/integrations/epc-webhook-security" icon="shield">
+    HMAC signatures, the CX.LLAUS gate, and rate limiting (legacy LOS).
+  </Card>
+</Columns>

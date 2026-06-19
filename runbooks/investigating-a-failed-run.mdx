@@ -1,0 +1,115 @@
+---
+title: Investigating a failed or incomplete run
+description: Diagnose missing verdicts and failed runs.
+icon: circle-x
+---
+
+There are two distinct symptoms that get reported as "the audit broke," and they have opposite root causes:
+
+1. **A missing verdict** — the run completed, but one agent's results are absent or empty (no PII findings, no credit evaluation, no property data).
+2. **A failed run** — the `audit_runs.status` is `failed`, or the run never reached a terminal state.
+
+The most important fact for triage: **a per-agent failure does not fail the run.** If a single agent throws, its error is recorded in `audit_errors` and the run still completes. So a `complete` run with a missing verdict is the *normal* outcome of an agent failure, not a contradiction. `failAuditRun` is reserved for infrastructure failures only. See the [error semantics in lifecycle and dedup](/pipeline/lifecycle-and-dedup) and the [pipeline overview](/pipeline/overview).
+
+## Check `audit_errors` first
+
+Whatever the symptom, start here. The `audit_errors` table is keyed by `audit_run_id` and holds one row per failure, with the agent name, an error type, a message, and details. Octy exposes it as the `audit-errors` data tool (newest-first); see [the Oz tool API](/octy/oz-tool-api).
+
+```text
+GET /api/oz/tools/audit-errors
+→ { table: "audit_errors", data: [ ... ] }
+```
+
+Each row carries:
+
+| Column | Meaning |
+|---|---|
+| `agent_name` | Which agent failed: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`, or `classifySplit` (the pre-audit classification terminal). |
+| `error_type` | `transient`, `permanent`, or `validation` (from `classifyAuditError`). |
+| `error_message` | The failure message. |
+| `error_details` | `{ step, stack, code, auditedCreditDocumentId? }`. Credit fans out per document, so a credit failure can produce one row per document. |
+| `retryable` | Defaults to `true` for `transient` errors. |
+
+<Note>
+  If a verdict is missing and there is **no** `audit_errors` row for that agent, the agent was probably never selected to run, rather than having failed. Check `audit_runs.agent_config` (the partner allow-list or router bridge) and the agent selection rules below.
+</Note>
+
+## A missing verdict: was the agent run, skipped, or failed?
+
+Walk these in order. Each rules out one cause.
+
+<Steps>
+  <Step title="Was the agent selected?">
+    When `agents` is empty or undefined, the executor runs all agents. When an allow-list is present (partner `agents[]` or the router bridge in `audit_runs.agent_config`), only those agents run. A verdict absent because the agent was not in the allow-list is correct behaviour, not a bug. The agent router is feature-flagged per lender and OFF by default; when off, EPC runs all agents. See [router and entitlements](/agents/router-and-entitlements).
+  </Step>
+  <Step title="Did the agent gate itself out?">
+    Some agents skip deterministically:
+    - **Credit evaluation** skips unless there is a classified credit report for the loan (`classification_type IN (credit_report, credit_report_trimerge, credit_report_single)`, status `classified`, non-dry-run, active document), or if `creditS3Bucket` is missing, or if the lender context cannot be resolved. A skip is logged, not necessarily an `audit_errors` row.
+    - **PII fields** can be skipped by scoping (Scenario B): when classify-split is `complete` and a field has zero eligible documents, that field is dropped with no retrieval and no finding. See [Debugging PII retrieval scoping](/runbooks/pii-scoping-debug).
+    - **Zero-retrieval** in PII is intentionally not a finding (logged `pii.zero_retrieval`).
+  </Step>
+  <Step title="Did the agent fail?">
+    If there is an `audit_errors` row, open the matching LangSmith trace (`${agentType}-Loan-${loanId}` in `loanlight-aus`) and read the node that threw. Map the `error_details.step` and `agent_name` to the agent source under `packages/api/src/langgraph/agents/`. From here it is a normal [bad-field](/runbooks/tracing-a-bad-field) or scoping investigation.
+  </Step>
+</Steps>
+
+## A failed run: find the infrastructure failure
+
+A `failed` status comes from the orchestrator's outer try/catch, not from an agent. The failure happened in one of the pre-agent steps, recorded as `error_details.step` (`AuditProcessingStep`):
+
+`initializing → downloading_files → creating_loan → creating_audit_run → classifying_documents → preparing_pipeline → uploading_documents → waiting_for_pipeline → executing_agents → completing_audit`
+
+The `WORKFLOW.ERROR` progress event carries `errorStep`, `errorCode`, and `errorType`. Common infrastructure failures by step:
+
+<AccordionGroup>
+  <Accordion title="downloading_files / creating_loan">
+    S3 retrieval failed, or lender resolution threw. Lender resolution (`resolveLender`) throws only on a double miss (no `lender_auth_clients` mapping for `requestorId` AND no `requestingParty.name`) — this prevents a null-lender loan write. Check the `requestorId` and the requesting-party name in the request. This is a Datadog question (HTTP/S3), not a LangSmith one. See [Datadog](/ops/datadog).
+  </Accordion>
+  <Accordion title="creating_audit_run — DUPLICATE_AUDIT">
+    The run was rejected as a duplicate. On the EPC path `correlationId` is the `audit_runs.id`. If a row already exists with status `complete` or `failed`, or `processing` and younger than 55 minutes, `createAuditRun` returns `created: false`, emits `WORKFLOW.ERROR` with `errorCode: "DUPLICATE_AUDIT"`, and returns early. This is expected dedup behaviour, not a fault — see the stale-run reset below.
+  </Accordion>
+  <Accordion title="classifying_documents">
+    The pre-audit classification agent threw (the `documentClassification` node is the only one that propagates). This is the one Phase-1 failure that can fail the whole run, because classification is the Phase-1 → Phase-2 barrier and the ledger row must reach a terminal state. Open the `Pre-Audit-Classification` trace.
+  </Accordion>
+  <Accordion title="preparing_pipeline / uploading_documents / waiting_for_pipeline">
+    LlamaCloud ingestion failed or timed out. Readiness is gated by `processing_jobs` and the poller; failure causes are `hard_deadline`, `absolute_ceiling` (57 min), `dedup_stale_row`, or `null_started_at`. A `PIPELINE_NOT_FOUND` triggers one recreate-and-retry. See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
+  </Accordion>
+</AccordionGroup>
+
+## Stale and orphaned runs
+
+A run stuck in `processing` is usually an orphaned task, not a live one. The dedup logic resets it automatically:
+
+- A `processing` run older than `STALE_PROCESSING_THRESHOLD_MINUTES` (55) is treated as orphaned. The next request atomically resets `started_at`, keeps `status="processing"`, clears `completed_at`, and returns `created: true` so the work retries. The 55-minute threshold sits just under the 60-minute SQS visibility timeout.
+- A `processing` run *younger* than 55 minutes is assumed to be actively worked by another task, and a duplicate request is rejected (`created: false`).
+- `findIncompleteAudits(thresholdMinutes=30)` surfaces rows with `completed_at IS NULL AND started_at` older than the threshold — the query for stuck-audit detection.
+- `markAuditAsInterrupted` unconditionally flips a run to `failed` during server-restart cleanup.
+
+<Tip>
+  If a run is stuck and you need it to re-process now rather than waiting for the next trigger, the cleanest lever is a fresh trigger after the 55-minute window, which the stale-reset path will pick up. Do not hand-edit `audit_runs.status` to force completion — `completeAuditRun` is deliberately guarded (`WHERE status IN ('pending','processing')`) so a late success cannot stomp a terminal `failed` state, and bypassing that guard reintroduces the phantom-success race.
+</Tip>
+
+## Which Octy data tools to call
+
+When investigating with Octy, these tools (all `GET /api/oz/tools/[dataset]`, audit-run-scoped, bearer-token auth) cover the run-failure surface. Full catalog in [the Oz tool API](/octy/oz-tool-api).
+
+| Dataset | Returns | Use for |
+|---|---|---|
+| `audit-errors` | `audit_errors` rows (newest first) | The first call: what failed and where. |
+| `classify-split-segments` | latest `document_classifications` per segment | Confirm classification ran and produced buckets. |
+| `pii-validation-results` | `pii_validation_results` | Confirm PII ran and which fields produced verdicts. |
+| `pii-scoping-decision` | synthetic scoping replay (requires `?field_key=`) | Whether a missing PII field was scoped out (Scenario B). |
+| `urla-extraction-results` | the single `urla_extraction_results` row | Confirm URLA extraction produced output. |
+| `urla-rules-engine-results` / `urla-rules-findings` | per-borrower rules results | Co-borrower findings the read API hides. |
+| `property-data-runs` / `property-data-results` | property data | Confirm property data ran. |
+| `red-flag-results` | `red_flag_results` | Property red flags. |
+| `doc-completeness-results` / `doc-expiration-results` / `doc-signature-results` | document health | Confirm document health ran. |
+
+The Octy data tools resolve `audit_run_id` server-side from the issue — the agent never supplies it — and cap result sets (200 rows for most, 500 for documents). Responses are `{ table, data }`.
+
+## Where the failure isn't
+
+Two reminders that prevent wasted time:
+
+- **A `complete` run with a partial result set is not a failed run.** It is an agent failure recorded in `audit_errors`. Investigate the agent, not the orchestrator.
+- **A missing co-borrower finding is not a missing verdict.** The URLA completeness read API pins to `BORROWER_1`. Query the per-borrower tables directly.

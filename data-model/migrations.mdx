@@ -1,0 +1,86 @@
+---
+title: Migration workflow
+description: Authoring and applying Drizzle migrations, and the drift canaries.
+icon: git-branch
+---
+
+LoanLight uses `drizzle-kit` to generate and apply schema migrations. The workflow is: edit the schema TypeScript, generate a numbered SQL migration from the diff, review it, and apply it. **Never hand-write migration SQL from scratch** — let `generate` author it from the schema, then audit the output.
+
+## The scripts
+
+All scripts live in `loanlight-api/packages/api/package.json`.
+
+| Script | Command | Purpose |
+|---|---|---|
+| `db:generate` | `drizzle-kit generate` | Diff `schema/index.ts` against the journal and emit a new numbered SQL migration in `db/migrations/`. **The primary authoring command.** |
+| `db:migrate` | `drizzle-kit migrate` | Apply pending migrations. |
+| `db:check` | `drizzle-kit check` | Detect collisions / consistency issues in the migration set. |
+| `validate:migrations` | `ts-node scripts/validate-migrations.ts` | CI lint (see below). |
+| `test:migration` | `jest --config ./jest.containers.config.json` | Live-Postgres (testcontainers, `postgres:16-alpine`) migration tests. |
+
+## Authoring a migration
+
+<Steps>
+<Step title="Edit the schema">
+Change the table file under `src/database/schema/` and make sure it is re-exported from `index.ts`.
+</Step>
+<Step title="Generate">
+Run `db:generate`. Drizzle diffs the schema against `db/migrations/meta/_journal.json` and writes the next numbered `.sql` file (e.g. `0180_*.sql`).
+</Step>
+<Step title="Review the SQL">
+Read the generated SQL. Confirm it does what you intended and did not emit an unexpected narrowing revert (a common symptom of schema/migration drift — see canaries below).
+</Step>
+<Step title="Validate and test">
+Run `validate:migrations` and `test:migration`. Register P0 migrations in the container test suite.
+</Step>
+<Step title="Apply">
+Run `db:migrate` against the target environment.
+</Step>
+</Steps>
+
+The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0179_audit_runs_tighten_not_null` at time of writing).
+
+<Warning>
+**The migration runner owns the outer transaction.** Do not add raw `BEGIN;` / `COMMIT;` inside a migration `.sql` — it broke atomicity in `0143`.
+</Warning>
+
+## CI lint rules (validate:migrations)
+
+`scripts/validate-migrations.ts` enforces:
+
+- Journal `when` timestamps are strictly increasing.
+- Every `.sql` file has a journal entry and vice-versa.
+- Enum value migrations must use `ADD VALUE IF NOT EXISTS` so they are idempotent on non-transactional re-runs.
+
+## Migration-only constructs
+
+Some constraints cannot be expressed in Drizzle and live only in the SQL, with a comment in the schema file where they would otherwise go:
+
+- `UNIQUE (rule_set_id, code, COALESCE(loan_program_id, nil_uuid))` on `appraisal_rules` / `credit_rules` / `income_rules`.
+- `UNIQUE (lender_id, rule_code, COALESCE(loan_program_id, nil_uuid))` on `income_lender_rule_overrides`.
+
+## Drift canaries
+
+Because `drizzle-kit generate` re-derives SQL from the schema, a schema file that drifts from the latest migration causes a silent revert on the next generate. A set of spec canaries pins the high-risk cases (`src/database/schema/*.spec.ts`):
+
+| Spec | What it pins |
+|---|---|
+| `timestamp-invariants.spec.ts` | Every timestamp column uses `{ withTimezone: true, mode: "string" }`. Omitting it breaks API date formats. |
+| `index-direction.spec.ts` | DESC indexes must be declared `` sql`${t.col} DESC` `` or generate reverts prod to ASC. |
+| `fk-ondelete-policy.spec.ts` | Drizzle `onDelete` mirrors the migration `ON DELETE` action exactly (e.g. `credit_rules.source_template_id` is not an FK). |
+| `fk-repoint.spec.ts` | `relations.ts` repoints match schema `foreignKeys` on both sides. |
+| `operator-check-drift.spec.ts` | The appraisal operator union (incl. `abs_less_than*`) matches the latest migration. |
+| `migration-0161-classification-split-modes.spec.ts` | The classification-mode CHECK set. |
+| `migration-0177-agent-platform.spec.ts`, `migration-0179-audit-runs-not-null.spec.ts` | The agent-platform and `audit_runs` NOT NULL migrations. |
+| `result-readers.spec.ts` | `red_flag_results` reads use the triple `orderBy`. |
+
+<Note>
+The timestamp invariant is why nearly every timestamp column is declared `timestamp(..., { withTimezone: true, mode: "string" })`. A `pg.types.setTypeParser` override returns raw ISO strings (no JS `Date` coercion) for timestamptz/timestamp OIDs.
+</Note>
+
+## Two migration ledgers
+
+Do not confuse:
+
+- The **Drizzle DDL journal** (`_journal.json` + the numbered `.sql` files) — schema structure.
+- The **`migration_runs` table** — a ledger for *data-backfill* migration scripts (PK `id`, `name`, `status` CHECK `pending | complete | failed`, `counts` jsonb, `notes`, `started_at`, `completed_at`). This tracks application-level backfills, not DDL.

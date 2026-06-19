@@ -1,0 +1,105 @@
+---
+title: Audit result tables
+description: The per-agent result tables FK'd to audit_runs.
+icon: clipboard-check
+---
+
+Each audit agent writes its findings to one or more result tables keyed by `audit_run_id`. Every result table below FKs to [`audit_runs.id`](/data-model/core-tables#audit-runs) with **`ON DELETE CASCADE`** — deleting an audit run removes all of its results.
+
+<Note>
+Per-agent failures never fail the run. They are recorded in `audit_errors` (below) while the run still completes. `failAuditRun` is reserved for infrastructure failures.
+</Note>
+
+## PII validation
+
+Written by the [PII-Validation agent](/agents/pii-validation). Two tables: the per-field finding and its per-document evidence (`audit-results.ts`).
+
+### pii_validation_results
+
+PK `id`, `audit_run_id` (NOT NULL).
+
+<ParamField path="field" type="text NOT NULL">The PII field being checked (e.g. `FullName`, `SocialSecurityNumber`).</ParamField>
+<ParamField path="mismo_value" type="text">The value from the MISMO XML.</ParamField>
+<ParamField path="borrower_index" type="integer">Which borrower.</ParamField>
+<ParamField path="has_issue" type="boolean" />
+<ParamField path="issue_kind" type="text">CHECK: `missing | inconsistent | identity_mismatch`.</ParamField>
+<ParamField path="severity" type="text">Default `medium`. CHECK: `high | medium | low`.</ParamField>
+
+Plus `overall_message`, `lang_smith_trace_url`, `created_at`. Indexes on `audit_run_id`, `borrower_index`, `field`, `has_issue`.
+
+### pii_document_validations
+
+Per-document evidence behind each field finding. PK `id`, `validation_result_id` → `pii_validation_results` (cascade). Key columns: `document_name` (NOT NULL), `document_source`, `doc_value`, `page_ref`, `page_number`, `has_issue`, `issue_kind`, `severity`, `message`, `chunk_reference` jsonb, `document_ref`, `snippet_id`, `start_char_idx`, `end_char_idx`, `encompass_attachment_id`, `encompass_attachment_name`, `created_at`.
+
+## Document health
+
+The [Document-Health agent](/agents/document-health) writes three result families: expiration, completeness, and signature verification.
+
+<Tabs>
+<Tab title="Expiration">
+**`doc_expiration_results`** (`audit-results.ts`). PK `id`, `audit_run_id` (NOT NULL).
+
+<ParamField path="document_type / document_name" type="text NOT NULL" />
+<ParamField path="issue_kind" type="text NOT NULL">CHECK: `expired | expiring_soon | date_missing | date_invalid | valid | missing_document`.</ParamField>
+<ParamField path="is_required" type="boolean (nullable)">Resolved from lender YAML `required_documents`. **`NULL` means "absent", not `false`.**</ParamField>
+
+Other columns: `extracted_date`, `expiration_date`, `days_until_expiration`, `is_expired`, `is_expiring_soon`, `message`, `source_location`, `page_reference`, `llama_cloud_file_id`, `special_conditions` text[], `lang_smith_trace_url`, `document_date`, `additional_details`, `expiration_details`, `has_expiration_rules`, `estimated_closing_date`, `account_number`, `created_at`.
+
+**`doc_expiration_evidence`**: PK `id`, `result_id` → `doc_expiration_results` (cascade), `evidence_type` (CHECK `date_extraction | document_classification | expiration_calculation | dedupe_decision`), `file_id`, `file_name`, `page_number`, `snippet_text`, `confidence_score` numeric(3,2), `metadata` jsonb.
+</Tab>
+<Tab title="Completeness">
+**`doc_completeness_results`** (`completeness.ts`). PK `id`, `audit_run_id` (NOT NULL), `document_id` (text, NOT NULL).
+
+<ParamField path="status" type="text NOT NULL">12-value CHECK including `valid_matches_declared`, `invalid_mismatch`, `valid_multi_doc`, `valid_composite`, `valid_independent_collection`, `skipped_*`, `indeterminate`.</ParamField>
+<ParamField path="document_structure" type="text NOT NULL">CHECK: `single_document | multi_document | composite_bundle | independent_collection | no_numbering`.</ParamField>
+<ParamField path="issue_kind" type="text">CHECK: `page_mismatch | valid | indeterminate | multi_doc_mismatch | composite_mismatch | independent_collection_incomplete`.</ParamField>
+
+Other columns: `document_name`, `declared_total_pages`, `actual_pages`, `message`, `llama_cloud_file_id`, `evidence_examples` text[], `evidence_regex_used` text[], `confidence` numeric(3,2), `reasoning`, `sub_documents` jsonb (GIN-indexed), `total_expected_pages`, `created_at`.
+</Tab>
+<Tab title="Signatures">
+**`doc_signature_verification_results`** (`signature-verification.ts`). One row per document per audit run. PK `id`, `audit_run_id` (NOT NULL), `document_type`, `document_name`, `llama_cloud_file_id`, `status` (`all_signed | partially_signed | unsigned | verification_failed`), `message`, `checked_pages` int[], `signed_pages` int[], `created_at`.
+
+**`doc_signature_verification_evidence`**: per-page vision-LLM verdict. PK `id`, `result_id` → results (cascade), `page_number` (NOT NULL), `has_signature` bool (NOT NULL), `confidence` numeric(3,2), `reasoning`, `created_at`.
+</Tab>
+</Tabs>
+
+## Property data
+
+Written by the [Property-Data agent](/agents/property-data). Three tables (`property-data.ts`): a marker run, the raw provider payloads, and the consolidated result.
+
+### property_data_runs
+
+Marks a property-enrichment pass. PK `id`, `audit_run_id` (cascade, NOT NULL), `loan_id` (cascade, NOT NULL), `document_id` (text), `rerun_allowed` bool, `created_at`.
+
+### property_data_raw
+
+Raw provider payloads as jsonb. PK `id`, `audit_run_id`, `loan_id`. Columns: `hasdata_payload`, `listings_payload`, `valuation`, `rent`, `proximity`, `screenshot_meta`, `consolidated_subject` / `consolidated_borrower` / `consolidated_reo`, `attom_payload`, `borrower_attom_payload`, plus `subject_address`, `borrower_address`, `subject_zillow_url`, `borrower_zillow_url`.
+
+### property_data_results
+
+The big enrichment table — one row per resolved property. PK `id`, `audit_run_id`, `loan_id`.
+
+<ParamField path="property_type" type="text">CHECK: `subject | current_home | investment`.</ParamField>
+<ParamField path="county_fips" type="text">**Must be text, never integer** — preserves leading zeros.</ParamField>
+
+Other columns include address fields, `latitude` / `longitude`, `distance_from_subject`, beds/baths/sqft/lot/year, listing fields, `zestimate`, AVM fields (`avm_value` / `avm_confidence` / `avm_low` / `avm_high` / `avm_fsd` / `avm_date`), `flood_zone`, sale history, `price_per_sqft`, `hoa_fee`, `is_pud`, owner fields, jsonb arrays (`photos`, `price_history`, `tax_history`, `sales_history`, `assessment_history`, `liens`, `raw_data`), coverage metrics (`subject_coverage_percent`, `borrower_coverage_percent`, `*_missing_buckets` text[]), ATTOM call counters, `coordinates_source` / `borrower_coordinates_source` (CHECK `hasdata | attom | NULL`), tax fields, and `source_order`.
+
+## Red flags
+
+Written by the [Property-Red-Flags agent](/agents/property-red-flags). **`red_flag_results`** (`red-flags.ts`). PK `id`, `audit_run_id` (NOT NULL), `rule_id` (text, NOT NULL), `message` (text, NOT NULL), `actual_value` jsonb, `expected_value` jsonb, `lender_code`, `loan_purpose`, `occupancy_type`, `metadata` jsonb (GIN-indexed), `severity`, `category`, `rule_name`, `created_at`.
+
+<Warning>
+**Read-order trap-door:** queries against `red_flag_results` must use `orderBy [asc(rule_id), asc(created_at), asc(id)]` (pinned by `result-readers.spec.ts`).
+</Warning>
+
+## audit_errors
+
+Per-agent failure ledger (`audit-runs.ts`). PK `id`, `audit_run_id` → `audit_runs` (cascade, NOT NULL).
+
+<ParamField path="agent_name" type="text">Which agent failed.</ParamField>
+<ParamField path="error_type" type="text NOT NULL">CHECK: `transient | permanent | validation`.</ParamField>
+<ParamField path="error_message" type="text NOT NULL" />
+<ParamField path="error_details" type="jsonb" />
+<ParamField path="retryable" type="boolean" />
+
+Plus `occurred_at`. This is where a failed agent surfaces without taking down the run — see [pipeline lifecycle and dedup](/pipeline/lifecycle-and-dedup).

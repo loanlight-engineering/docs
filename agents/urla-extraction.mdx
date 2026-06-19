@@ -1,0 +1,155 @@
+---
+title: URLA-Extraction agent
+description: The Phase 1 agent that turns MISMO 3.4 XML into structured per-borrower URLA JSON.
+icon: file-json
+---
+
+The URLA-Extraction agent converts a loan's MISMO 3.4 XML (the URLA / Form 1003) into a structured, per-borrower `UrlApplicationView` JSON object. It runs in the [pre-audit stage](/pipeline/pre-audit-stage) (Phase 1) and produces the structured borrower data that nearly every downstream agent depends on: PII fields for [PII validation](/agents/pii-validation), property addresses for [Property-Data](/agents/property-data), and the `LoanContext` for [Document-Health](/agents/document-health). It also runs the [URLA completeness rules engine](/agents/urla-completeness) as an embedded subgraph.
+
+Source root: `loanlight-api/packages/api/src/langgraph/agents/urlaExtraction/`.
+
+| Property | Value |
+|---|---|
+| LangGraph run name | `URLA-Extraction` |
+| Ledger / executor key | `urlaExtraction` |
+| Model | OpenAI `gpt-4.1`, temperature 0 (`URLA_MODELS.extractUrla`, `ChatOpenAI`) |
+| Entry method | `LangGraphService.createUrlaExtractionGraphWithSharedAuditRun(...)` |
+| Production caller | `UrlaPreprocessingService.runUrlaExtractionPreprocessing` (Phase 1 branch A) |
+
+<Note>
+This agent is **OpenAI-based** (`gpt-4.1`), not Claude/Anthropic. Section 1 runs a tool loop plus a separate structured-output pass; every other section uses a single structured-output call.
+</Note>
+
+## What triggers it
+
+`UrlaPreprocessingService` invokes the agent unless `SKIP_LANGGRAPH_AGENTS === "true"`. It threads in `mismoXml`, `lenderCode` (the lender config profile), `resolvedLoanProgram` (the same canonical code used by [classification](/agents/pre-audit-classification)), `bottomRatioPercent`, and the normalized borrower/co-borrower countries of citizenship. On this path `runRulesEngine` is `true`.
+
+### MISMO-hash caching
+
+`checkForCachedUrlaExtraction(loanId, mismoXmlHash)` looks for a prior `complete` `audit_runs` row with the same `mismo_xml_hash` and reuses its `urla_extraction_results.urla_extraction_result`.
+
+- **Cache hit** — extraction is reused (`reuseUrlaExtractionResults`); only the rules engine re-runs with the current `lenderCode`/`loanProgram` via `runRulesEngineForCachedExtraction`. Extraction may not re-run at all.
+- **Cache miss** — fresh extraction runs.
+
+### Outputs and downstream transformers
+
+The service returns `{ auditRunId, urlaExtractionResult: { borrowerRelationshipsResult, borrowerExtractionResults }, rulesEngineSummaries, completed }`, wrapped as `UrlaPreprocessingData` and used to derive:
+
+- `loanContext` via `extractLoanContextFromUrla` (primary borrower) → feeds Document-Health. Yields `loan_purpose`, `occupancy_type`, `employment_type`, `property_value`, `housing_status`, `military_status`, `property_type`, `property_state`, `refinance_purpose` (including delayed-financing detection).
+- `transformedPiiFields` via `transformAllBorrowersToPiiFields` → feeds PII validation. Emits `FullName`, `DateOfBirth`, `SocialSecurityNumber`, `ITIN`, `MailingAddress` (with former-address context), `PropertyAddress`, `MaritalStatus`, `EmployerName`, `EmployerAddress`. Normalizes 9-digit MISMO ZIP to `XXXXX-XXXX` and pads 7/8-digit SSN/ITIN to `XXX-XX-XXXX`.
+- `transformedPropertyAddresses` via `transformToPropertyAddresses` (first borrower) → feeds Property-Data. Builds `AddressExtraction { subjectAddress, borrowerAddress, reoProperties }` and dedupes REO entries that match the subject/borrower address via USPS-aware `addressesMatch`.
+
+Failures are caught and saved as an `audit_errors` row (`agentName: "urlaExtraction"`); downstream agents continue without `loanContext`.
+
+## Top-level graph
+
+`UrlaExtractionStateSchema` (`Annotation.Root`) carries `xmlData`, `runRulesEngine`, `lenderCode`, `loanProgram`, `bottomRatioPercent`, the two `*CountryOfCitizenship` fields, `borrowerRelationshipsResult` (`BorrowerCreditGrouping`), `borrowerExtractionResults` (concat reducer), `rulesEngineSummaries` (concat reducer), and `completed`.
+
+```text
+__start__ → extract-borrower-relationships
+  → [conditional] no borrowerParties → complete
+                 else Send("extract-borrower-data", …) per borrower party
+extract-borrower-data → aggregate-extractions   (fan-in barrier, runs once after all borrowers finish)
+aggregate-extractions
+  → [conditional] !runRulesEngine or no results → complete
+                 else Send("rules-engine", …) per borrower
+rules-engine → complete → __end__
+```
+
+- `extract-borrower-relationships` determines borrower credit groups.
+- `extract-borrower-data` invokes the per-borrower [extraction subgraph](#borrower-extraction-subgraph) and appends `{ borrowerLabel, urlaExtractionResult }` to `borrowerExtractionResults`.
+- `aggregate-extractions` is a no-op barrier so `borrowerExtractionResults` is fully populated before the rules-engine fan-out builds `allBorrowersData` (cross-borrower context).
+- `rules-engine` invokes the [URLA completeness](/agents/urla-completeness) subgraph per borrower. Per-borrower country is picked via `pickCountryOfCitizenshipForBorrower` (`BORROWER_1` → `borrowerCountryOfCitizenship`, else the co-borrower path).
+
+## Borrower relationships
+
+`ExtractBorrowerRelationshipsNode.execute({xmlData})` runs `URLA_MODELS.extractUrla.withStructuredOutput(BorrowerCreditGroupingSchema)` on the full MISMO XML (no tools). It reads only `<RELATIONSHIPS>` (arcrole `ROLE_SharesJointCreditReportWith_ROLE`) and the `Borrower` party roles labeled `BORROWER_N`. For a joint-credit edge `from=BORROWER_X to=BORROWER_Y`, the primary is `BORROWER_Y` and the co-borrower is `BORROWER_X` (`groupType: paired`); unpaired borrowers become `standalone`. On error it returns `{ borrowerRelationshipsResult: undefined }` and the graph routes to `complete`.
+
+`BorrowerCreditGroupingSchema` returns `borrowerParties`, `relationshipEdges`, `creditGroups` (`{ primaryBorrowerRoleLabel, coborrowerRoleLabel?, groupType }`), and `missingRoleLabelsReferenced`.
+
+## Borrower extraction subgraph
+
+Runs once per borrower (`buildBorrowerExtractionSubgraph.ts`). Sections are split across three parallel branches that all run on trimmed XML:
+
+```text
+__start__ → preprocess-xml
+preprocess-xml → extract-section1
+              → extract-section2-and-3
+              → extract-section4-and-rest   (3 parallel branches)
+extract-section1 / 2-3 / 4-rest → merge → __end__
+```
+
+<Steps>
+<Step title="preprocess-xml (PreprocessXmlNode)">
+Trims MISMO XML to the single target borrower to prevent party-mixing, unless there is exactly one `standalone` credit group (`shouldSkipXmlTrimming`). Trimming uses `trimMismoXmlByPartyLabel` (fast-xml-parser with `parseTagValue: false`, which is critical to preserve leading zeros in SSN/ITIN). It removes other borrower `<PARTY>` nodes and returns the original XML on any error.
+</Step>
+<Step title="extract-section1 (ExtractSection1Node)">
+The only section node that runs a **tool loop** (`bindTools(urlaExtractionTools)`): up to 25 iterations of `convertMonthsToYearsMonths` / `addNumbers` calls with a forcing prompt to respond `DONE_TOOL_CALLS`, then a second `withStructuredOutput(Section1BorrowerInfoSchema)` pass for the final object. LangSmith tags `urla, extraction, section1, borrower:<label>`.
+</Step>
+<Step title="extract-section2-and-3 (ExtractSection2And3Node)">
+A single `withStructuredOutput` on a combined `{ section2FinancialInfo, section3RealEstate }`. No tool loop.
+</Step>
+<Step title="extract-section4-and-rest (ExtractSection4AndRestNode)">
+A single `withStructuredOutput` on a combined schema of **sections 4, 5, 7, 8, and 9**. Section 6 (acknowledgements) is commented out.
+</Step>
+<Step title="merge (MergeNode)">
+Combines section results into one `UrlApplicationView` (section 6 omitted). Returns `{ urlaExtractionResult, completed: true }`; if no section produced a result, `urlaExtractionResult` is `undefined`.
+</Step>
+</Steps>
+
+### Tools (section 1 only)
+
+`urlaExtractionTools = [convertMonthsToYearsMonths, addNumbers]`:
+
+- `convertMonthsToYearsMonths({ totalMonths })` → `{ years, months }` (for residency and time-in-line-of-work durations).
+- `addNumbers({ numbers })` → `{ total, count }` (filters non-numeric values; used to sum income).
+
+### System prompt
+
+`getSectionExtractionSystemPrompt(borrowerLabel, schemaMappingInstructions)` is a strict MISMO-3.4 → URLA extractor prompt. Key rules: strict scope (one `<PARTY>` "Subject Party" matched by `xlink:label == {BORROWER_LABEL}` and `PartyRoleType == "Borrower"`), isolation from other parties with two allowed exceptions (global relationships and `<PURCHASE_CREDIT>` under the subject loan), exact-schema output, `null` for missing, no hallucination, dates `YYYY-MM-DD`, money numeric with no commas. Each section's `prompt.ts` injects detailed XPath-like `{SCHEMA_MAPPING_INSTRUCTIONS}`.
+
+## Output shape: UrlApplicationView
+
+The persisted `urla_extraction_result` JSONB is `UrlaExtractionResult = { borrowerRelationshipsResult, borrowerExtractionResults: [{ borrowerLabel, urlaExtractionResult: UrlApplicationView }] }`. See [URLA data model](/data-model/urla-data-model) for the full per-section schemas.
+
+`UrlApplicationView` has **8 keys** (note the absence of `section6Acknowledgements`):
+
+```text
+section1BorrowerInfo, section2FinancialInfo, section3RealEstate,
+section4LoanAndProperty, section5Declarations, section7MilitaryService,
+section8DemographicInfo, section9LoanOriginator
+```
+
+<Warning>
+**Section 6 (Acknowledgements) is disabled** in the extraction runtime. `section6.schema.ts` and the full `UrlApplicationViewSchema` in `urla-schema.ts` still define it, but it is commented out of the combined schema, the merge node, the output types, and the produced object. Any claim that all 9 sections (including acknowledgements) are extracted is stale.
+</Warning>
+
+Every leaf is nullable, and the literal string `"null"` is sanitized to `null` (`sanitizeNullString`). Section coverage at a glance:
+
+| Section | Contents |
+|---|---|
+| 1 | Borrower personal info, contact, current/additional/previous employment, other income sources |
+| 2 | Assets, other assets, liabilities, other liabilities, gifts/grants |
+| 3 | Real estate owned (REO) properties with linked mortgages |
+| 4 | Loan and property: amount, purpose, occupancy, value, other new mortgages, rental income, project type |
+| 5 | Declarations (YES/NO plus bankruptcy chapters) |
+| 7 | Military service |
+| 8 | Demographic info / HMDA (ethnicity, race, sex) |
+| 9 | Loan originator (global PARTIES lookup, not scoped to the subject borrower) |
+
+<Note>
+`LenderLoanInformationSchema` ("Lender Loan Information") is defined in `schemas/lender-loan-info.schema.ts` but is **not wired** into `UrlApplicationView` or any extraction node. Treat it as defined-but-unused.
+</Note>
+
+## Tables written
+
+Persisted by `langgraph.service.ts` (`persistUrlaExtractionResults` / `persistUrlaRulesFindings`). See [URLA data model](/data-model/urla-data-model).
+
+- **`urla_extraction_results`** — `audit_run_id` (unique, FK → `audit_runs` cascade), `loan_id`, `urla_extraction_result` (jsonb, GIN-indexed). One row per audit run.
+- **`urla_rules_engine_results`** — one row per borrower (`borrower_label`, default `BORROWER_1`); unique `(audit_run_id, borrower_label)`. Written by the embedded rules engine.
+- **`urla_rules_findings`** — one row per rule finding.
+
+## Eval fixtures
+
+- `extractSection1/eval` + `fixtures/name-extraction.json`: name-suffix extraction (Encompass `First,Middle,Last` comma format; `suffix=null` when no `<SuffixName>`). Pass threshold 80%.
+- `extractSection2And3/eval` + `fixtures/reo-mortgage-linkage.json`: REO mortgage linkage (free-and-clear property must yield empty `mortgages` plus `mortgagesNotApplicable=true`; linked property must carry the correct creditor). Pass threshold 80%.

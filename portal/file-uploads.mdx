@@ -1,0 +1,57 @@
+---
+title: File uploads
+description: How the portal handles appraisal/credit/income/bank-statement uploads.
+icon: upload
+---
+
+The portal accepts large document uploads for appraisal, credit, income, and bank-statement analyses. There are two upload paths depending on the tool, and the backend parses multipart with Fastify's native `req.parts()`.
+
+## Two upload paths
+
+<Tabs>
+  <Tab title="Server actions to S3 (appraisal, credit)">
+    Appraisal and credit uploads go straight to S3 from a Next server action — there are no presigned URLs.
+
+    - `src/lib/actions/upload-appraisal.ts` (`uploadAppraisalPdf`): 200 MB cap, `.pdf` extension plus a `%PDF-` magic-header check, UUID-validated `runId`, and S3 key `appraisal/<effectiveLenderId>/<runId>/<sanitized>`.
+    - `src/lib/actions/upload-credit.ts`: the credit equivalent.
+
+    The bucket env is `S3_UPLOAD_BUCKET`.
+
+    <Note>
+    The `PORTAL_TEST_PLAN` notes an earlier mismatch where the env was referenced as `PORTAL_S3_BUCKET`; the current variable is `S3_UPLOAD_BUCKET`.
+    </Note>
+  </Tab>
+  <Tab title="Form-data POST proxies (income, bank statements)">
+    Income and bank-statement uploads use form-data POST proxies through the BFF rather than direct S3 server actions. The bank-statement cap is 250 MB (the largest upload type). See [the bank statement / DSCR API surface](/portal/api-bank-statement-dscr).
+  </Tab>
+</Tabs>
+
+## Body-size limits
+
+`next.config.ts` raises the upload ceiling well above the largest cap:
+
+- `experimental.serverActions.bodySizeLimit: "260mb"`
+- `experimental.middlewareClientMaxBodySize: "260mb"`
+
+That is headroom over the 250 MB bank-statement cap; the appraisal cap is 200 MB.
+
+## Backend multipart parsing
+
+The backend (loanlight-api, Fastify) parses multipart uploads with Fastify's native `req.parts()` async iterator.
+
+<Warning>
+The backend does NOT use `multer`. Upload controllers iterate `req.parts()` directly (for example `portal-dscr-agent.controller.ts` and `lender-guideline-documents.controller.ts`). Code or docs referencing `multer` for these routes are wrong.
+</Warning>
+
+## Where uploads land
+
+S3 storage layout and downstream retrieval are documented under storage:
+
+<CardGroup cols={2}>
+  <Card title="S3 layout" icon="folder-tree" href="/storage/s3-layout">
+    Bucket structure and key conventions for partner and integration files.
+  </Card>
+  <Card title="Bank statement / DSCR" icon="banknote" href="/portal/api-bank-statement-dscr">
+    The income and bank-statement proxy API surface.
+  </Card>
+</CardGroup>

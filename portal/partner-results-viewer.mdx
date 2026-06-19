@@ -1,0 +1,56 @@
+---
+title: Partner results viewer
+description: The JWT-cookie results viewer at /results/audits/[auditId].
+icon: eye
+---
+
+The partner results viewer is a separate UI under `/results/audits/[auditId]` that shows audit results to partners and the Encompass (EPC) iframe without a WorkOS login. It authenticates with a short-lived view JWT carried in a cookie. It is not under the `(app)` route group.
+
+## Routes
+
+`/results/audits/[auditId]` with sub-routes `1003-check`, `credit`, `data-consistency`, `document-health`, `property-data`, and `exchange`. It renders with `@loanlight-engineering/shared-ui` `Sidebar`/`SidebarLayout` and the "audit-catalyst" theme.
+
+## Single authorization point
+
+The layout `results/audits/[auditId]/layout.tsx` is the only authorization point. It authorizes via the `ll_results_view` cookie (a JWT verified by `verifyViewToken`, which must match the requested `auditId`) or mock mode.
+
+When unauthorized, the layout renders bare `{children}` so `page.tsx` can show `<ResultsAccessDenied>`. This avoids a fetch → 401 → redirect loop.
+
+<Note>
+The `urlaCompleteness` field is tri-state: `null` (not run) vs `{rules_engine_result:{...}}` (loaded) vs `{rules_engine_result:null}` (deferred). Consumers MUST guard with `=== null` before applying `?? 0` to `failed_count`.
+</Note>
+
+## View tokens
+
+`src/lib/results-access-token.ts` mints and verifies HS256 JWTs (`jsonwebtoken`):
+
+- **Purposes:** exchange (`partner-results-exchange`, `epc-results-exchange`) and view (`partner-results-view`, `epc-results-view`).
+- **Claims:** `{ auditId, lenderId, loanId, lenderCode, purpose, embedContext?, iat, exp }`.
+- **TTL:** `VIEW_TOKEN_TTL_SECONDS = 120`, with `CLOCK_TOLERANCE = 5`.
+- **Functions:** `mintViewToken`, `verifyViewToken`, `verifyExchangeToken`, `decodeViewPurpose`.
+- **Cookie:** `RESULTS_VIEW_COOKIE = "ll_results_view"`.
+- **Secret:** `PARTNER_RESULTS_JWT_SECRET` (required in prod, with a dev fallback).
+
+A short-lived exchange token is swapped for a view cookie at `/results/audits/[auditId]/exchange`. See [results and access URLs](/partner-api/results-and-access-urls) for the partner-facing exchange flow.
+
+## Middleware carve-out
+
+The viewer's data API (`/api/v2/audits/:id/<section>`) needs to be reachable by partners who hold a view token but no WorkOS session. The portal `middleware.ts` carves this out:
+
+```ts
+const PARTNER_AUDITS_V2_PATH = /^\/api\/v2\/audits\/[^/]+(?:\/[^/]+)+$/;
+```
+
+For a `GET` that matches this pattern with no WorkOS session (or with a partner token present — the `ll_results_view` cookie or `Authorization: Bearer`), the middleware bypasses WorkOS entirely. The route handler then authenticates in-handler via `portal-audits-proxy.ts` in priority order: portal session, then `ll_results_view` cookie, then Bearer. Staff who have a `wos-session` fall through to `withAuth` so the `x-workos-session` header is still injected.
+
+<Warning>
+The regex requires a sub-segment past the id (`(?:\/[^/]+)+`). `/api/v2/audits/:id` alone is NOT carved out — it stays gated behind WorkOS. This is enforced by `scripts/check-v2-audits-auth.sh`.
+</Warning>
+
+<Note>
+The legacy `BEARER_AUDIT_PATH` carve-out for `/api/audits/*` plus a Bearer header was removed (LOA-894). Only the v2 `PARTNER_AUDITS_V2_PATH` carve-out remains.
+</Note>
+
+## Encompass iframe embedding
+
+For `/results/audits/` paths, the middleware reads `ENCOMPASS_IFRAME_ORIGINS` and appends a `frame-ancestors` CSP directive while dropping `X-Frame-Options`, so the EPC plug-in can iframe the viewer. See [the Encompass integration overview](/integrations/encompass-overview).

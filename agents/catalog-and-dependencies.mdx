@@ -1,0 +1,120 @@
+---
+title: Agent catalog and dependency DAG
+description: The agents and agent_dependencies tables that define which agents exist and how they depend.
+icon: table
+---
+
+The catalog is two tables. `agents` lists every agent the platform knows about, keyed by a natural string `agent_type`. `agent_dependencies` is the required-edge DAG that says which agents must run before which. Both are loaded once at boot by `AgentRegistryService` and used to compute the required closure for a plan.
+
+The tables are created by migration `0177_agent_platform_catalog_and_appraisal_link.sql` and seeded by `0178_agent_catalog_seed.sql`. The full data model lives in [Agent platform schema](/data-model/agent-platform-schema).
+
+## `agents` — the catalog
+
+File: `database/schema/agents.ts`. The natural string PK `agent_type` is shared by all child tables (`agent_dependencies`, `agent_runs`, `lender_agent_entitlements`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `agent_type` | `varchar(64)` PK | Natural key, e.g. `piiValidation`. |
+| `display_name` | `text` NOT NULL | Human label, e.g. "PII Validation". |
+| `kind` | `varchar(16)` NOT NULL | `audit_stage` or `standalone`. CHECK `agents_kind_check`. |
+| `audit_phase` | `integer` (nullable) | Dense 0/1/2 for `audit_stage`; NULL for `standalone` (and for the inactive `liabilitiesAssessment`). |
+| `requires_llama_indexing` | `boolean` NOT NULL (false) | Drives `PipelineBlueprint.needsIndexing`. |
+| `is_billable` | `boolean` NOT NULL (false) | Billing flag. |
+| `active` | `boolean` NOT NULL (true) | Inactive agents are excluded from closure and selection. |
+| `created_at`, `updated_at` | `timestamptz` NOT NULL | |
+
+`AGENT_KIND = ["audit_stage", "standalone"]` (exported type `AgentKind`).
+
+## Seeded catalog
+
+These are the rows seeded by `0178`. All inserts are `ON CONFLICT DO NOTHING` (idempotent).
+
+| agent_type | display_name | kind | audit_phase | requires_llama_indexing | is_billable | active |
+|---|---|---|---|---|---|---|
+| `preAuditClassification` | Pre-Audit Classification | audit_stage | 0 | true | false | true |
+| `urlaExtraction` | URLA Extraction | audit_stage | 0 | true | true | true |
+| `piiValidation` | PII Validation | audit_stage | 1 | true | true | true |
+| `propertyData` | Property Data | audit_stage | 1 | true | true | true |
+| `creditEvaluation` | Credit Evaluation | audit_stage | 1 | true | true | true |
+| `documentHealth` | Document Health | audit_stage | 2 | true | true | true |
+| `redFlags` | Red Flags | audit_stage | 2 | true | true | true |
+| `appraisalEvaluation` | Appraisal Evaluation | standalone | NULL | false | true | true |
+| `income` | Income | standalone | NULL | false | false | true |
+| `liabilitiesAssessment` | Liabilities Assessment | audit_stage | NULL | false | true | **false** |
+
+<Note>
+The `agent_type` values here are the catalog keys, not the LangSmith run-name agent tags. For example the catalog key is `piiValidation` while LangSmith runs are named with the agent type `PII-Validation`. The per-agent reference pages document each agent's behavior: [Pre-audit classification](/agents/pre-audit-classification), [URLA extraction](/agents/urla-extraction), [PII validation](/agents/pii-validation), [Property data](/agents/property-data), [Property red flags](/agents/property-red-flags), [Credit evaluation](/agents/credit-evaluation), [Document health](/agents/document-health), [Appraisal evaluation](/agents/appraisal-evaluation), [Income analysis](/agents/income-analysis).
+</Note>
+
+### Catalog notes and traps
+
+<AccordionGroup>
+  <Accordion title="liabilitiesAssessment is seeded inactive">
+    `liabilitiesAssessment` is the only genuine stub. It is seeded with `active=false` and `audit_phase=NULL` as a placeholder. Because it is inactive, it never appears in a required closure or a plan. Liabilities and DTI live inside the fully-implemented `creditEvaluation` agent. See [Liabilities assessment](/agents/liabilities-assessment).
+  </Accordion>
+  <Accordion title="urlaCompletenessRulesEngine is NOT a catalog agent">
+    The URLA completeness rules engine is deliberately absent from the catalog. It is an embedded subgraph of `urlaExtraction` and is never scheduled or billed independently. See [URLA completeness](/agents/urla-completeness).
+  </Accordion>
+  <Accordion title="income is a non-billable standalone">
+    `income` is seeded as a `standalone` agent (`audit_phase=NULL`, `is_billable=false`). It has no dependency edges, so its closure is empty. In practice income runs as a module pipeline rather than a standard catalog-driven LangGraph agent — see [Income analysis](/agents/income-analysis).
+  </Accordion>
+  <Accordion title="creditEvaluation is fully implemented">
+    Despite older descriptions calling it a stub, `creditEvaluation` is a fully-implemented agent and is seeded active and billable. See [Credit evaluation](/agents/credit-evaluation).
+  </Accordion>
+</AccordionGroup>
+
+## `agent_dependencies` — the required-edge DAG
+
+File: `database/schema/agent-dependencies.ts`. Composite PK `(agent_type, depends_on)`. Both columns FK to `agents(agent_type)` with **ON DELETE NO ACTION** — deleting a referenced agent that still has surviving edges fails loudly to protect DAG integrity.
+
+Every edge is implicitly "required"; there is no `kind` column. By convention (enforced at boot) an edge always points to a **strictly lower** phase.
+
+### Seeded edges
+
+```text
+piiValidation     → preAuditClassification, urlaExtraction              (phase 1 → 0)
+propertyData      → preAuditClassification, urlaExtraction              (phase 1 → 0)
+creditEvaluation  → preAuditClassification, urlaExtraction              (phase 1 → 0)
+documentHealth    → preAuditClassification, propertyData, urlaExtraction (phase 2 → 0/1)
+redFlags          → propertyData, urlaExtraction                        (phase 2 → 1/0)
+```
+
+Standalone agents (`appraisalEvaluation`, `income`) have no edges; their closure is empty by construction.
+
+## Boot-time loading and validation
+
+`AgentRegistryService` (`langgraph/agents/agent-registry.service.ts`) implements `OnModuleInit`. At boot it:
+
+<Steps>
+  <Step title="load()">
+    Parallel select from `agents` and `agent_dependencies`; builds `catalog: Map<agentType, AgentRecord>`, `edges`, and `adjList`.
+  </Step>
+  <Step title="assertNoCycle()">
+    Kahn's algorithm over the edges; throws if the DAG has a cycle.
+  </Step>
+  <Step title="assertEdgesPointToLowerPhase()">
+    Every edge's source `auditPhase` must be a non-null integer strictly greater than the target's `auditPhase`. Both endpoints must have non-null phases.
+  </Step>
+  <Step title="assertNoDrift()">
+    Every non-hyphenated registered graph name (from `GraphRegistryService.getRegisteredGraphs()`) and every `EXECUTOR_AGENT_KEYS` entry must be an active catalog row, or boot throws.
+  </Step>
+</Steps>
+
+`EXECUTOR_AGENT_KEYS` is a hard-coded static used by the drift guard:
+
+```ts
+["piiValidation", "documentHealth", "urlaExtraction", "propertyData", "redFlags", "creditEvaluation"]
+```
+
+## The required closure
+
+`requiredClosure(requested: string[]): string[]` is the keystone query the router uses. It computes the transitive required closure of the requested agents:
+
+- Standalone agents and unknowns contribute nothing.
+- A DFS (`collectDeps`) collects each agent plus all transitive `dependsOn`.
+- The result is filtered to **active** rows only.
+- It is sorted phase-ascending (phase 0 first; NULL sorts to Infinity), with a `localeCompare` tiebreak.
+
+Worked example from the spec: `requiredClosure(["redFlags"])` returns `["preAuditClassification", "urlaExtraction", "propertyData", "redFlags"]`.
+
+The router consumes this closure when it builds a plan. See [Agent router and entitlements](/agents/router-and-entitlements).

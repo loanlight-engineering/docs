@@ -1,0 +1,117 @@
+---
+title: Agent runs ledger and reconciler
+description: The per-(audit_run, agent) agent_runs ledger and the reconciler.
+icon: list-checks
+---
+
+The `agent_runs` ledger records one row per (audit run, agent). It is additive: rows are minted `pending`, advanced as agents settle, and the run is completed once no non-terminal row remains. `AgentRunReconciler` owns the row lifecycle and drives container completion.
+
+## `agent_runs` — the ledger table
+
+File: `database/schema/agent-runs.ts`. Full schema in [Agent platform schema](/data-model/agent-platform-schema).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `audit_run_id` | `uuid` NOT NULL | FK `audit_runs(id)` ON DELETE CASCADE. |
+| `agent_type` | `varchar(64)` NOT NULL | FK `agents(agent_type)` ON DELETE NO ACTION. |
+| `status` | `varchar(16)` NOT NULL (`pending`) | CHECK `agent_runs_status_check`. |
+| `skip_reason` | `text` | Populated only for `skipped` rows. |
+| `external_run_id` | `uuid` | Representative external detail-row pointer for fan-out agents (e.g. appraisal `runId`). |
+| `langsmith_url` | `text` | Resolvable trace URL (appraisal back-fills this). |
+| `started_at` | `timestamptz` | Set when flipping to `processing`. |
+| `completed_at` | `timestamptz` | Set on any terminal flip; cleared on `reopen`. |
+| `errors` | `jsonb` | Per-agent error rollup (mirrors `audit_errors` at agent granularity). |
+| `created_at` | `timestamptz` NOT NULL | |
+
+Constraints:
+
+- UNIQUE `agent_runs_audit_run_id_agent_type_unique` on `(audit_run_id, agent_type)` — one row per agent per audit run. This is the idempotency anchor for `ensure` / `onConflictDoNothing`.
+- INDEX `idx_agent_runs_agent_type_status` on `(agent_type, status)`.
+
+### Status vocabulary
+
+`AGENT_RUN_STATUS = ["pending", "processing", "complete", "failed", "skipped"]` (type `AgentRunStatus`).
+
+- Terminal: `complete`, `failed`, `skipped`.
+- Non-terminal: `pending`, `processing`.
+
+<Warning>
+The ledger uses `complete`, not `completed`. The CHECK constraint pins this. The container `audit_runs.status` is the same way.
+</Warning>
+
+## `AgentRunReconciler`
+
+File: `langgraph/agents/agent-run-reconciler.ts`. Injects the Drizzle db and `AuditService`. Constants: `TERMINAL_STATUSES = ["complete","failed","skipped"]`, `NON_TERMINAL_STATUSES = ["pending","processing"]`. `FlipOptions = { externalRunId?, langsmithUrl?, errors? }`.
+
+<AccordionGroup>
+  <Accordion title="flip(auditRunId, agentType, status, options?)">
+    Advance a single row. Builds the SET: `status`; `started_at = now` if `processing`; `completed_at = now` if terminal; plus optional `external_run_id` / `langsmith_url` / `errors`. The UPDATE is **guarded** to only touch rows whose current status is non-terminal (`inArray(status, [pending, processing])`).
+
+    Consequences: re-flipping a terminal row is a no-op; a late `complete` cannot stomp a terminal `failed`. Moving a terminal row back to `processing` is `reopen`'s job only.
+  </Accordion>
+  <Accordion title="ensure(auditRunId, agentType)">
+    `INSERT ... VALUES(status:'pending') ON CONFLICT (audit_run_id, agent_type) DO NOTHING`. Idempotent — lets observer mode be the first to observe an agent and still have a row to flip later. Never resets an existing row.
+  </Accordion>
+  <Accordion title="reopen(auditRunId, agentType)">
+    Rerun-after-fail. In a transaction: flip the agent row `complete | failed → processing` (clears `completed_at`), guarded `inArray(status, [complete, failed])` so a `skipped` row is intentionally left untouched; and flip the container `audit_runs` row `complete | failed → processing` (clears `completed_at`). Emits the container vocabulary value `processing`.
+  </Accordion>
+  <Accordion title="tryCompleteAuditRun(auditRunId): boolean">
+    Drives the container terminal once no non-terminal ledger row remains. Reads all `agent_runs` statuses for the audit.
+
+    - **Vacuous guard:** returns `false` if there are zero rows — never completes an empty ledger, because the first insert may not have committed.
+    - Returns `false` if any row is non-terminal.
+    - Otherwise calls `auditService.completeAuditRun(auditRunId)` and returns `true`.
+
+    An all-failed run still becomes `complete` (failed is terminal). Idempotent.
+  </Accordion>
+</AccordionGroup>
+
+`AuditService.completeAuditRun` sets `status='complete'` and `completed_at`, guarded `inArray(status, [pending, processing])`, and swallows errors (logs a warning). It emits the CHECK-pinned `complete`, never `completed`.
+
+## Who writes the ledger
+
+The ledger is written from three places (PRD §4.6):
+
+<Steps>
+  <Step title="The router — mints rows up front">
+    `route` / `instrumentExistingRun` insert `pending` (and `skipped`) rows in a transaction with `onConflictDoNothing`.
+  </Step>
+  <Step title="The pre-audit barrier — terminalizes phase-0 rows">
+    `PreAuditStageService` uses `ledgerObserver.recordTerminal` to flip `preAuditClassification` and `urlaExtraction` to `complete` or `failed`. Phase-0 foundation rows must reach a terminal state or a later `tryCompleteAuditRun` deadlocks.
+  </Step>
+  <Step title="The executor and dispatchers — terminalize phase-1/2 and standalone rows">
+    `AuditAgentsExecutor` calls `ledgerObserver.recordSettled` per agent in its `Promise.allSettled` loop. The LOS dispatcher and the appraisal processor flip their own rows and then call `tryCompleteAuditRun`.
+  </Step>
+</Steps>
+
+## Observer-mode backfill
+
+`AgentRunLedgerObserver` (`langgraph/agents/agent-run-ledger-observer.service.ts`) is the env-flag-gated, best-effort wrapper over the reconciler used in observer mode. It injects only `AgentRunReconciler`.
+
+- `ensurePending(auditRunId, agentTypes[])` — `reconciler.ensure(...)` per agent (mint pending rows before fan-out).
+- `recordTerminal(auditRunId, agentType, status, options?)` — `ensure` then `flip` (idempotent terminalize).
+- `recordSettled(auditRunId, agentType, PromiseSettledResult)` — maps a settled result: `fulfilled → complete`; `rejected → failed` with an `errors` rollup. `rollupErrors` turns an `AggregateError` (the credit fan-out of per-document failures) into `{ message, errors: [...] }` and everything else into `{ message }`.
+
+Two hard contracts: it is flag-gated (no writes when OFF — byte-identical to today, zero ledger writes) and best-effort (a ledger blip must never throw into the audit pipeline; errors are caught and logged with `[LEDGER]`). The flag is the env var `AGENT_RUNS_LEDGER_ENABLED`, read with strict `=== "true"`. See [Feature flags and rollout](/agents/feature-flags-and-rollout).
+
+## Where the ledger is written per path
+
+| Path | Instrumentation | Terminalization |
+|---|---|---|
+| EPC | `instrumentExistingRun` (closure) when `agent_router_epc_enabled` | Pre-audit barrier (phase 0) + executor `recordSettled` (phase 1/2). |
+| LOS | `instrumentExistingRun` (flat, `expandClosure:false`) when `agent_router_los_enabled` | `settleLosLedger` flips each row then `tryCompleteAuditRun`. |
+| Partner | `route` when `PARTNER_VIA_ROUTER` | Executor `recordSettled`. |
+| Portal appraisal | `route` when `APPRAISAL_VIA_ROUTER` | Processor `flip(..., "complete", { externalRunId, langsmithUrl })` then `tryCompleteAuditRun`; `reopen` on re-claim. |
+
+For the LOS suite, `LOS_LEDGER_AGENTS = ["piiValidation", "documentHealth", "propertyData", "redFlags"]`, and `redFlags` is flipped `complete` only if `propertyData` succeeded, else `skipped` (it only runs on a successful `propertyData`).
+
+## Invariants
+
+<Warning>
+LOS must use `expandClosure: false`. Closure expansion would mint phase-0 foundation rows that never flip, deadlocking `tryCompleteAuditRun`.
+</Warning>
+
+<Note>
+`tryCompleteAuditRun` has a vacuous-empty guard: it never completes a container with zero ledger rows, protecting against the first ledger insert not having committed yet.
+</Note>

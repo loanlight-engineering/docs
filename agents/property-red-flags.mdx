@@ -1,0 +1,180 @@
+---
+title: Property-Red-Flags agent
+description: The deterministic (no-LLM) rule engine for property and borrower risk signals.
+icon: flag
+---
+
+The Property-Red-Flags agent (`Property-Red-Flags`) is a deterministic TypeScript rule engine that
+flags fraud and eligibility risks from consolidated property data and the URLA. It makes **no LLM
+calls**. It lives under `langgraph/agents/propertyRedFlags/`, built by `buildRedFlagsGraph(configLoader?)`.
+
+The agent is invoked by
+`LangGraphService.runPropertyRedFlags(loanId, auditRunId, subjectProperty, borrowerProperty, urla,
+lenderCode, borrowerNames, loanProgram)`. It consumes the outputs of two upstream agents: the
+`ConsolidatedProperty` objects from [Property-Data](/agents/property-data) and the
+`UrlApplicationView` + borrower `Name[]` from [URLA extraction](/agents/urla-extraction).
+
+## Graph topology
+
+A single node:
+
+```text
+__start__ → execute-red-flags → __end__
+```
+
+Input: `{ auditRunId?, lenderCode?, subjectProperty?, borrowerProperty?, urla?, borrowerNames?,
+loanProgram? }`. Output: `{ summary: RedFlagExecutionSummary, completed: boolean }`.
+
+## How the executor runs
+
+`execute-red-flags` wraps `RedFlagsExecutor.execute(...)`:
+
+<Steps>
+<Step title="Load config">
+Loads the lender's `red_flags` config (`RedFlagsConfigService.getRedFlagsConfig`).
+</Step>
+<Step title="Derive RuleContext from the URLA">
+`loanPurpose = urla.section4LoanAndProperty.loanPurpose`,
+`occupancyType = urla.section4LoanAndProperty.occupancy`, merged with `loanProgram`.
+`RuleContext` shape: `loanPurpose` (`PURCHASE | REFINANCE | OTHER | UNKNOWN`), `occupancyType`
+(`PRIMARY_RESIDENCE | INVESTMENT | SECOND_HOME | OTHER | UNKNOWN`), `loanProgram?`.
+</Step>
+<Step title="Filter to enabled rules">
+Starting from `ALL_RED_FLAG_RULES`: per-call `options.disabledRuleIds` are excluded; when a config
+is present, `configService.isRuleEnabled(lenderCode, rule.id, ruleContext)` decides; when no config
+exists, the rule's own `enabled` default applies.
+</Step>
+<Step title="Evaluate and summarize">
+Runs each enabled rule's `evaluator(fullContext)`, collecting `RedFlag[]`. Per-rule errors are
+caught and logged (evaluation continues). `buildSummary` produces a `RedFlagExecutionSummary` with
+`totalFlags`, severity counts, `flags[]`, and `executionTimeMs`.
+</Step>
+</Steps>
+
+<Warning>
+There are no `enableRule()` / `disableRule()` mutators. They previously leaked across `Send()`
+fan-outs by mutating shared module-level rules. Disable rules per call via the
+`options.disabledRuleIds` set instead.
+</Warning>
+
+## Severities and categories
+
+`RedFlagSeverity`: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`.
+
+`RedFlagCategory`: `GENERAL`, `PRIMARY_RESIDENCE`, `INVESTMENT`, `SECOND_HOME`.
+
+A `RedFlag` carries `{ ruleId, ruleName, category, severity, message, fieldPath?, actualValue?,
+expectedValue?, metadata? }`.
+
+## Default enablement
+
+<Warning>
+Every rule in the GENERAL, PRIMARY_RESIDENCE, INVESTMENT, and SECOND_HOME sections ships with
+`enabled: false` — they run **only** when turned on via the lender YAML `red_flags.rules` config.
+The three OWNER_BORROWER_MATCH rules ship with `enabled: true` and run by default even with no
+config.
+</Warning>
+
+Config resolution (`getRuleConfig(lender, ruleId, ctx)`) checks the lender YAML `red_flags.rules` in
+order: `general`, then `loan_purpose[ctx.loanPurpose]`, then `occupancy[ctx.occupancyType]`. A rule
+config of `false` is disabled; `true` or an object is enabled. Thresholds come from
+`red_flags.thresholds`. See [lender YAML config](/lender-config/yaml-config).
+
+## Rule catalog
+
+<Tabs>
+<Tab title="General (enabled: false)">
+| Rule | Severity | Trigger |
+|---|---|---|
+| `INELIGIBLE_PROPERTY_TYPE` | CRITICAL | property type in the program matrix `ineligible_property_types`, or lot acreage > `max_acreage` |
+| `ZESTIMATE_MISMATCH` | HIGH | list price vs zestimate percent diff > `thresholds.zestimate_variance_percent` (default 10) |
+| `NOT_LISTED_FOR_SALE` | HIGH | PURCHASE and subject is not listed for sale |
+| `LISTED_FOR_SALE` | HIGH | REFINANCE and subject is listed for sale |
+| `HOME_VALUE_CHANGE` | MEDIUM | price-history change in a tier window exceeds the tier percent |
+| `RENTAL_VALUE_CHANGE` | MEDIUM | rental price-history change exceeds the tier |
+| `ACTIVE_FORECLOSURE` | CRITICAL | preforeclosure records within last 3 years (appends upcoming auction within ±90 days) |
+| `ZONING_MISMATCH` | HIGH | `lot.zoning` is not residential |
+| `RAPID_RESALE` | HIGH | two most recent sales within `months` (default 6) |
+| `LLC_TO_LLC_SALE` | HIGH | most recent sale buyer and seller both match an entity pattern |
+| `PRICE_DECLINE_FROM_PRIOR` | HIGH | current price < most recent prior sale amount |
+</Tab>
+
+<Tab title="Primary residence (enabled: false)">
+Gated on `occupancy === "PRIMARY_RESIDENCE"`.
+
+| Rule | Severity | Trigger |
+|---|---|---|
+| `LISTED_FOR_RENT` | HIGH | listing status includes RENT / `FOR_RENT` |
+| `RENTAL_HISTORY` | MEDIUM | price history has rental events |
+| `DIFFERENT_STATE_SAME_EMPLOYER` | MEDIUM | subject state ≠ current-address state, and an employer is in the current-address state |
+</Tab>
+
+<Tab title="Investment (enabled: false)">
+Gated on `occupancy === "INVESTMENT"`.
+
+| Rule | Severity | Trigger |
+|---|---|---|
+| `VALUE_EXCEEDS_PRIMARY` | MEDIUM | subject value > borrower primary value |
+| `BORROWER_RENTING_PRIMARY` | MEDIUM / HIGH | A: current address housing expense is RENT. B: OWN but `ownerOccupied === false` and no REO entry at current address |
+| `RENT_VS_1003_MISMATCH` | MEDIUM | rent zestimate > 1003 rental income and percent diff > 10 |
+| `SUBJECT_LISTED_FOR_SALE_DSCR` | HIGH | DSCR program, INVESTMENT occupancy, subject listed for sale |
+</Tab>
+
+<Tab title="Second home (enabled: false)">
+Gated on `occupancy === "SECOND_HOME"`.
+
+| Rule | Severity | Trigger |
+|---|---|---|
+| `DISTANCE` | HIGH | `subjectProperty.proximity.miles < 50` (too close to primary) |
+| `MULTIFAMILY` | HIGH | URLA units 2-4, or property type includes multi/duplex/triplex/fourplex |
+</Tab>
+
+<Tab title="Owner-borrower match (enabled: true)">
+Category GENERAL. These run by default with no config.
+
+| Rule | Severity | Trigger |
+|---|---|---|
+| `SUBJECT_OWNER_BORROWER_MISMATCH` (Rule A) | worst of HIGH / MEDIUM / INFO | REFINANCE: ATTOM subject owners don't match `borrowerNames` |
+| `RESIDENCE_OWNER_BORROWER_MISMATCH` (Rule B) | worst severity | current address housing expense is OWN, borrower-property owners don't match (skips if refinance and current == subject) |
+| `RESIDENCE_RENTER_ON_TITLE` (Rule C) | MEDIUM | current address housing expense is RENT, but a borrower exact-matches an ATTOM owner on title |
+</Tab>
+</Tabs>
+
+Name matching (`utils/name-matching.ts`) returns a `MatchSeverity` of `HIGH | MEDIUM | INFO | null`,
+where `null` is an exact match (a pass that emits no flag). An exact match on any owner suppresses
+the flag.
+
+## Persistence
+
+The service (`langgraph.service.ts` `persistRedFlagResults`), not the graph, writes
+`red_flag_results` (`src/database/schema/red-flags.ts`):
+
+<ResponseField name="red_flag_results" type="table">
+`id`, `audit_run_id` (FK, cascade), `rule_id`, `message`, `actual_value` (jsonb), `lender_code`,
+`loan_purpose`, `occupancy_type`, `metadata` (jsonb), `severity`, `category`, `rule_name`,
+`expected_value` (jsonb), `created_at`. Indexes on `audit_run_id`, `rule_id`, `lender_code`
+(partial), and `metadata` (gin).
+</ResponseField>
+
+Each `summary.flags[]` becomes a row: `rule_id = flag.ruleId`, severity normalized,
+`loan_purpose` / `occupancy_type` from URLA Section 4, and `metadata` enriched with a
+`propertyAddress` (the borrower address when `fieldPath` starts with `borrowerProperty`, else the
+subject address). No rows are persisted when `summary.flags` is empty, and a persistence failure
+does not fail the audit (logged only).
+
+## Related
+
+<Columns cols={2}>
+<Card title="Property-Data" href="/agents/property-data">
+Produces the ConsolidatedProperty inputs.
+</Card>
+<Card title="URLA extraction" href="/agents/urla-extraction">
+Provides the UrlApplicationView and borrower names.
+</Card>
+<Card title="Lender YAML config" href="/lender-config/yaml-config">
+The `red_flags` section: rules, thresholds, program matrices.
+</Card>
+<Card title="Issue kinds" href="/pipeline/issue-kinds">
+How red flags surface as audit issues.
+</Card>
+</Columns>

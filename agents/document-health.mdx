@@ -1,0 +1,281 @@
+---
+title: Document-Health agent
+description: Classification, page completeness, expiration, required-document, and signature checks.
+icon: file-check
+---
+
+The Document-Health agent (`Document-Health`) validates a loan's parsed documents for
+classification, page completeness, expiration, required-document presence, and signatures. It is
+a LangGraph compiled graph under `langgraph/agents/documentHealth/`, built by `buildGraph()`
+(exported as `buildDocumentHealthGraph`, legacy alias `buildDocumentExpirationGraph`).
+
+The agent is constructed and invoked by `LangGraphService.createDocumentHealthGraph(...)` in
+`langgraph/langgraph.service.ts`, which generates the `auditRunId`, a thread id of
+`${loanId}-document-health-${auditRunId}`, creates the `audit_runs` row, emits
+`EVENTS.AGENT.DOCUMENT_HEALTH.START`, then invokes the graph with
+`{ pipelineId, loanId, documentId, auditRunId, lenderCode, productType, estimatedClosingDate }`.
+
+<Info>
+`pipelineId` is the loan's **LlamaCloud pipeline** (vector index) holding the parsed documents.
+Retrieval inside the agent goes through the injected `LlamaRestClient`. See
+[LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
+</Info>
+
+## Graph topology
+
+```text
+__start__ → prepare → plan-document-check → document-completeness
+  document-completeness --(conditional fan-out via Send)-->
+    ├── validate-document-expiration   (one Send per document, parallel)
+    ├── signature-verification          (one Send per signature-required doc, parallel; a SUBGRAPH)
+    └── (no pending docs) → verify-required-documents
+  validate-document-expiration → verify-required-documents   (join)
+  signature-verification        → verify-required-documents   (join)
+  verify-required-documents → aggregate → __end__
+```
+
+Parallelism uses the LangGraph `Send` primitive. The `results` and `signatureFindings` channels
+accumulate via concat reducers. `buildVerifyRequiredDocsSend(state)` builds the no-documents join
+target.
+
+## Models
+
+All Document-Health LLM calls run `ChatOpenAI` with `temperature: 0`, `timeout: 120000ms`,
+`maxRetries: 2`. The model map is `DOCUMENT_HEALTH_MODELS` in `models.ts`.
+
+| Key | Model | Used for |
+|---|---|---|
+| `planDocumentCheck` | `gpt-4o` | document discovery + classification |
+| `validateDocumentExpiration` | `gpt-4o-mini` | date extraction |
+| `presenceMini` | `gpt-4o-mini` | required-doc fuzzy presence recheck |
+| `documentCompleteness` | `gpt-4o` | page-numbering structure analysis |
+| `signatureVision` | `gpt-5.2` | vision signature detection on page screenshots |
+| `signatureCue` | `gpt-4o-mini` | text-cue (signature-block) page selection |
+
+<Note>
+The signature vision model is **`gpt-5.2`** (`models.ts`), not `gpt-4o` or a `gpt-4-vision`
+variant. Any prompt or doc claiming a GPT-4 vision model is stale.
+</Note>
+
+## Stages
+
+<Steps>
+<Step title="prepare">
+Emits a progress event and passes through `pipelineId`, `loanId`, `documentId`, and `auditRunId`.
+</Step>
+
+<Step title="plan-document-check — discovery and classification">
+Builds `documentsToCheck` (curated, deduplicated, classified documents with LlamaCloud file IDs)
+and copies it to `pending`. Two sourcing paths:
+
+- **DB classifications (preferred, Stage 0).** When `ClassifySplitPersistenceService` is injected,
+  reads `getActiveClassificationsForLoan(loanId)` and uses rows where
+  `classification_status === 'classified'` with a `llama_cloud_file_id`. The LlamaCloud
+  `llama_classify_type` is mapped to a Document-Health `documentType` via
+  `getDocTypeToClassificationsMap()` (built from `document-types.yaml`'s `classifications:` field).
+  This reuses the output of the [Pre-Audit-Classification agent](/agents/pre-audit-classification).
+- **GPT-4o fallback (Stages 1-3).** Used when persistence is not wired, there are no usable
+  classified rows, or the read throws. Stage 1 lists files + chunks from LlamaCloud; Stage 2 runs
+  structured-output classification against the lender's allowed types
+  (`buildDocumentPlanSchema(allowedTypes)`); Stage 3 deduplicates per type via lender
+  filename-pattern scoring (`preferred_file_patterns`), keep-all for bank statements, and LLM
+  arbitration on ambiguous candidates.
+
+The `documentType` enum mirrors `document-types.yaml` (~100 types: `credit_report`, `aus_report`,
+`urla_1003`, `paystub`, `w2`, `written_voe`, `tax_returns_personal`, `bank_statements`,
+`purchase_contract`, `appraisal`, `flood_certificate`, `title_commitment`, `closing_disclosure`,
+and a catch-all `other`).
+</Step>
+
+<Step title="document-completeness — page completeness">
+Operates on **all pipeline files** (not just classified ones); `buildGraph` fetches `pipelineFiles`
+once via `fetchPipelineFiles(pipelineId)`. A hybrid regex + `gpt-4o` approach extracts a declared
+total ("Page X of Y", "Pg. X of Y", bare "X/Y") from chunk text, validates bare "X/Y" candidates
+with a focused LLM call, then classifies the document's structure against actual PDF page count.
+
+`DocumentStructure`: `single_document | multi_document | composite_bundle |
+independent_collection | no_numbering`.
+
+`CompletenessStatus` values include `valid_no_numbering`, `valid_matches_declared`,
+`valid_multi_doc`, `valid_composite`, `valid_independent_collection`,
+`invalid_independent_collection`, `invalid_mismatch`, `invalid_multi_doc_mismatch`,
+`invalid_composite_mismatch`, `skipped_multi_doc`, `skipped_composite`, and `indeterminate`.
+Multi/composite validation requires LLM confidence ≥ 0.7 and present sub-documents, otherwise the
+status degrades to `skipped_*`.
+</Step>
+
+<Step title="validate-document-expiration — one Send per document">
+For each document, resolves a display name and a `getDocumentRequirement(documentType, lenderCode,
+productType)`. If no rule exists, the result is `issueKind: "valid"` ("has no expiration rules").
+Otherwise it extracts the document date (full-file retrieval by default; chunked retrieval for
+large docs or on a context-length error), then computes expiration:
+
+- `expirationDate = extractedDate + expiration_days`; the baseline is `estimatedClosingDate ?? today`.
+- `isExpired = isExpiredToday || willExpireOnOrBeforeTargetDate`; `isExpiringSoon` is within
+  `warning_days` after the baseline. `business_days` mode skips weekends.
+- A special case adopts a different `expiration_days` only if it is **more restrictive**.
+
+`issueKind` enum: `expired | expiring_soon | date_missing | date_invalid | valid |
+missing_document`. This enum must remain a subset of the DB check constraint
+`doc_expiration_results_issue_kind_check`.
+
+<Warning>
+**Appraisals emit TWO results.** When `documentType === "appraisal"`, the node emits a primary
+result (`additionalDetails: "flag_type=120_day"`, the configured rule) and a secondary result
+(`additionalDetails: "flag_type=12_month"`, `expiration_days: 365`). Downstream consumers must
+expect both rows.
+</Warning>
+</Step>
+
+<Step title="signature-verification — vision subgraph">
+A standalone LangGraph subgraph (`buildSignatureVerificationSubgraph(llama)`) embedded as a node,
+fanned out one Send per signature-required document. Whether a document type requires a signature
+is lender-driven via the YAML `signature_required_documents` list (case-insensitive, falls back to
+DEFAULT). See the [subgraph detail](#signature-verification-subgraph) below.
+</Step>
+
+<Step title="verify-required-documents — join point">
+Resolves the required-document set for the loan's program
+(`getRequiredDocumentsByProgram(...)`), merges `global_required_documents`, then evaluates each
+document's `day_1` or `pre_close` condition. The `present` set is built from validated results whose
+`issueKind ∈ {valid, expired, expiring_soon}`. Missing required documents get an LLM-assisted
+recheck (`presenceMini`, semantic search) to reduce false negatives. The node emits synthetic
+results: present-required → `issueKind: "valid"`; missing → `issueKind: "missing_document"`. It
+returns `requiredDocumentTypes`, which is threaded into `aggregate` so
+`doc_expiration_results.is_required` can be set.
+</Step>
+
+<Step title="aggregate — persistence">
+Reconciles bank-statement account numbers against URLA Section 2 assets, validates bank-statement
+count + continuity, deduplicates results, resolves human-readable document names, and persists to
+Postgres. Emits `EVENTS.AGENT.DOCUMENT_HEALTH.COMPLETE` and returns `{ completed: true }` (even on
+error, to avoid loops).
+</Step>
+</Steps>
+
+## Required-document conditions
+
+`verify-required-documents` evaluates per-document conditions from the lender YAML
+(`day_1` / `pre_close`). Conditions are resolved against a `LoanContext` derived from the URLA.
+
+`SUPPORTED_CONDITIONS`: `required`, `not_required`, `if_expired`, `if_rerun`, `if_updated`,
+`if_redisclosed`, `if_used`, `if_needed` (property value > $2,000,000), `if_purchase`,
+`if_refinance`, `if_w2`, `if_self_employed`, `if_investment`, `if_renting`, `if_condo`,
+`if_entity_vesting`, `if_cash_out`, `if_delayed_financing`, `if_texas_50a6`, `if_ny`,
+`if_active_duty`, plus the parameterized `if_present:<doc_type>`.
+
+| Condition | Resolves against |
+|---|---|
+| `if_purchase` / `if_refinance` | `loanContext.loan_purpose` (`PURCHASE` / `REFINANCE`) |
+| `if_w2` / `if_self_employed` | `loanContext.employment_type` |
+| `if_investment` | `loanContext.occupancy_type === 'INVESTMENT'` |
+| `if_renting` | `housing_status === 'RENT'` |
+| `if_condo` | `property_type === 'CONDO'` |
+| `if_entity_vesting` | `title_held_in_trust === true` |
+| `if_needed` | `property_value > $2,000,000` |
+| `if_cash_out` / `if_delayed_financing` | `refinance_purpose` |
+| `if_texas_50a6` | `property_state === 'TX'` AND `refinance_purpose === 'CASH_OUT'` |
+| `if_ny` | `property_state === 'NY'` |
+
+<Warning>
+When the `LoanContext` is missing the field a condition needs, the condition resolves to status
+`skipped` — it is **not** flagged. `if_active_duty` is always skipped (military status is not
+wired). `FUTURE_CONDITIONS` (`if_flagged`, `if_amended`, `if_in_flood_zone`) are logged and
+skipped.
+</Warning>
+
+## Signature-verification subgraph
+
+The subgraph selects candidate pages, then verifies signatures with a vision model.
+
+```text
+__start__ → select-signature-pages
+  --(conditional)--> select-cue-batch (parallel batches of 10) → aggregate-cue-results
+                 OR (XML tags / not required / error / no snippets) → fetch-screenshots
+  aggregate-cue-results → fetch-screenshots
+  fetch-screenshots --(conditional)--> verify-single-page (parallel, one per image) → build-result
+                                   OR (no screenshots) → build-result
+  build-result → __end__
+```
+
+Page selection uses three strategies in order:
+
+1. **XML tags** (`findSignatureTagPages`, highest confidence, no LLM) — scans LlamaCloud snippets
+   for `<signature>` tags.
+2. **LLM cue** (`signatureCue`, `gpt-4o-mini`) — identifies pages with a signature block, batched
+   `SIGNATURE_CUE_BATCH_SIZE = 10`, OR-merged across batches.
+3. **Regex fallback** (`findSignatureRegexPages`) — used if all LLM batches return nothing.
+
+Vision verification fetches page screenshots via
+`llama.getPageScreenshotPresignedUrl(documentId, pageNumber - 1)` (0-based), downloads them
+server-side as base64 data URLs (OpenAI cannot fetch S3 presigned URLs), then calls
+`signatureVision` (`gpt-5.2`) per page. `build-result` computes a
+`SignatureVerificationStatus` of `all_signed | partially_signed | unsigned | verification_failed`
+(no page results → `verification_failed`).
+
+## Persistence
+
+`aggregate` writes to Postgres (when the DB is present):
+
+<ResponseField name="doc_expiration_results (+ doc_expiration_evidence)" type="table">
+One row per document expiration / required-document result, written transactionally with evidence.
+`is_required` is set from `requiredDocumentTypes`; `account_number` is masked to `****<last4>`.
+Evidence types: `date_extraction`, `document_classification`, `expiration_calculation`,
+`dedupe_decision`.
+
+<Warning>
+`doc_expiration_results.is_required` is **nullable**. `NULL` means *unknown* (the required set
+could not be resolved) and is never coerced to `false`.
+</Warning>
+</ResponseField>
+
+<ResponseField name="doc_completeness_results" type="table">
+One row per page-completeness result.
+</ResponseField>
+
+<ResponseField name="doc_signature_verification_results (+ doc_signature_verification_evidence)" type="table">
+One row per signature finding, written transactionally (confidence stored as string).
+</ResponseField>
+
+<ResponseField name="audit_errors" type="table">
+Written for every non-`valid` expiration issue (`agent_name: "documentHealth"`,
+`error_type: "validation"`) and for signature `unsigned` / `partially_signed`
+(`issueKind: "signature_missing"`). Per-agent failures never fail the run.
+</ResponseField>
+
+## Lender configuration
+
+Document-Health reads the `document_expiration` section of the lender's YAML config. See
+[lender YAML config](/lender-config/yaml-config) for the full schema. Relevant fields:
+
+- `document_requirements` — per-type `expiration_days`, `warning_days`, `business_days`,
+  `date_locations`, `date_formats`, `special_cases`.
+- `required_documents` / `global_required_documents` / `loan_programs` — category-based required
+  sets with `day_1` / `pre_close` conditions, `required_months`, and `if` metadata gates.
+- `program_aliases`, `program_resolve_fields`, `default_program` — program resolution.
+- `preferred_file_patterns` — filename scoring used during dedup.
+- `signature_required_documents` — document types that trigger the signature subgraph.
+
+<Warning>
+If the DI `LenderConfigLoaderService` is not passed into `buildGraph`, a module-level singleton is
+used that cannot reach the DB store. DB-routed lenders silently degrade to the file adapter and the
+DEFAULT config (a warning is logged). Production DB dispatch requires the DI loader. See
+[lender YAML config](/lender-config/yaml-config).
+</Warning>
+
+## Related
+
+<Columns cols={2}>
+<Card title="Pre-Audit-Classification" href="/agents/pre-audit-classification">
+Produces the DB classifications Document-Health prefers.
+</Card>
+<Card title="Issue kinds" href="/pipeline/issue-kinds">
+How `issueKind` values surface as audit issues.
+</Card>
+<Card title="LlamaCloud retrieval" href="/subsystems/llamacloud-retrieval">
+The retrieval layer behind date extraction and signature snippets.
+</Card>
+<Card title="Lender YAML config" href="/lender-config/yaml-config">
+The `document_expiration` section schema.
+</Card>
+</Columns>

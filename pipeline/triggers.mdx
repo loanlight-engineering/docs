@@ -1,0 +1,131 @@
+---
+title: Triggering an audit
+description: The three entry paths — EPC/SQS, Partner API, and legacy LOS-pull.
+icon: play
+---
+
+An audit run starts from one of three entry paths. Each path resolves to a `trigger_source` value on the `audit_runs` row, which lets you tell after the fact how a run was initiated.
+
+| Path | Trigger | Orchestrator | `trigger_source` |
+|---|---|---|---|
+| EPC (production) | SQS message on `audit-requested-events` | `IntegrationOrchestrationService.processAuditRequest` | `epc` |
+| Partner API | `POST /api/v1/partner/audits` | `IntegrationOrchestrationService.processAuditForPartner` | `partner` |
+| Legacy LOS-pull | `POST /api/v1/los/aus` and `/aus/webhook` | `EncompassAuditOrchestrationService` / `DevConnectAuditOrchestrationService` | `los` |
+
+The `trigger_source` CHECK allowlist also includes `portal`, `admin_rerun`, and `shadow` for runs created through other internal flows.
+
+## EPC path (production)
+
+This is the production revenue path. The external `loanlight-integrations` Encompass plug-in pushes the MISMO XML and PDFs to S3 and publishes an "Audit Requested" EventBridge event. That event lands on the SQS queue `audit-requested-events` (`dev-`-prefixed only when `DEPLOYED_ENVIRONMENT=dev`).
+
+`QueueConsumerService.handleAuditRequested` (`messaging/queue-consumer.service.ts`, an `@SqsMessageHandler`) drains the queue:
+
+<Steps>
+  <Step title="Parse the EventBridge envelope">
+    Reads `parsedBody.detail` from the message body (`{ detail, "detail-type", source }`).
+  </Step>
+  <Step title="Resolve and validate the bucket">
+    `resolveIntegrationAuditS3Bucket(detail.s3Bucket, configService)` enforces the `INTEGRATION_AUDIT_S3_BUCKET_ALLOWLIST`.
+  </Step>
+  <Step title="Build and validate the request">
+    Builds an `IntegrationAuditRequest` from `detail` and validates it with `IntegrationAuditRequestSchema.parse(...)` (Zod).
+  </Step>
+  <Step title="Orchestrate">
+    Calls `orchestration.processAuditRequest(validated)`. Any error is logged and re-thrown to trigger the SQS dead-letter queue.
+  </Step>
+</Steps>
+
+### Request shape — `IntegrationAuditRequestSchema`
+
+<ParamField path="correlationId" type="string (UUID)" required>
+Used as both the `loans.id` and the `audit_runs.id` on the EPC path. This is the dedup key.
+</ParamField>
+
+<ParamField path="requestorId" type="string" required>
+Encompass client ID. Maps to `lender_auth_clients.client_id` for tenant attribution and gates portal access on `GET /audit_runs/:id/results`.
+</ParamField>
+
+<ParamField path="environment" type="string">
+Used for logging and observability; should match the S3 bucket suffix.
+</ParamField>
+
+<ParamField path="s3Bucket" type="string">
+Refined against the integration-audit bucket allowlist.
+</ParamField>
+
+<ParamField path="s3Prefix" type="string">
+Regex-guarded (`^[a-zA-Z0-9][a-zA-Z0-9._\-/]{0,199}\/?$`), rejects `..` segments and leading `/`. Falls back to `correlationId` if absent. This is a path-traversal guard against a cross-tenant S3 read primitive.
+</ParamField>
+
+<ParamField path="loanMetadata" type="object">
+Loan number, lender code, loan program, closing dates, ratios, citizenship, doc types, and more.
+</ParamField>
+
+<ParamField path="documents[]" type="array">
+Optional manifest with per-file SHA-256 `fileHash` for change detection. Each entry: `docId?, docMapType?, fileName?, originalName?, s3Key?, mimeType?, isMismo?, fileHash?, isNew?`.
+</ParamField>
+
+<ParamField path="forceReclassify" type="boolean">
+Forces re-classification even if documents are unchanged.
+</ParamField>
+
+<ParamField path="requestingParty" type="object">
+Lender info (`name` required). `name` is the fallback for lender resolution when `requestorId` does not map.
+</ParamField>
+
+<ParamField path="additionalData" type="object">
+Passthrough carrying shadow-audit flags: `isShadowAudit`, `shadowOfTransactionId`, `shadowAuditLenderName`.
+</ParamField>
+
+<Note>
+The HTTP endpoint `POST /api/v1/integration-events/process` (`IntegrationEventsController`, guarded by `InternalApiKeyGuard`, `@HttpCode(202)`) runs the same Zod validation and fires `processAuditRequest` fire-and-forget. It is internal/test-only and slated for removal in LOA-174. Production ingress is SQS.
+</Note>
+
+## Partner API path
+
+A lender or LOS calls `POST /api/v1/partner/audits` on a loan they have already uploaded. The endpoint (`PartnerAuditsController.createAudit`, `@HttpCode(202)`) is guarded by `PartnerAuthInterceptor` and `PartnerRateLimitInterceptor` (default 100 requests/min/partner).
+
+### Request shape — `CreatePartnerAuditDto`
+
+<ParamField path="loanId" type="string (UUID)" required>
+The previously uploaded loan to audit.
+</ParamField>
+
+<ParamField path="agents" type="string[]">
+Agent allow-list. If omitted, all agents run.
+</ParamField>
+
+<ParamField path="options.estimatedClosingDate" type="string (YYYY-MM-DD)">
+Overrides the closing date used for document expiration checks.
+</ParamField>
+
+### Preconditions and routing
+
+<Steps>
+  <Step title="Loan lookup">
+    `loanService.getLoanByIdAndLender(loanId, lenderId)` → `404` if not found.
+  </Step>
+  <Step title="Status gate">
+    Loan `processing_status` must be `ready_for_audit` or `ready`, else `409 Conflict`.
+  </Step>
+  <Step title="Classification gate">
+    `classifySplitPersistence.hasInProgressRunsForLoan(loanId)` → `409` if classification is still running.
+  </Step>
+  <Step title="Router branch (flag-gated)">
+    With the per-lender `PARTNER_VIA_ROUTER` flag ON, `agentRouter.route(...)` applies the entitlement filter and required-closure expansion. An empty plan deletes the freshly created run and returns `403` with `denied[]`. With the flag OFF (default), `auditService.createAuditRunForPartner(...)` runs the legacy allow-list.
+  </Step>
+</Steps>
+
+The response is `{ auditId, loanId, status: "pending", agents, denied?, startedAt, progressUrl: "/api/v1/partner/audits/:auditId/progress" }`. Execution runs in the background via `processAuditForPartner`; its `.catch` calls `failAuditRun` to cover pre-try throws.
+
+See [Partner API audits](/partner-api/audits) and [Router and entitlements](/agents/router-and-entitlements) for detail.
+
+## Legacy LOS-pull path
+
+`POST /api/v1/los/aus/webhook` (Encompass) and `POST /api/v1/los/aus` (Dev Connect) in `los/los.controller.ts` pull the loan and documents directly from the LOS provider API rather than from S3. The webhook uses `EncompassFieldChangeInterceptor` (alongside signature, requestor-id, and rate-limit interceptors) to decide whether the change is meaningful before triggering `EncompassAuditOrchestrationService.perform`.
+
+These orchestrators delegate to `LosService.processLoan`, `DocumentProcessingService.triggerDocumentProcessing`, and `LangGraphService`, completing the run via `LangGraphService.completeAuditRun`.
+
+<Warning>
+Treat the LOS-pull path as deprecated. The Encompass `LosProvider` is a non-functional stub. New work targets the EPC and Partner paths. See [Legacy Dev Connect](/integrations/legacy-dev-connect).
+</Warning>

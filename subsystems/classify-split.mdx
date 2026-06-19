@@ -1,0 +1,117 @@
+---
+title: Classify-split overview
+description: LoanLight's two-phase document classification pipeline.
+icon: layers
+---
+
+Classify-split turns a loan's raw PDFs into a set of typed, page-ranged **segments**. It runs as a
+two-phase pipeline and is wrapped as the [Pre-Audit-Classification agent](/agents/pre-audit-classification),
+which fires as one branch of the [pre-audit stage](/pipeline/pre-audit-stage).
+
+Each segment becomes one `document_classifications` row carrying a coarse bucket (`split_type`), a
+fine subtype (`classification_type`), confidences, a page range, and a `classification_decision`
+provenance blob. Downstream consumers read these rows to scope PII retrieval, plan document-health
+checks, and route documents back into Encompass.
+
+## The two phases
+
+<Steps>
+  <Step title="Phase 1 — split">
+    `splitAndStage` → `resolveSplit` (`llama/classify-split.service.ts`) uploads each PDF to
+    LlamaCloud and decides segment boundaries plus a coarse bucket per segment. This is the **only
+    phase that branches on the per-lender mode** (`per_segment | majority_bucket | two_pass`). It
+    persists one row per segment at `classification_status = 'split'` and writes the Phase-1 part of
+    the `classification_decision` blob. See [classification split modes](/subsystems/classify-split-modes).
+  </Step>
+  <Step title="Phase 2 — classify">
+    `classifyStagedSegments` → `classifyUploadedSegments` classifies each segment into a subtype
+    (`classification_type`), updates each row to `classification_status = 'classified'`, and — for
+    non-`per_segment` modes — merges classify-time facts into the decision blob and sets
+    `decision_complete = true`. Phase 2 is **uniform**: it does not branch on the mode.
+  </Step>
+</Steps>
+
+Two LlamaCloud primitives back the phases: a **split job** (LlamaSplit, beta API) buckets pages into
+categories, and a **classify job** (LlamaClassify v2 API) assigns a subtype to a page range.
+
+<Note>
+The coarse/fine split is the model worth keeping in your head: `split_type` is the bucket (Phase 1),
+`classification_type` is the subtype (Phase 2). In some modes Phase 2 can also overwrite
+`split_type` with the resolved bucket.
+</Note>
+
+## Why it is wrapped as an agent
+
+The pipeline ships as the LangGraph **Pre-Audit-Classification** agent so the raw PDF buffer drops
+out of state between Phase 1 and Phase 2. Node's `Buffer.toJSON()` inflates buffers roughly 280x in
+LangSmith trace payloads, so buffers never enter a graph state channel — they ride in through the
+`splitDocuments` node's per-invocation closure and are gone once the buffer-free `SplitStageResult`
+is produced. The `splitDocuments` node is the only node that touches buffers.
+
+The agent topology and node behavior are documented on the
+[Pre-Audit-Classification agent](/agents/pre-audit-classification) page.
+
+## Triggers
+
+A classification run is started from one of these paths. Each stamps `classify_split_runs.triggered_by`:
+
+| Trigger | `triggered_by` | Entry point |
+|---|---|---|
+| EPC audit | `epc_audit_run` | `PreAuditStageService` (Phase 1 branch C), parallel with URLA preprocessing and LlamaCloud indexing |
+| Partner create loan | `partner_create_loan` | `POST /api/v1/partner/loans` → `registerDocuments` |
+| Partner upload docs | `partner_upload_documents` | `POST /api/v1/partner/loans/:id/documents` |
+| Income run | `income_run` | `portal-income` document bridge (`classifyAndPersist`) |
+| Octy dry-run | (run is `is_dry_run = true`) | `POST /internal/dry-run/classify-split` |
+
+## Idempotency
+
+Two layers keep reruns cheap and safe.
+
+<AccordionGroup>
+  <Accordion title="Document registry (content-hash dedup)">
+    `DocumentRegistryService.registerDocuments` dedups by `loan_documents.content_hash`. A hash or
+    size change marks a document **updated** and resets its `llama_*` ingestion fields; an unchanged
+    hash with a new source identity (for example a new Encompass attachment id) is treated as a
+    **rotation** — the identity is rewritten and the document is still considered unchanged. Hash
+    mismatch is the primary "updated" signal; size change is the fallback.
+  </Accordion>
+  <Accordion title="shouldReclassify (run-level skip)">
+    `shouldReclassify(context, registrationResult, allDocs, forceReclassify?)` decides whether a run
+    is even needed. With `forceReclassify` everything is reclassified. Otherwise a document is
+    skipped if it already has any `document_classifications` row in any prior **non-dry-run** run for
+    the loan (run status is ignored — partial runs are common). Documents needing classification are
+    new + updated documents, plus any unchanged-but-never-classified ones. If none qualify, a
+    `skipped` run is written via `createSkippedRun` and the agent short-circuits.
+  </Accordion>
+</AccordionGroup>
+
+A resumed run (`forceReclassify` plus an existing `audit_run_id`) keeps its **persisted** mode,
+deletes the prior `document_classifications`, and resets the run to `running` — so a single run never
+splits across two mode behaviors.
+
+## Downstream consumers
+
+- **Classifications API** — `GET /api/v1/audit_runs/:id/classifications` and
+  `GET /api/v1/partner/audits/:auditId/classifications` (both via `buildClassificationsResponse`).
+- **`loanlight.documents.classified` event** — emitted at the pre-audit settle barrier; integrations
+  carve and push each document into Encompass, routing `unknown` to the lender's manual-review folder.
+- **PII validation** — builds deterministic `file_id` + page-range `search_filters` from the
+  segments. See [retrieval tools and PII scoping](/subsystems/retrieval-tools-and-scoping) and
+  [PII-Validation agent](/agents/pii-validation).
+- **Document-Health** — reads classifications to plan per-bucket document checks. See
+  [Document-Health agent](/agents/document-health).
+
+## Live versus dead confusion map
+
+Low-confidence buckets are expanded to neighboring buckets during Phase 2. The neighbors come from
+the **database** table `split_confusion_edges`, loaded into the run's `ConfigSnapshot.confusionEdges`
+and consumed by `expandNeighbors`.
+
+<Warning>
+The static file `llama/classify-split.confusion-map.ts` (`BUCKET_CONFUSION_MAP` /
+`getNeighborBuckets`) is **dead code** — no production path references it. Any description claiming a
+hard-coded confusion map is wrong; the live confusion neighbors are DB-driven.
+</Warning>
+
+For the run, segment, and config table shapes, see
+[classify-split data model](/subsystems/classify-split-data-model).

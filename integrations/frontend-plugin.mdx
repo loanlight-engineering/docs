@@ -1,0 +1,60 @@
+---
+title: Encompass plug-in frontend
+description: The live Next.js Encompass plug-in UI (and the deleted legacy web-app).
+icon: layout-dashboard
+---
+
+`frontend` (workspace package `frontend`, in `packages/frontend/`) is the live Encompass plug-in UI — the screen loan officers see inside Encompass when they run and review a LoanLight audit. It runs as an Encompass SSF (Smart Server Framework) embedded app via `@elliemae/em-ssf-guest`.
+
+<Warning>
+The legacy `packages/web-app/` frontend was **deleted** in commit `5b65c1b` (LOA-649, PR #365). `git ls-files packages/web-app` returns nothing; only stale build artifacts remain on disk. `frontend/` is the one and only live frontend. Any doc or system prompt that still references `web-app` as a frontend is stale.
+</Warning>
+
+## Stack
+
+- Next.js **16.1.1**, React **19.2.3**, dev on **port 8000** (`next dev -p 8000`).
+- Tailwind v4, Storybook 9.
+- Deployed as a **static export to S3 + CloudFront** (build → `dist`; the `infra/` CDK uploads it). It is a pure client — there are no Next API routes (`route.ts`).
+- State via `zustand` (`store/useEllimae.ts`, `store/useAudit.ts`).
+- Datadog browser RUM/logs + PostHog for analytics, `pdfjs-dist` for in-app PDF viewing, Playwright for E2E.
+- Consumes `@loanlight-engineering/shared-types` and `@loanlight-engineering/shared-ui`.
+
+## Routes
+
+Under `app/`:
+
+| Route | Purpose |
+|---|---|
+| `/` | Home — routes to `NewAudit` / `AuditRunning` / `AuditError`, or redirects to `/audit` on `Complete`, based on `originResponse.auditDetail.auditState`. |
+| `/audit` | Results overview. |
+| `/audit/credit-liabilities` | Credit and liabilities results. |
+| `/audit/1003-check` | URLA (Form 1003) completeness. |
+| `/audit/document-health` | Document health results. |
+| `/audit/properties-check` | Property data results. |
+| `/audit/data-consistency` | PII / data-consistency results. |
+| `/design-system` | Component gallery (non-prod). |
+
+## The two backends it talks to
+
+The frontend calls **both** backends directly.
+
+<Tabs>
+<Tab title="encompass service">
+Via `encompass.service.ts` / `epc-api-service.ts`. Bootstraps with `POST /integrations/origin`, then polls or streams `GET /integrations/audit-details/:id[/stream]` (`audit-progress.service.ts` handles the SSE), lists and streams the result PDF via `/integrations/documents/...` (`document.service.ts`), and opens the rich pop-out results view via `/integrations/audits/:auditId/external-url` (`external-results.service.ts`). See the [HTTP API](/integrations/http-api).
+</Tab>
+<Tab title="loanlight-api directly">
+Via `audit-api.service.ts`, against `NEXT_PUBLIC_LL_WEB_AUS_API_HOST`. It calls `GET /api/v1/audit_runs/{id}/results?includeNonIssues=true`, `/property_data`, `/urla_completeness`, and `POST /bug-reports`. Requests send `X-Requestor-ID` plus a bearer token.
+</Tab>
+</Tabs>
+
+## Component conventions
+
+From the package `CLAUDE.md`:
+
+- Catalyst components live in `components/ui`.
+- Route-local code is co-located: `_components/` (JSX) + `_helpers/` (pure functions).
+- Every new component needs a Storybook story plus a gallery entry.
+- Design tokens only — the Figma → Tailwind mapping is `accent` → `brand` and `grays` → `zinc`.
+- SVGs are imported through the `assets/svg/index.ts` barrel.
+
+For the audit data shapes the frontend renders, see [Audit lifecycle](/integrations/audit-lifecycle) and [Integrations database schema](/integrations/database-schema).

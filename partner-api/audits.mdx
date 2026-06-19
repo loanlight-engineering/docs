@@ -1,0 +1,179 @@
+---
+title: Audits API
+description: Trigger audits and retrieve results, errors, and classifications.
+icon: clipboard-check
+---
+
+The `PartnerAuditsController` (`@Controller("api/v1/partner/audits")`) triggers audit runs against an already-uploaded loan and exposes the run's status, results, errors, and classifications. Every endpoint requires the `x-api-key` header (see [authentication](/partner-api/authentication)), is [rate limited](/partner-api/rate-limits-and-errors), and is scoped to the authenticated lender (`getAuditRunByLender`) — another lender's audit returns `404`.
+
+## POST /api/v1/partner/audits
+
+Trigger an audit run. Returns `202 Accepted`. The agent pipeline runs in the background; poll for completion.
+
+### Request body
+
+Body is `CreatePartnerAuditDto`. See the [data model](/partner-api/data-model).
+
+<ParamField body="loanId" type="string (uuid)" required>
+The loan to audit. Validated with `@IsUUID()`.
+</ParamField>
+<ParamField body="agents" type="string[]">
+Allow-list of agents to run. If omitted, all available agents run. Example values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`.
+</ParamField>
+<ParamField body="options" type="AuditOptionsDto">
+Optional `estimatedClosingDate` (YYYY-MM-DD), which overrides the loan's stored closing dates for date-sensitive checks.
+</ParamField>
+
+### Preconditions
+
+`createAudit` rejects the request before doing any work when:
+
+1. The loan does not exist or is not owned by the lender — `404 "Loan not found"`.
+2. The loan's `processing_status` is not `ready_for_audit` or `ready` — `409 ConflictException` `"Loan pipeline is not ready for audit. Current status: <status>"`.
+3. Classification is still in progress (`hasInProgressRunsForLoan`) — `409` `"Document classification is still in progress. Retry after classification completes."`.
+
+Poll [`GET /loans/:loanId/status`](/partner-api/loans) until the loan is ready and classification has settled before calling this endpoint.
+
+### Two execution paths
+
+The selection logic is gated by the per-lender feature flag `PARTNER_VIA_ROUTER` (`isAgentRouterFlagEnabled(db, lenderId, "PARTNER_VIA_ROUTER")`, fail-closed — any error means OFF). See [router and entitlements](/agents/router-and-entitlements).
+
+<Tabs>
+  <Tab title="Flag OFF (default)">
+    The direct path. `auditService.createAuditRunForPartner(lenderId, loanId, { agents })` uses the raw `agents[]` allow-list with **no entitlement filter and no closure expansion**. The response has no `denied` field, and the endpoint cannot return `403`.
+  </Tab>
+  <Tab title="Flag ON (router path)">
+    `agentRouter.route({...})` applies an entitlement filter (requested ∩ enabled), expands required upstream dependencies (a named downstream agent pulls in its phase-0/1 upstreams), and writes the [`agent_runs` ledger](/agents/runs-ledger).
+
+    <Warning>
+    If the resolved plan is empty (`plannedAgentRuns.length === 0`), the freshly-minted `audit_runs` container is torn down (FK cascade) and the endpoint throws **`403 ForbiddenException`** — `"Requested agents are not enabled for this organization: ..."` or `"No agents are enabled for this organization"`. The response on this path also carries a `denied[]` array of non-entitled requested agents.
+    </Warning>
+  </Tab>
+</Tabs>
+
+### Background execution
+
+Execution is fire-and-forget: `executeAudit(loan, auditId, lenderId, lenderCode, options)`. Its `.catch` calls `auditService.failAuditRun(auditId, "executeAudit", message)` (idempotent — only touches `pending`/`processing` rows) so a pre-try throw never strands the run in `processing`. `executeAudit` resolves the expected closing date (override → estimated → scheduled → closing) and calls `orchestration.processAuditForPartner({...})`, which runs the [audit pipeline](/pipeline/overview).
+
+<Note>
+**`bottomRatioPercent` must reach the orchestrator** or DTI threshold findings in [credit evaluation](/agents/credit-evaluation) are silently skipped. The controller forwards it as part of `loanMetadata`.
+</Note>
+
+### Response (202)
+
+```json
+{
+  "auditId": "uuid",
+  "loanId": "uuid",
+  "status": "pending",
+  "agents": ["piiValidation", "documentHealth"],
+  "denied": [],
+  "startedAt": "<iso>",
+  "progressUrl": "/api/v1/partner/audits/<auditId>/progress"
+}
+```
+
+`denied` is present only on the router path.
+
+<Warning>
+**`progressUrl` has no backing endpoint.** It points at `.../progress`, but neither partner controller defines a `/progress` route. Poll progress with `GET /audits/:auditId` (below) and [`GET /loans/:loanId/status`](/partner-api/loans) instead.
+</Warning>
+
+Status codes: `202`, `400`, `401`, `404` (loan), `409` (not ready / classification in progress), `403` (router path: no entitled agents), `429`.
+
+## GET /api/v1/partner/audits/:auditId
+
+Audit status and metadata. `getAuditRunByLender`; `404` if not found or not owned.
+
+```json
+{
+  "auditId": "uuid",
+  "loanId": "uuid",
+  "status": "pending|processing|complete|failed",
+  "startedAt": "<iso>",
+  "completedAt": "<iso|null>",
+  "runNumber": 1
+}
+```
+
+Poll this until `status` is `complete` before fetching results.
+
+## GET /api/v1/partner/audits/:auditId/results
+
+Audit results. `404` if not found or not owned. If the run is not `complete`, returns a thin envelope:
+
+```json
+{
+  "auditId": "uuid",
+  "loanId": "uuid",
+  "status": "processing",
+  "startedAt": "<iso>",
+  "completedAt": null,
+  "message": "Audit is still in progress",
+  "agents": null,
+  "summary": null
+}
+```
+
+The `message` is `"Audit is still in progress"` when `processing`, otherwise `"Audit has not completed successfully"`.
+
+When `complete`, the response spreads `auditResultsService.getFormattedResults(auditId)`:
+
+```json
+{
+  "auditId": "uuid",
+  "loanId": "uuid",
+  "status": "complete",
+  "startedAt": "<iso>",
+  "completedAt": "<iso>",
+  "summary": { "totalIssues": 4, "criticalIssues": 1, "warnings": 3 },
+  "agents": { }
+}
+```
+
+The full result shape — the `agents` object, the `creditEvaluations` array, and the fields deliberately omitted from the partner surface — is documented in [Results and access URLs](/partner-api/results-and-access-urls). Status codes: `200`, `401`, `404`.
+
+## POST /api/v1/partner/audits/:auditId/results/access-url
+
+Generate a short-lived portal viewer URL for the results. Returns `200` (`@HttpCode(200)`). `404` if not found/owned; **`409`** if `audit.status !== "complete"` (`"Audit is not yet complete. Current status: <status>"`).
+
+```json
+{
+  "url": "https://portal.../results/audits/<auditId>?token=<JWT>",
+  "expiresAt": "<iso>"
+}
+```
+
+See [Results and access URLs](/partner-api/results-and-access-urls) for the token lifecycle. Status codes: `200`, `401`, `404`, `409` (and `503` if misconfigured in production).
+
+## GET /api/v1/partner/audits/:auditId/errors
+
+Audit errors. `404` if not found/owned. Backed by `auditService.getAuditErrors` (ordered `occurred_at, id`).
+
+```json
+{
+  "auditId": "uuid",
+  "errors": [
+    {
+      "id": "uuid",
+      "agentName": "piiValidation",
+      "errorType": "transient|permanent|validation",
+      "message": "...",
+      "details": null,
+      "retryable": true,
+      "occurredAt": "<iso>"
+    }
+  ],
+  "canRetry": true
+}
+```
+
+`canRetry` is `true` if any error is `retryable`.
+
+<Note>
+Per-agent failures are recorded here but do **not** fail the run — the audit still completes. `failAuditRun` is reserved for infrastructure failures. A `complete` audit can still carry errors. See [lifecycle and dedup](/pipeline/lifecycle-and-dedup).
+</Note>
+
+## GET /api/v1/partner/audits/:auditId/classifications
+
+Document classifications for the run. `404` if not found/owned. Returns a `ClassificationsResponseDto` built by `buildClassificationsResponse(classifySplitPersistence.getClassificationsWithRun(auditId))`. See [classify-split](/subsystems/classify-split) for what classification produces.
