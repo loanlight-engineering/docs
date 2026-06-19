@@ -1,6 +1,9 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
+  "appearance": {
+    "default": "light"
+  },
   "name": "LoanLight",
   "description": "Internal engineering documentation for the LoanLight automated underwriting system, its AI agents, integrations, and the Octy self-healing platform.",
   "colors": {
