@@ -80,6 +80,15 @@ These three buckets form the fail-closed allowlist (`getAllowedBuckets()`); the 
 
 See [Classify and Split config](/octy/classify-split-config).
 
+## Integrations internal API
+
+| Variable | Purpose |
+|---|---|
+| `INTEGRATIONS_INTERNAL_URL` | Base URL for the integrations service's internal API. Deployed value is `https://integrations-internal.{zone}` — TLS is required because the shared key travels on every call. |
+| `INTEGRATIONS_INTERNAL_API_KEY` | Shared secret sent as `x-internal-api-key` to the integrations routing-config endpoints. Must match the value the integrations service reads. In deployed envs both services read the same Secrets Manager secret (`LLIntegrations/INTERNAL_API_KEY`) by reference. |
+
+See [Routing config](/octy/routing-config).
+
 ## LlamaCloud
 
 | Variable | Purpose |

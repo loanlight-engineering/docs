@@ -1,0 +1,154 @@
+---
+title: Routing config
+description: Authoring global and per-lender EPC document-routing rule sets from Octy.
+icon: route
+---
+
+The Routing Config tool at `/routing-config` lets engineers view, author, and activate the **EPC document-routing rule sets** the integrations service uses when pushing AUS Report artifacts back into Encompass. It is a thin UI over the integrations service's `/integrations/routing-config` API — Octy stores nothing locally; every read and write goes through that service.
+
+<Note>
+The integrations endpoint is not live yet. The UI ships against the frozen LOA-1188 contract and is unit-tested with mocked HTTP. End-to-end use becomes available once the integrations service deploys the matching API and TLS-terminated internal route.
+</Note>
+
+## What a rule set does
+
+A routing rule set tells the integrations service, for each [classification type](/subsystems/classify-split-data-model), what to name the resulting Encompass document container, what its EPC type should be, and which loan fields are required to populate the templates.
+
+Each entry is a `RoutingRule`:
+
+| Field | Meaning |
+|---|---|
+| `classificationType` | The classify-split classification this rule applies to (e.g. `paystub`, `w2`, `bank_statement`). |
+| `nameTemplate` | Template for the Encompass container name. |
+| `typeTemplate` | Template for the EPC container type. System-controlled — lenders cannot override. |
+| `descriptionTemplate` | Optional template for the container description. |
+| `requiredFields` | Loan fields that must be present for the templates to render. |
+| `onMissingFields` | What to do when `requiredFields` are missing: `fallback_to_default_container` or `degraded`. |
+
+A `defaultContainer` (`name` + `type`) catches anything that doesn't match a rule, or matches a rule whose required fields are missing under `fallback_to_default_container`.
+
+## Scopes
+
+Routing config is split into two scopes, mirrored by the two tabs on the page.
+
+<Tabs>
+<Tab title="Global">
+The base rule set, applied to every lender that doesn't have an active override set. Authored as a `GlobalRulesPayload`:
+
+```json
+{
+  "defaultContainer": { "name": "Unclassified", "type": "MISC" },
+  "rules": {
+    "paystub": {
+      "classificationType": "paystub",
+      "nameTemplate": "Paystub — {borrowerLastName}",
+      "typeTemplate": "INCOME",
+      "requiredFields": ["borrowerLastName"],
+      "onMissingFields": "fallback_to_default_container"
+    }
+  }
+}
+```
+</Tab>
+<Tab title="Per-Lender">
+A lender override set keyed by WorkOS `orgId`. Overrides may only set `nameTemplate` and/or `descriptionTemplate`; `typeTemplate` and other keys are rejected by the integrations service with `400`. Setting `descriptionTemplate: null` explicitly clears the global description for that classification.
+
+```json
+{
+  "rules": {
+    "paystub": {
+      "nameTemplate": "Paystub ({lenderShortCode})"
+    },
+    "w2": {
+      "descriptionTemplate": null
+    }
+  }
+}
+```
+
+Every key in `rules` must match a classification type present in the active global rule set — inert overrides are rejected with `400`.
+</Tab>
+</Tabs>
+
+## Using the page
+
+The page is tab-based.
+
+### Global tab
+
+A JSON editor on the left, version history on the right.
+
+- **Save** authors a new global version. The **Activate on save** toggle (on by default) makes that version active in one step; uncheck it to stage a draft for a later activation.
+- The version-history rail lists every authored version with its `createdAt` and which is active. **Activate** any past version to roll back. **Deactivate** the active scope to fall through to no global rules (lender overrides then have nothing to merge onto).
+
+### Per-Lender tab
+
+A lender picker rail on the left, an editor in the middle, version history on the right.
+
+- Click **Add** in the lender rail to start configuring a lender by WorkOS org id (`org_…`). Lenders that already have a rule set are listed automatically with their active version.
+- The center toolbar switches between three views:
+  - `overrides` — the lender's own override payload (editable).
+  - `effective` — the merged rule set the integrations service will use for this lender (global + override projections applied). Read-only.
+  - `global` — the active global rule set as projected onto this lender. Read-only.
+- The `includeGlobal` and `resolve` checkboxes control which projections are fetched from the API: `includeGlobal=true` returns the global block alongside the lender's overrides; `resolve=true` returns the effective merged rule set.
+- Save, activate, and deactivate behave the same as the global scope, but apply to the selected lender. Deactivating a lender's overrides falls back to the global rule set.
+
+## How it talks to integrations
+
+Reads and writes go through Next.js server actions in `src/app/(app)/routing-config/actions/`, which call a typed client (`src/lib/integrations-routing-client.ts`) against the integrations service. Every request carries three headers:
+
+| Header | Value |
+|---|---|
+| `x-internal-api-key` | Shared secret with the integrations service. |
+| `x-acting-user-id` | WorkOS user id of the engineer making the change. |
+| `x-acting-user-email` | WorkOS email of the engineer. |
+
+The acting-user headers feed the integrations audit trail. The shared secret is the only thing protecting writes, which is why the transport is `https://integrations-internal.{zone}` — see [Environment variables](/octy/environment-variables).
+
+The endpoints the client targets (`/integrations/routing-config/...`):
+
+| Method & path | Used by |
+|---|---|
+| `GET /global` | Global tab load. |
+| `POST /global/versions` | Save a new global version (`activateOnCreate` optional). |
+| `POST /global/versions/{version}/activate` | Activate / roll back. |
+| `POST /global/deactivate` | Deactivate the active global scope. |
+| `GET /lenders` | Per-Lender tab — lender picker. |
+| `GET /lenders/{orgId}?includeGlobal=…&resolve=…` | Per-Lender tab — load a lender. |
+| `POST /lenders/{orgId}/versions` | Save a new lender override version. |
+| `POST /lenders/{orgId}/versions/{version}/activate` | Activate / roll back. |
+| `POST /lenders/{orgId}/deactivate` | Deactivate a lender's overrides. |
+
+<Warning>
+The integrations API treats `POST .../versions` as **non-idempotent** — every call creates a new version. The editor keeps Save disabled across both the write and the post-save reload to avoid authoring duplicates from a double-click. If you script against the API directly, build in your own retry-safety.
+</Warning>
+
+## Validation and errors
+
+Octy runs structural pre-flight checks before sending a payload (e.g. every override key references a classification type present in the active global, `typeTemplate` never appears on a lender override). These are a UX guardrail, **not** a substitute for the integrations service's own validation, which remains the source of truth.
+
+Common error surfaces:
+
+| Status / code | Message in the UI |
+|---|---|
+| `401` | Generic auth failure (the shared key is never echoed back). |
+| `409` | "Lender not provisioned" — the org id is not known to integrations. |
+| `400` | Validation failure — e.g. an override key not present in the active global, or `typeTemplate` set on a lender override. |
+| `BAD_RESPONSE` | The integrations service returned a non-JSON body (proxy or NLB error page). |
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Classify and Split config" href="/octy/classify-split-config" icon="scissors">
+The upstream classifier whose `classificationType` values key into these rule sets.
+</Card>
+<Card title="EPC integration service" href="/integrations/service-overview" icon="plug">
+The service that owns the routing-config API and applies the rules when pushing documents back into Encompass.
+</Card>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+`INTEGRATIONS_INTERNAL_URL` and `INTEGRATIONS_INTERNAL_API_KEY`.
+</Card>
+<Card title="Authentication and access control" href="/octy/auth-and-access" icon="lock">
+How the acting-user headers are populated from the WorkOS session.
+</Card>
+</Columns>
