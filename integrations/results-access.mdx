@@ -1,6 +1,6 @@
 ---
 title: Results access URLs
-description: Short-lived results-access URLs and the documents.classified push-back.
+description: Short-lived results-access URLs and the documents.classified push-back round-trip.
 icon: link
 ---
 
@@ -8,6 +8,12 @@ After an EPC audit completes, two mechanisms push results back toward Encompass:
 `loanlight.documents.classified` event (which lets the integrations server carve classified
 documents back into Encompass) and a short-lived, single-use **results-access URL** the
 Encompass Plugin Client (EPC) uses to open the completed audit.
+
+The document push-back is a **round-trip**: the api emits
+`loanlight.documents.classified`, integrations carves each split to S3, then emits
+`loanlight.documents.materialized` back, and the api persists each split's S3 location. The
+outbound leg is documented below; the inbound return leg is in
+[documents.materialized return leg](#documents-materialized-return-leg).
 
 ## EPC results-access URL
 
@@ -106,6 +112,81 @@ back into Encompass, gated per-lender by an `encompass_document_push` flag keyed
 (the emitter's `clientId`). This push-back is best-effort by contract — it never fails the
 audit. Emission is fire-and-forget (`fireDocumentsClassified` → `emitForLoan`) so it never
 blocks the run.
+
+## documents.materialized return leg
+
+Once integrations has carved the classified splits and written them to S3, it emits the
+return event `loanlight.documents.materialized`. The api consumes it on a **dedicated SQS
+queue** (`documents-materialized-events`) and persists each split's S3 location onto its
+`document_classifications` row.
+
+The queue is intentionally separate from the audit pipe so it carries a **60 s visibility
+timeout** (vs the audit queue's 60 min) and has **its own DLQ** — the handler is a sub-second
+idempotent upsert, and a transient failure should redeliver within a minute, not an hour.
+The audit critical path stays untouched.
+
+### Event shape
+
+```json
+{
+  "Source": "loanlight.encompass",
+  "DetailType": "loanlight.documents.materialized",
+  "Detail": {
+    "type": "loanlight.documents.materialized",
+    "loanId": "...",
+    "auditRunId": "...",
+    "documents": [
+      {
+        "classificationId": "...",
+        "splitS3Location": "loanId/documents/{docId}/split.pdf",
+        "updatedOriginalLocation": "loanId/documents/{docId}/original.pdf"
+      }
+    ]
+  }
+}
+```
+
+`splitS3Location` is the relative S3 key where the carved split PDF landed.
+`updatedOriginalLocation` is present only when the reorg moved the original; both keys must
+be relative (no leading `/`, no `..` segments, ≥ 3 path segments). The EventBridge rule
+matches on detail-type only — `loanlight.documents.materialized` is unique enough to route
+regardless of source.
+
+### Persistence
+
+The consumer validates the `detail` with a Zod schema mirroring the shared-types
+`DocumentsMaterializedEvent` contract, then calls `persistSplitLocations`:
+
+<Steps>
+  <Step title="Upsert split path">
+    Update `document_classifications.split_storage_path` by PK
+    (`classificationId`), scoped to the event's `auditRunId` + `loanId` so a misrouted or
+    stale cross-run event for the same loan can never rewrite the live row.
+  </Step>
+  <Step title="Move original (if applicable)">
+    When `updatedOriginalLocation` is present, update `loan_documents.storage_path`. The
+    UPDATE is `ne`-guarded so re-delivery of an already-applied move never churns
+    `updated_at`.
+  </Step>
+  <Step title="Report missing classifications">
+    A `classificationId` that doesn't resolve in the run's set is **reported, not thrown** —
+    the return leg is eventually consistent, so we don't DLQ-forever on a transient miss.
+    Ops can alert on the `documents.materialized.missing_classification` log key.
+  </Step>
+</Steps>
+
+Malformed detail (schema reject, bad JSON) re-throws → SQS redelivers → DLQ on repeated
+failures.
+
+### When this matters
+
+- **Lender configuration** — the carved-split path drives downstream features that need a
+  per-split PDF (for example, document review or per-segment retrieval). Until the return
+  event lands, `split_storage_path` is `NULL` and consumers fall back to the original
+  document.
+- **Ops** — a sustained backlog on `documents-materialized-events` or repeated
+  `documents.materialized.missing_classification` warnings indicate integrations and the api
+  have drifted on `classificationId` ownership. The audit itself still completes either way.
 
 ## Related
 

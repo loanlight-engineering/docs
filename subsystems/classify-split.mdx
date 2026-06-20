@@ -95,6 +95,9 @@ splits across two mode behaviors.
   `GET /api/v1/partner/audits/:auditId/classifications` (both via `buildClassificationsResponse`).
 - **`loanlight.documents.classified` event** — emitted at the pre-audit settle barrier; integrations
   carve and push each document into Encompass, routing `unknown` to the lender's manual-review folder.
+  The return leg (`loanlight.documents.materialized`) writes each carved split's S3 path back onto
+  its `document_classifications.split_storage_path` row — see
+  [Results access URLs](/integrations/results-access).
 - **PII validation** — builds deterministic `file_id` + page-range `search_filters` from the
   segments. See [retrieval tools and PII scoping](/subsystems/retrieval-tools-and-scoping) and
   [PII-Validation agent](/agents/pii-validation).
