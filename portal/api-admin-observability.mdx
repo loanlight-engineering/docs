@@ -95,6 +95,30 @@ The webhook is the just-in-time provisioning path: WorkOS organization and user 
 
 See [lenders, users, and programs](/portal/api-lenders-users-programs) for the full webhook table and the user-management endpoints it complements.
 
+### organization.created resolution branches
+
+`createLenderFromWorkosOrg` resolves an inbound `organization.created` event against the `lenders` table in three branches, in order:
+
+1. **Already linked** — a lender row exists with `workos_organization_id = org.id`. The handler is an idempotent no-op aside from healing the `lender_auth_clients` mapping if it's missing. Logs `workos_org_created_existing_link`.
+2. **Link by name** — `lenders.name` is `UNIQUE`, and a same-named lender exists with no `workos_organization_id` (or one already equal to `org.id`). The handler claims the row in a single transaction: it sets `workos_organization_id` and inserts the `lender_auth_clients` mapping. The conditional `UPDATE … WHERE workos_organization_id IS NULL OR = org.id` closes the TOCTOU window so two concurrent `organization.created` events for the same name can never cross-link to the same lender. Logs `workos_org_created_linked_existing`.
+3. **New lender** — no match by org id or by name. Inserts a fresh `lenders` row (with a generated slug and `status = "active"`), seeds the `enable_guideline_uploads` feature flag, and writes the `lender_auth_clients` mapping. Logs `workos_org_created_new_lender`.
+
+If branch 2 finds a same-named lender already bound to a *different* WorkOS org, the handler does **not** clobber the existing binding. It logs `workos_org_created_name_conflict` at `error` and returns the existing lender so WorkOS acks the event instead of retry-looping forever on a permanent name collision. Operators resolve the conflict out-of-band (typically by renaming the new WorkOS org).
+
+### Log signals and Datadog monitors
+
+The controller and service emit structured logs that drive Datadog monitors:
+
+| Signal | Level | Meaning |
+|--------|-------|---------|
+| `workos_webhook_received` | info | Signature verified; event dispatched. |
+| `workos_webhook_unhandled_event` | warn | Event type has no handler (forward-compatibility). |
+| `workos_webhook_handler_failed` | error | A handler threw. WorkOS will retry. **Monitored.** |
+| `workos_org_created_existing_link` | info | Branch 1 — idempotent re-receipt. |
+| `workos_org_created_linked_existing` | info | Branch 2 — same-named lender claimed for this org. |
+| `workos_org_created_new_lender` | info | Branch 3 — brand-new lender provisioned. |
+| `workos_org_created_name_conflict` | error | Same-named lender already bound to a different org. **Monitored.** |
+
 ## Related pages
 
 <Columns cols={2}>
