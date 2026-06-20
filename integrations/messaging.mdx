@@ -58,7 +58,35 @@ agent:liabilities_assessment_*
 
 ### DocumentPushRule
 
-Matches source `["loanlight.api"]`, detail-type `["loanlight.documents.classified"]`, routing to the `document-push` queue. This drives the optional document-push pipeline (gated by `DOCUMENT_PUSH_ENABLED=true`), where loanlight-api asks encompass to attach classified documents back into Encompass. `handleDocumentPush` validates with `DocumentsClassifiedEventSchema` and calls `DocumentPushService.push`.
+Matches source `["loanlight.api"]`, detail-type `["loanlight.documents.classified"]`, routing to the `document-push` queue. This drives the document-push pipeline, where loanlight-api asks encompass to attach classified documents back into Encompass. `handleDocumentPush` validates with `DocumentsClassifiedEventSchema` and calls `DocumentPushService.push`.
+
+Document push is gated by two switches, both of which must be on:
+
+1. **`DOCUMENT_PUSH_ENABLED`** — a global per-environment kill-switch. When off, every message throws and returns to the queue. Use it only as an emergency stop; a prolonged off state drains the backlog into the DLQ once `maxReceiveCount` is exhausted.
+2. **Per-lender opt-in** — a row in `lender_feature` with `feature_key = 'document_push'` and `enabled = true`. Default is off (absence of a row). See [`lender_feature`](/integrations/database-schema#lender_feature).
+
+The per-lender gate runs **before** materialization (no S3 carve, upload, ledger write, or `documents.materialized` publish for a disabled lender). The lender is resolved authoritatively from the `transaction_record.client_id` looked up by `encompassLoanId` — the event's own `clientId` field is not used. The audit/property AUS-Results delivery path (`handleAusUpdate`) is unaffected by this gate; flag-off lenders still receive their audit and property PDFs.
+
+Fail-closed disposition:
+
+| Condition | Behavior |
+|---|---|
+| Global kill-switch off | throw → message requeued |
+| No transaction record for `encompassLoanId` | log + return (consume) |
+| Client has no `lender_id` mapping | log + return (consume) |
+| Lender row absent or `enabled = false` | log + return (consume) |
+| Null `encompassLoanId` on the event | log + return (consume) |
+| DB error during lender or feature lookup | throw → message requeued |
+
+To enable a pilot lender, insert a row directly:
+
+```sql
+INSERT INTO lender_feature (lender_id, feature_key, enabled)
+VALUES ('<lender-uuid>', 'document_push', true)
+ON CONFLICT (lender_id, feature_key) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now();
+```
+
+A management API for toggling features is not yet available; SQL is the supported path today.
 
 ## Events published by encompass
 

@@ -102,8 +102,10 @@ At the Phase 1 settle barrier (LOA-1041 / LOA-743), `DocumentsClassifiedEmitter`
 - The `Detail` is the raw event (the classified-document set for the loan).
 
 The `loanlight-integrations` side (LOA-1102) consumes it and carves each classified document
-back into Encompass, gated per-lender by an `encompass_document_push` flag keyed on `lender_id`
-(the emitter's `clientId`). This push-back is best-effort by contract — it never fails the
+back into Encompass, gated per-lender by a `document_push` row in `lender_feature` (default
+off). The lender is resolved from the transaction record matched on `encompassLoanId`, not
+from the emitter's `clientId`. See [Messaging — DocumentPushRule](/integrations/messaging#documentpushrule)
+for the full gate behavior. This push-back is best-effort by contract — it never fails the
 audit. Emission is fire-and-forget (`fireDocumentsClassified` → `emitForLoan`) so it never
 blocks the run.
 
