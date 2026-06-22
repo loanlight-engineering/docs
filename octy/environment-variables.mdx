@@ -71,6 +71,18 @@ Both are required to attach the Datadog MCP server to a run. They are mapped to 
 
 These three buckets form the fail-closed allowlist (`getAllowedBuckets()`); the Oz tool API rejects any S3 key outside them.
 
+## GitHub App (PR Command Center)
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_ORG` | GitHub organization that owns the allowlisted repos. |
+| `GITHUB_REPOS` | Comma-separated allowlist of short repo names the dashboard reads. |
+| `GITHUB_APP_ID` | GitHub App id. |
+| `GITHUB_APP_INSTALLATION_ID` | Installation id for the App on the org. |
+| `GITHUB_APP_PRIVATE_KEY` | RS256 private key (PEM). Raw, `\n`-escaped, or base64-encoded — all are normalized. In deployed envs this comes from the `Octy/GithubAppPrivateKey` secret. |
+
+All five must be present for `/pull-requests` to load; otherwise the API returns `503 NOT_CONFIGURED`. See [PR Command Center](/octy/pr-command-center).
+
 ## LoanLight internal API
 
 | Variable | Purpose |

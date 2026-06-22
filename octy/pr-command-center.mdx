@@ -1,0 +1,157 @@
+---
+title: PR Command Center
+description: Live GitHub PR dashboard for personal review queues and team-wide PR health.
+icon: git-pull-request
+---
+
+The PR Command Center at `/pull-requests` is a live, opinionated dashboard over the team's open pull requests across the curated repo allowlist. It pairs a Graphite-style personal board (**Mine**) with an org-wide manager view (**Team**) so engineers can clear their own queue and leads can spot stranded PRs, reviewer overload, and per-repo health without leaving Octy.
+
+The page reads directly from GitHub via a server-side GitHub App — there is no database, no settings UI, and no per-user OAuth flow. Identity is resolved from a committed server-only team roster (email → GitHub login).
+
+## When to use it
+
+- **As an engineer:** open the **Mine** tab first thing in the morning. It groups your work into Graphite-style buckets so you know what to merge, what to nudge, and what's waiting on you.
+- **As a lead or release manager:** open the **Team** tab to see what's stuck. Stranded PRs are sorted most-idle first with blocker attribution, reviewer load surfaces queue imbalances, and the repo health grid shows where work is piling up.
+- **For standups:** the totals strip (open / stale / draft / approved) plus the stranded list gives a one-screen status without scrolling GitHub.
+
+## Personal board (Mine)
+
+The **Mine** tab classifies your authored PRs and review requests into a fixed precedence order. Each PR lands in exactly one bucket — the first matching rule wins.
+
+| Bucket | What it means |
+|---|---|
+| **Needs your review** | Someone else's open PR has explicitly requested you (directly, not via a team) and you have not yet submitted a non-pending review. |
+| **Waiting for you** | Your open PR has `CHANGES_REQUESTED` or a failing/erroring CI rollup — the ball is on your side. |
+| **Waiting for reviewers** | Your open PR is healthy but doesn't yet have a final review decision. |
+| **Ready to merge** | Your open PR is approved, mergeable, and GitHub reports `mergeStateStatus = CLEAN`. |
+| **Merging** | Your PR is in the merge queue or has auto-merge enabled. |
+| **Approved** | Your PR is approved but not yet in a clean mergeable state (e.g. behind base, conflicts, blocked by required checks). |
+| **Drafts** | Your draft PRs. |
+| **Recently merged** | Your PRs merged within the last 7 days. |
+
+Inside each group, PRs are sorted by most-recently-updated first. The same precedence rules drive blocker attribution in the Team view.
+
+<Note>
+The signed-in WorkOS user is resolved to a GitHub login via the server-only team map. If your email isn't mapped, the Mine tab shows an "Unmapped" notice with your email. Add yourself in a quick PR to the team map module to appear on your board. See [Authentication and access control](/octy/auth-and-access).
+</Note>
+
+## Team board
+
+The **Team** tab is an org-wide read of every open PR in the allowlisted repos. It has four sections.
+
+### Totals
+
+A one-line strip with **open**, **stale**, **draft**, and **approved** counts across the allowlist. A PR is **stale** when it has had no activity for at least 3 days (the configured staleness threshold).
+
+### Stranded PRs
+
+Every non-draft open PR, annotated with:
+
+- **Age** — whole days since the PR was opened.
+- **Idle** — whole days since the last update. PRs at or over the staleness threshold are flagged stale.
+- **Blocker** — who the PR is actually waiting on:
+
+| Blocker | When it applies |
+|---|---|
+| `author` | `CHANGES_REQUESTED` or CI is failing/erroring. |
+| `reviewer` | Pending review requests; the requested reviewers are listed. |
+| `ready` | Approved and mergeable — nothing standing in the way. |
+| `draft` | Draft PRs are excluded from the stranded list. |
+
+The list is sorted most-idle first, then oldest first, so the top of the table is always the worst offender.
+
+### Reviewer load
+
+Pending review requests grouped by reviewer (user or team), sorted by pending count descending. Use this to spot one person or team carrying too much of the review queue.
+
+### Repo health
+
+Per-repo counts of open / draft / waiting-on-author / waiting-on-reviewer / approved PRs, plus the oldest open PR's age and a stale count. Repos in the allowlist with zero open PRs still appear (at the end), so the grid is a complete picture of the configured surface area.
+
+## API
+
+The page is backed by a single endpoint that returns either the personal or team payload from a shared snapshot.
+
+`GET /api/github/pull-requests?scope=mine|team[&refresh=1]`
+
+<ParamField query="scope" type="string">
+`mine` (default) or `team`.
+</ParamField>
+<ParamField query="refresh" type="string">
+Pass `1` to bypass the in-process snapshot cache and re-fetch from GitHub. The UI's **Refresh** button sets this.
+</ParamField>
+
+Both responses include `fetchedAt` (ISO timestamp of the underlying snapshot) and, when available, `rateLimitRemaining` from the GitHub GraphQL `rateLimit` field. The `mine` response additionally returns `viewerLogin` (the resolved GitHub login) and the bucketed `groups`. If the signed-in user is not in the team map, the response is `{ viewerLogin: null, unmapped: true, email, groups: [] }`.
+
+Errors:
+
+- `503 NOT_CONFIGURED` — one or more of the `GITHUB_*` env vars is missing.
+- `502` — the upstream GitHub call failed (rate-limited, auth, etc.).
+
+<Info>
+The endpoint requires the standard Octy auth — it goes through `requireAuth()` like every other `/api/*` route. See [Authentication and access control](/octy/auth-and-access).
+</Info>
+
+## Caching and rate limits
+
+A single in-process snapshot of every open PR across the allowlist is shared by all requests on the same task. It is refreshed when:
+
+- it is older than **60 seconds**, or
+- the caller passes `refresh=1` (the UI's **Refresh** button).
+
+Concurrent refreshes are coalesced into one upstream fetch, so a burst of teammates loading the page costs one set of GraphQL queries, not N. The cache is per-process (per Fargate task) — correctness comes from the short TTL.
+
+The personal "Recently merged" list is fetched separately via the GitHub search API and is not cached; it only runs for the **Mine** scope.
+
+## Configuration
+
+The integration is configured entirely through environment variables. There is no settings UI and no DB.
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_ORG` | GitHub organization that owns the allowlisted repos. |
+| `GITHUB_REPOS` | Comma-separated allowlist of short repo names (e.g. `loanlight-api,octy,docs`). |
+| `GITHUB_APP_ID` | GitHub App id. |
+| `GITHUB_APP_INSTALLATION_ID` | Installation id for the App on the org. |
+| `GITHUB_APP_PRIVATE_KEY` | RS256 private key (PEM). Real or `\n`-escaped newlines, or base64-encoded — all are normalized at load time. In deployed environments this comes from Secrets Manager. |
+
+To set the integration up:
+
+<Steps>
+  <Step title="Create a GitHub App in the org">
+    Grant it **read** access to **Pull requests**, **Metadata**, and **Checks** / **Commit statuses**. No write scopes are needed.
+  </Step>
+  <Step title="Install the App on the allowlisted repos">
+    Record the installation id from the install URL.
+  </Step>
+  <Step title="Set the env vars">
+    Fill in `GITHUB_ORG`, `GITHUB_REPOS`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY`. In int/prod the private key is referenced from the `Octy/GithubAppPrivateKey` secret; the rest are CDK context vars.
+  </Step>
+  <Step title="Add teammates to the roster">
+    To appear on the **Mine** board, each engineer must be present in the server-only team map (email → GitHub login → display name). Open a PR to add yourself.
+  </Step>
+</Steps>
+
+```bash
+# Example .env entries
+GITHUB_ORG=loanlight-engineering
+GITHUB_REPOS=loanlight-api,octy,loanlight-integrations,loanlight-shared,docs
+GITHUB_APP_ID=123456
+GITHUB_APP_INSTALLATION_ID=98765432
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+```
+
+<Note>
+The team roster is a committed server-only module, not a database table. It is never imported into client code, so teammates' emails stay off the wire — API routes resolve the current user server-side and return only the resolved GitHub login.
+</Note>
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+The full list of Octy env vars, including the `GITHUB_*` group.
+</Card>
+<Card title="Authentication and access control" href="/octy/auth-and-access" icon="lock">
+How the signed-in user is resolved and gated.
+</Card>
+</Columns>

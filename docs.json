@@ -253,6 +253,7 @@
             "group": "Octy application",
             "pages": [
               "octy/bug-reports-console",
+              "octy/pr-command-center",
               "octy/db-studio",
               "octy/classify-split-config",
               "octy/billing",
