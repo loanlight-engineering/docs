@@ -4,7 +4,7 @@ description: The 12-node appraisal agent and its processor-side rule evaluation.
 icon: house
 ---
 
-The Appraisal-Evaluation agent (`appraisalEvaluation`) is a fully implemented, 12-node compiled
+The Appraisal-Evaluation agent (`appraisalEvaluation`) is a fully implemented, 13-node compiled
 LangGraph that extracts and enriches appraisal data. Unlike
 [Credit-Evaluation](/agents/credit-evaluation), rule evaluation does **not** run inside the
 graph — it runs in the processor, after the graph returns.
@@ -41,7 +41,7 @@ __start__ → prepare → classify → detectScanned
   → (routeExtractionStrategy) → ocr? → reductoExtract
   → spatialGenerate → resolveFields → normalizeAdapter → computeCoverage
   → (attomGate) → attomFetch? → (routeAttomReplay) → validateProject
-  → aggregate → __end__
+  → mashvisorFetch → aggregate → __end__
 ```
 
 Routing:
@@ -97,6 +97,14 @@ ATTOM property enrichment, ceiling 2 minutes.
 <Accordion title="validateProject">
 Project / condo validations.
 </Accordion>
+<Accordion title="mashvisorFetch — DSCR-only, additive, dark by default">
+STR/LTR rental-data enrichment via Mashvisor (Core 5), DSCR-gated by the loan program's
+`programDocType` against `DSCR_PROGRAM_CODES`. The node never throws, returns
+`{ rentalData: RentalDataResult | null }`, and is inert unless `MASHVISOR_ENABLED="true"` **and**
+`MASHVISOR_API_KEY` are set — non-DSCR programs and missing-key environments skip it entirely.
+Wall-clock ceiling 60 s (`MASHVISOR_ENRICHMENT_CEILING_MS`), included in the graph deadline floor
+alongside the ATTOM ceiling. See [Rental data enrichment](#rental-data-enrichment-mashvisor) below.
+</Accordion>
 <Accordion title="aggregate">
 Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-pass warnings.
 </Accordion>
@@ -111,8 +119,8 @@ retained for a future reseed; do not re-wire it without addressing the memory pr
 ### ATTOM budgeting and deadlines
 
 `APPRAISAL_GRAPH_DEADLINE_MS` defaults to 88 minutes (`envMinutesMs`) and sits strictly between
-the legitimate split + ATTOM floor (`SUBSCHEMA_OVERALL_CEILING_MS` + 2 min ATTOM) and the worker
-lock (`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, about 90 minutes).
+the legitimate split + ATTOM + Mashvisor floor (`SUBSCHEMA_OVERALL_CEILING_MS` + 2 min ATTOM +
+1 min Mashvisor) and the worker lock (`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, about 90 minutes).
 `ATTOM_SECOND_PASS_CEILING_MS = SINGLE_CALL_DXT_CEILING_MS + SINGLE_CALL_DXF_TIMEOUT_MS`.
 `attomSecondPassExceedsLockBudget` budgets against elapsed time since `graphStartedAt` (a missing
 value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`, `APPRAISAL_GRAPH_DEADLINE_MS`.
@@ -121,6 +129,58 @@ value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`, `APPRAISAL_GRAPH_D
 LangGraph appraisal runs own ATTOM replay state. The processor must **not** perform legacy ATTOM
 reruns — that is a trap door called out in the agent's `CLAUDE.md`.
 </Warning>
+
+## Rental data enrichment (Mashvisor)
+
+For **DSCR programs only**, the graph runs an additive STR/LTR rental-data enrichment
+(`mashvisorFetch`) parallel in spirit to `attomFetch`. The feature is **flag-gated and dark by
+default** — it stays inert until both env vars are set:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `MASHVISOR_ENABLED` | unset (off) | Opt-in flag. Must be the literal `"true"` to arm the source. |
+| `MASHVISOR_API_KEY` | unset | Mashvisor Core 5 API key. Without it the adapter never fires. |
+
+When the gate is open, the `MashvisorService` adapter calls the Mashvisor Core 5 endpoint with a
+normalized subject address (street, city, state, optional zip, optional unit). The result is a
+`RentalDataResult` with `strPerformance` (monthly/annual revenue, occupancy), up to a few STR
+`strComps`, an `ltrFallback` (long-term-rent estimate), a `confidence` score, and an internal
+`_endpointStatus` map.
+
+### Persistence and redaction
+
+`rental_data` is persisted as a jsonb column on `appraisal_runs` and survives reruns through an
+append-only `mergeRentalFindings` that strips stale `RF-*` rows before re-adding the fresh set.
+The processor allowlist-picks the DTO surfaced to the portal, so the upstream `propertyProfile`
+field is **never exposed to clients** — it is retained only for adapter-side debugging.
+
+### Informational findings
+
+The `RentalFindingsService` emits **info-severity** findings keyed by stable RF-* codes carried
+in `ruleReference`. These are advisory only; they never block a run.
+
+| Code | When it fires |
+|---|---|
+| `RF-STR-INCOME` | STR performance present (monthly/annual revenue and occupancy). |
+| `RF-STR-LIMITED` | STR comps present but performance is partial or thin. |
+| `RF-LTR-RENT` | Long-term-rent fallback (`ltrFallback`) present. |
+| `RF-DATA-PARTIAL` | Some Mashvisor endpoints succeeded, others did not. |
+| `RF-DATA-UNAVAILABLE` | No data returned, or the provider errored / timed out. |
+| `RF-CONFIDENCE` | A non-null confidence score was returned. |
+
+`RF-DATA-UNAVAILABLE` distinguishes a provider failure (error or timeout) from a true "no rental
+data exists for this subject" outcome — the explanation text reflects which case applied.
+
+### Behaviour
+
+- **DSCR gate**: a missing or non-DSCR `programDocType` (resolved by the processor from
+  `loan_programs.match_doc_type`) skips the fetch entirely.
+- **Address guard**: missing street / city / state skips the fetch; a captured subject unit is
+  folded into the address line so condo and multifamily lookups are not building-level.
+- **Never throws**: any adapter error or timeout produces `RF-DATA-UNAVAILABLE` and leaves the
+  rest of the run untouched.
+- **Wall-clock ceiling**: 60 s per run; cleared in `finally` to avoid lingering abort signals.
+- **Zero impact on non-DSCR flows**: ATTOM, extraction, and rule evaluation are unchanged.
 
 ## Processor-side rule evaluation
 
@@ -169,7 +229,8 @@ revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status
 `recoveryAttempts`, `claimToken`), extraction outputs (`extractedData`, `fieldConfidenceMap`,
 `fieldStatusMap`, `fieldSourceLocationMap`, `coverageResult`, `coveragePercent`,
 `commentSummary`/`commentKeywords`, `extractionCost`, `extractionStep`, `errorCategory`,
-`isScanned`), `complianceResults`, `enrichmentData`, `findings`, `parentSnapshotData`,
+`isScanned`), `complianceResults`, `enrichmentData`, `findings`, `rentalData` (Mashvisor STR/LTR enrichment,
+DSCR-only — see [Rental data enrichment](#rental-data-enrichment-mashvisor)), `parentSnapshotData`,
 `photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`, and
 `selectedAgencySources[]`.
 </ResponseField>

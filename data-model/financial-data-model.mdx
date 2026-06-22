@@ -83,7 +83,7 @@ See the [Appraisal-Evaluation agent](/agents/appraisal-evaluation).
 <ParamField path="rule_set_id" type="uuid → appraisal_rule_sets (set null)">Repointed in migration `0083`.</ParamField>
 <ParamField path="audit_run_id" type="uuid → audit_runs (set null)">Phase 0.3 link.</ParamField>
 
-Extraction outputs: `extracted_data`, `field_confidence_map`, `field_status_map`, `field_source_location_map`, `coverage_result`, `coverage_percent`, `comment_summary`, `comment_keywords`, `photo_manifest`, `enrichment_data`, `findings`, `compliance_results`, `output_snapshot`, `difference_summary`. Liveness/recovery (LOA-1101): `last_heartbeat_at`, `recovery_attempts`, `claim_token`. Plus `revision_number`, `input_filename` / `input_s3_key`, `xml_s3_key`, `xml_version`, `agent_version`, `model_version`, `langsmith_url`, `selected_agency_sources` text[], `reviewed_at`.
+Extraction outputs: `extracted_data`, `field_confidence_map`, `field_status_map`, `field_source_location_map`, `coverage_result`, `coverage_percent`, `comment_summary`, `comment_keywords`, `photo_manifest`, `enrichment_data`, `rental_data` (DSCR-only Mashvisor STR/LTR enrichment — see [Appraisal-Evaluation agent](/agents/appraisal-evaluation#rental-data-enrichment-mashvisor)), `findings`, `compliance_results`, `output_snapshot`, `difference_summary`. Liveness/recovery (LOA-1101): `last_heartbeat_at`, `recovery_attempts`, `claim_token`. Plus `revision_number`, `input_filename` / `input_s3_key`, `xml_s3_key`, `xml_version`, `agent_version`, `model_version`, `langsmith_url`, `selected_agency_sources` text[], `reviewed_at`.
 
 ### appraisal_rules — operator difference
 
