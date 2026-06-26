@@ -165,7 +165,7 @@ Controller: `portal-lenders/workos-webhook.controller.ts` at `api/v1/workos/webh
 
 #### POST /api/v1/workos/webhooks
 
-Verifies the `workos-signature` header via `ApiAuthService.constructWebhookEvent`, then dispatches events. A missing signature returns `401`. The handler returns `{ received: true }`.
+Verifies the `workos-signature` header via `ApiAuthService.constructWebhookEvent`, then dispatches events. A missing signature returns `401`. The handler returns `{ received: true }`. The controller logs `workos_webhook_received` on every accepted event, `workos_webhook_unhandled_event` for unknown event types, and `workos_webhook_handler_failed` (rethrown so WorkOS retries) when a handler throws.
 
 | Event | Handler |
 |-------|---------|
@@ -175,7 +175,7 @@ Verifies the `workos-signature` header via `ApiAuthService.constructWebhookEvent
 | `user.updated` | `updateLastSignIn` |
 | `organization_membership.created` / `.deleted` | membership handlers |
 
-Just-in-time provisioning details are on [internal admin and observability](/portal/api-admin-observability).
+`organization.created` resolves in three branches: already-linked → no-op, same-named lender → link it, otherwise → insert. A same-named lender already bound to a *different* WorkOS org is never clobbered — the handler logs `workos_org_created_name_conflict` and returns the existing row so the event is acked. See [internal admin and observability](/portal/api-admin-observability) for the full branch behavior, the `lender_auth_clients` mapping, and the log signals to alert on.
 
 ## Related pages
 
