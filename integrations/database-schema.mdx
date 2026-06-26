@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **12 tables**. Migration `001_baseline_schema.sql` creates the original baseline; migrations 003 through 013 add the rest.
+The current schema has **13 tables**. Migration `001_baseline_schema.sql` creates the original baseline; migrations 003 through 019 add the rest.
 
 | Migration | Adds |
 |---|---|
@@ -31,9 +31,10 @@ The current schema has **12 tables**. Migration `001_baseline_schema.sql` create
 | `011_add_delivery_cancelled_after` | `transaction_state.delivery_cancelled_after` |
 | `012_create_lender_and_client_lender_id` | `lender`, `client.lender_id` |
 | `013_create_audit_delivery_log` | `audit_delivery_log` |
+| `019_create_lender_feature` | `lender_feature` |
 
 <Note>
-The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The six tables added by migrations 003–013 (`audit_details`, `transaction_document`, `document_push_record`, `epc_delivery_records`, `lender`, `audit_delivery_log`) are missing from it. Trust the schema, not the README.
+The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The seven tables added by migrations 003–019 (`audit_details`, `transaction_document`, `document_push_record`, `epc_delivery_records`, `lender`, `audit_delivery_log`, `lender_feature`) are missing from it. Trust the schema, not the README.
 </Note>
 
 ## Tables
@@ -182,6 +183,28 @@ Ledger for split deliveries (added in 013), written only after the Encompass PAT
 | `transaction_state_id` | |
 | `document_kind` | `aus_report` / `property` |
 | `property_address`, `file_name`, `s3_key`, `epc_resource_id`, `container_type` | |
+
+### lender_feature
+
+Generic per-lender feature flags (added in 019). Today the only `feature_key` in use is `document_push`, which gates the EPC classified-document push pipeline per lender. See [Messaging](/integrations/messaging) for how the gate is evaluated.
+
+| Column | Notes |
+|---|---|
+| `lender_id` | FK to `lender.id`. Part of PK. |
+| `feature_key` | Text key, e.g. `document_push`. Part of PK. |
+| `enabled` | boolean, default `false` |
+| `feature_value` | Optional text payload for tunables. Unused today. |
+| `created_at`, `updated_at` | |
+
+Primary key is `(lender_id, feature_key)`. **Default off is the absence of a row** — a lender is only enabled for a feature when a row exists with `enabled = true`. There is no backfill: every lender starts opted-out. To enable document push for a pilot lender:
+
+```sql
+INSERT INTO lender_feature (lender_id, feature_key, enabled)
+VALUES ('<lender-uuid>', 'document_push', true)
+ON CONFLICT (lender_id, feature_key) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now();
+```
+
+Column names mirror octy's `lender_feature_flags` so a future management-API bridge can read both shapes. This is a separate table in a separate database — see [Feature flags and entitlements](/lender-config/feature-flags-and-entitlements) for the octy-side equivalent.
 
 ## Access
 
