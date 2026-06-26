@@ -60,6 +60,7 @@ One row per **segment** — a page range with a bucket and a subtype.
 | `requires_review` | boolean NOT NULL default false | |
 | `split_job_id`, `classify_job_id` | text nullable | LlamaSplit / LlamaClassify job ids |
 | `classification_status` | varchar(30) NOT NULL default `'split'` | `split` → `classified` → `classification_failed` |
+| `split_storage_path` | text nullable | Relative S3 key of the carved split PDF. Written by the `documents.materialized` return-leg consumer (see [Results access URLs](/integrations/results-access)); `NULL` until integrations carves and reports the split |
 | `created_at` | timestamp | |
 
 Unique index `uq_doc_classification_segment` on `(classify_split_run_id, loan_document_id,
