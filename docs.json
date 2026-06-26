@@ -255,6 +255,7 @@
               "octy/bug-reports-console",
               "octy/db-studio",
               "octy/classify-split-config",
+              "octy/routing-config",
               "octy/billing",
               "octy/auth-and-access",
               "octy/environment-variables",
