@@ -34,6 +34,17 @@ last refresh, and what does that mean for these pages?_ It then makes the docs
 reflect reality — creating, updating, deleting, or renaming pages — and records how
 far it got so tomorrow's run picks up exactly where this one left off.
 
+**Reconcile toward the code, not toward the current doc structure.** The source code
+is the only fixed point; the existing outline is not. When a change calls for it, add
+new pages and new sections, split or merge pages, rename, or restructure — never wedge
+a code change into an ill-fitting page just to avoid touching the structure. New pages
+and new sections are always welcome; the documentation's shape should follow the system
+as it grows, not constrain it. The only hard constraints are that every claim is
+grounded in the code and that the navigation (`docs.json`) stays in step with whatever
+you add, move, or remove. (This does not license speculative rewrites — see the quality
+bar; restructuring is warranted when it makes the docs match reality, not for its own
+sake.)
+
 ## Before you start
 
 - Read `AGENTS.md` at the docs repo root. It is the contract for terminology,
@@ -106,6 +117,11 @@ For every affected area, this is the core loop:
    - **Rename/move** when a feature is renamed; update the page, its `docs.json`
      entry, and inbound links.
 4. Keep `docs.json` in step with any page you add, remove, rename, or move.
+
+Sections within a page are equally fair game: add, reorder, split, or rewrite them so
+the page reflects how the code actually works now — don't preserve a stale section
+layout just because it's already there. Prefer the action that best mirrors reality
+(new page, new section, rename) over the smallest in-place edit.
 
 Ground every claim in the code. Where the code contradicts an older prompt or
 README, document the code and flag the misconception with a `<Note>`. Mark anything
