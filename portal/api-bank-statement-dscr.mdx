@@ -20,9 +20,12 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `GET /api/v1/portal/bank-statements` | read+ | List borrower files |
 | `GET /api/v1/portal/bank-statements/:id` | read+ | Detail |
 | `GET /api/v1/portal/bank-statements/:id/status` | read+ | Status |
+| `GET /api/v1/portal/bank-statements/:id/failed-files` | read+ | Files that failed extraction |
 | `DELETE /api/v1/portal/bank-statements/:id` | client_admin | Delete |
 | `GET /api/v1/portal/bank-statements/:id/statements` | read+ | List statements |
 | `GET /api/v1/portal/bank-statements/:id/statements/:statementId` | read+ | One statement |
+| `PATCH /api/v1/portal/bank-statements/:id/included-statements` | client_admin, client_user | Set the included statement set (`SetIncludedStatementsDto`, 1–200 UUIDs) |
+| `POST /api/v1/portal/bank-statements/:id/statements/add` | client_admin, client_user | Append newly-uploaded PDFs (`AddStatementsDto`, HTTP 200, throttle 10/min) |
 | `GET /api/v1/portal/bank-statements/:id/transactions` | read+ | Transactions |
 | `POST /api/v1/portal/bank-statements/:id/transactions/classify` | client_admin, client_user | Ntropy categorization (HTTP 202, `ClassifyTransactionsDto`) |
 | `GET /api/v1/portal/bank-statements/:id/findings` | read+ | Fraud/income findings |
@@ -36,7 +39,13 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `GET /api/v1/portal/bank-statements/:id/summary` | read+ | Get AI summary |
 | `GET /api/v1/portal/bank-statements/:id/income-analysis` | read+ | Income analysis |
 | `POST /api/v1/portal/bank-statements/:id/income-analysis/recompute` | client_admin, client_user | Recompute (HTTP 200, throttle 10/min) |
+| `GET /api/v1/portal/bank-statements/:id/recurring-expenses` | read+ | Recurring-expense detection (#2517) |
+| `POST /api/v1/portal/bank-statements/:id/large-deposit-overrides` | client_admin, client_user | Force/suppress a deposit flag (`CreateLargeDepositOverrideDto`, HTTP 201, throttle 30/min) |
+| `DELETE /api/v1/portal/bank-statements/:id/large-deposit-overrides/:transactionId` | client_admin, client_user | Remove an override (throttle 30/min) |
+| `POST /api/v1/portal/bank-statements/:id/reprocess` | client_admin, client_user | Re-run analysis (HTTP 200, throttle 10/min) |
 | `GET /api/v1/portal/bank-statements/:id/export` | read+ | Export data (throttle 10/min) |
+
+`large-deposit-overrides` carries `{ transaction_id, mode }` where `mode` is `force` (surface a deposit the detector missed) or `suppress` (hide an auto-flagged one); flagging is decoupled from income inclusion. `statements/add` keys must sit under the file's own `bank-statements/{id}/` prefix and the combined batch stays within the 50-file ceiling. These overrides are the same `large_deposit` records the [Statement Analyzer](/portal/statement-analyzer) projects read-only onto an asset run.
 
 #### POST /api/v1/portal/bank-statements/enqueue
 

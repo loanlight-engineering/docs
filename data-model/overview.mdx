@@ -1,10 +1,10 @@
 ---
 title: Database schema overview
-description: The ~95-table Drizzle/Postgres schema, organized by domain.
+description: The ~115-table Drizzle/Postgres schema, organized by domain.
 icon: database
 ---
 
-LoanLight stores all persistent state in a single PostgreSQL database modeled with [Drizzle ORM](https://orm.drizzle.team). The schema lives in `loanlight-api/packages/api/src/database/schema/` as roughly 95 tables spread across one file per table (or tightly-related group), all re-exported from a single barrel.
+LoanLight stores all persistent state in a single PostgreSQL database modeled with [Drizzle ORM](https://orm.drizzle.team). The schema lives in `loanlight-api/packages/api/src/database/schema/` as roughly 115 tables spread across one file per table (or tightly-related group), all re-exported from a single barrel.
 
 ## Source of truth
 
@@ -15,7 +15,7 @@ LoanLight stores all persistent state in a single PostgreSQL database modeled wi
 | `src/database/schema/enums.ts` | The Postgres native `pgEnum` definitions. See [Enums and status values](/data-model/enums-reference). |
 | `src/database/schema/relations.ts` | Drizzle `relations()` for query-builder JOINs. Independent of DB foreign keys; both must agree. |
 | `src/database/schema/CLAUDE.md` | Drift trap-doors and authoring intent. |
-| `db/migrations/` | The numbered SQL migrations (`0000_…` through `0179_…`). See [Migration workflow](/data-model/migrations). |
+| `db/migrations/` | The numbered SQL migrations (`0000_…` through `0211_…`). See [Migration workflow](/data-model/migrations). |
 
 The Drizzle client is provided through NestJS DI (`database.provider.ts`, token `DRIZZLE_CLIENT`) over a raw `pg.Pool`.
 
@@ -27,11 +27,11 @@ Column naming is mixed. Older tables use `snake_case` JS keys (`audit_runs.audit
 
 Two facts shape almost everything else in the schema:
 
-- **`audit_runs`** is the parent for the audit pipeline. It is **lender-anchored and loan-optional**: `lender_id` and `trigger_source` are `NOT NULL`, while `loan_id`, `run_number`, and `loan_program_id` are nullable (migrations `0176`/`0179`). Nearly every per-agent result table FKs to `audit_runs.id` with `ON DELETE CASCADE`.
-- **The standalone run ledgers** — `appraisal_runs`, `credit_runs`, `income_runs` — each own their own results, rule engines, and recovery columns. They run independently from the portal, or attach to a parent audit run through a nullable `audit_run_id` column.
+- **`audit_runs`** is the parent for the audit pipeline. It is **lender-anchored and loan-optional**: `lender_id` and `trigger_source` are `NOT NULL`, while `loan_id`, `run_number`, and `loan_program_id` are nullable. The columns were added in migration `0202` (EXPAND) and tightened to `NOT NULL` in migration `0204` (CONTRACT). Nearly every per-agent result table FKs to `audit_runs.id` with `ON DELETE CASCADE`.
+- **The standalone run ledgers** — `appraisal_runs`, `credit_runs`, `income_runs`, and `asset_runs` — each own their own results, rule engines, and recovery columns. The first three attach to a parent audit run through a nullable `audit_run_id` column; `asset_runs` (the Statement Analyzer) is independent and instead binds to a loan or a `borrower_files` set.
 
 <Warning>
-An older description that says "every audit run belongs to a loan" is stale. Since `0176`, loanless audit runs are valid, and `run_number` is `NULL` exactly when `loan_id` is `NULL` (enforced by CHECK `audit_runs_run_number_requires_loan`). The unique index on `(loan_id, run_number)` is partial: `WHERE loan_id IS NOT NULL`.
+An older description that says "every audit run belongs to a loan" is stale. Since `0202`, loanless audit runs are valid, and `run_number` is `NULL` exactly when `loan_id` is `NULL` (enforced by CHECK `audit_runs_run_number_requires_loan`). The unique index on `(loan_id, run_number)` is partial: `WHERE loan_id IS NOT NULL`.
 </Warning>
 
 ## Two pairs you must not conflate
@@ -41,7 +41,7 @@ An older description that says "every audit run belongs to a loan" is stale. Sin
 The legacy `documents` / `document_attachments` tables hold LOS-era blobs. The modern, versioned, multi-source, LlamaCloud-aware record is **`loan_documents`** (with `superseded_by` versioning and a mutually-exclusive Encompass/partner source CHECK). New pipelines write `loan_documents`; the classify-split and income subsystems key off it. See [Core tables](/data-model/core-tables).
 </Accordion>
 <Accordion title="Two income systems">
-The newer **`income_runs`** family (a module-pipeline income agent, 12 `income_*` tables) is distinct from the older bank-statement family rooted at **`borrower_files`** → `bank_statements` → `transactions`. They do not share tables. See [Financial data model](/data-model/financial-data-model).
+The newer **`income_runs`** family (a module-pipeline income agent, 12 `income_*` tables) is distinct from the older bank-statement family rooted at **`borrower_files`** → `bank_statements` → `transactions`. They do not share tables. The bank-statement family is also where the **asset / Statement Analyzer** subsystem (`asset_accounts`, `asset_runs`, and their rule engine) reads from. See [Financial data model](/data-model/financial-data-model).
 </Accordion>
 </AccordionGroup>
 
@@ -61,7 +61,7 @@ The per-agent result tables FK'd to `audit_runs`: PII, document health, property
 `agents`, `agent_dependencies`, `agent_runs`, `lender_agent_entitlements`.
 </Card>
 <Card title="Financial data model" icon="dollar-sign" href="/data-model/financial-data-model">
-Credit, income, and appraisal run ledgers and their rule engines.
+Credit, income, appraisal, and asset (Statement Analyzer) run ledgers and their rule engines, plus the bank-statement family.
 </Card>
 <Card title="Enums and status values" icon="list" href="/data-model/enums-reference">
 `pgEnum` definitions and CHECK-constrained status vocabularies.
@@ -71,4 +71,4 @@ Authoring and applying Drizzle migrations, and the drift canaries.
 </Card>
 </Columns>
 
-Beyond these domains, the schema also covers classify-split config, lender config (YAML, flags, deny lists, loan programs), portal/auth, key-field review, shadow/parity observability, and the Octy issue tracker. Those are documented in their own subsystem sections.
+Beyond these domains, the schema also covers classify-split config, lender config (YAML, flags, deny lists, loan programs), portal/auth, key-field review, shadow/parity observability, and the Octy issue tracker (including `octy_docs_refreshes`, the nightly documentation-refresh ledger written by the `octy-docs-refresh` skill). Those are documented in their own subsystem sections.

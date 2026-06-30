@@ -29,6 +29,16 @@ The Lambda authorizer (`Bearer-Token-Authorizer` / `EncompassAuthFunction`, in `
 
 The gateway has two special-cased resources so they route before the catch-all: the `auth/encompass` token-exchange route and the `integrations/images` proxy. See the [HTTP API](/integrations/http-api).
 
+## Internal NLB (server-to-server)
+
+Alongside the public gateway path, the **same** internal NLB carries server-to-server traffic for the [routing-config admin API](/integrations/routing-config-admin) — there is no new load balancer. `ApplicationStack` (which gained a `networkStack` prop) wires this up:
+
+- A **TLS listener on `:443`** (ACM certificate, `RECOMMENDED_TLS` policy) was added to the existing NLB, forwarding to the same target group as the VPC Link path.
+- A Route 53 **A-record `integrations-internal.{zone}`** aliases the NLB, so callers address it at `https://integrations-internal.{zone}`.
+- Two **security-group ingress rules** admit the callers' ECS tasks on TCP 443: Octy's ECS SG (read from SSM `/loanlight/{env}/octy/ecsSecurityGroupId`) and loanlight-api's ECS SG (read from SSM `/loanlight/{env}/api/ecsSecurityGroupId`). The api rule requires loanlight-api to deploy first so its SSM param exists.
+- The integrations ECS SG id is itself published to SSM at `/loanlight/{env}/integrations/ecsSecurityGroupId` for cross-repo consumption.
+- The shared secret `INTERNAL_API_KEY` is delivered to the ECS task from Secrets Manager `LLIntegrations/INTERNAL_API_KEY` and checked by `InternalApiKeyGuard`.
+
 ## Security layers
 
 <AccordionGroup>

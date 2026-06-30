@@ -66,6 +66,10 @@ Helpers:
 - `isHiddenFromGlobalSuperAdmin(route, role, isImpersonating)` is a presentation rule (not an authz change): it hides `/settings/appraiser-deny-list` from a global super admin who is not impersonating; it reappears while impersonating.
 - `canManagePrograms(role)` = `client_admin || super_admin`, mirroring the backend `@Roles("client_admin")`.
 
+<Note>
+The `/settings/users` role dropdown (`components/settings/users-table.tsx`) keys the **Client Admin** option off the acting user's role — `currentUserRole === "client_admin" || currentUserRole === "super_admin"` — not `isInternal` (#1564). Because `isInternal` is forced `false` during impersonation, keying off it had hidden the option from real client admins and from an impersonating super admin; the role check fixes both. `isInternal` still gates whether the **Super Admin** option is offered at all. The RBAC role model itself is unchanged.
+</Note>
+
 Server gates in `src/lib/auth/require-admin.ts`:
 
 - `requireInternalAdmin()` — internal + `client_admin`.
@@ -110,4 +114,4 @@ Public paths (shared-auth `PUBLIC_PATHS`): `/login`, `/api/auth/login`, `/api/au
 - `getSessionToken(req)` returns `string | undefined` (not `null`).
 - `getServerAccessToken()` is the mock-aware bearer resolver for server components, dual-gated (`E2E_MOCK_AUTH === "true"` AND `NODE_ENV !== "production"`).
 
-When `E2E_MOCK_AUTH === "true"` (CI/local, no WorkOS creds), `POST /api/auth/login {email}` sets the `workos-access-token` cookie to the email, the email acts as the bearer, and `getMockSession(email)` resolves a fake session. This is dual-gated against production.
+When `E2E_MOCK_AUTH === "true"` (CI/local, no WorkOS creds), `/login` renders a **Sign in as local admin** button (`LocalMockSignIn`) that `POST`s `/api/auth/login {email}`. That route returns `404` unless `E2E_MOCK_AUTH === "true"`, validates the email via `getMockLoginUser` (`401` if unknown), then sets the `workos-access-token` cookie to the email. The email then acts as the bearer, and `getMockSession(email)` resolves a fake session. This is dual-gated against production.

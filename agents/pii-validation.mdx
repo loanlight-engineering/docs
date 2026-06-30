@@ -42,7 +42,7 @@ Emits `EVENTS.AGENT.PII_VALIDATION.START`, resolves the shared audit run, and fo
 Determines the PII fields to validate. The production path uses `fieldsOverride` (fields pre-extracted by [URLA extraction](/agents/urla-extraction)) and skips the LLM entirely. Otherwise it runs `PII_MODELS.planValidation` with `withStructuredOutput(PiiPlanSchema)`, with a no-structured-output fallback (`parseManualPlanResponse`) and a graceful empty result on total failure. `normalizeFieldNames` maps free text to canonical keys; SSN/ITIN values are padded and formatted to `XXX-XX-XXXX`.
 </Step>
 <Step title="validate-field (ValidateFieldNode)">
-The heart of the agent — see below. Runs once per pending field in parallel.
+The heart of the agent — see below. Runs once per pending field in parallel. The graph node wraps `ValidateFieldNode.execute` with a deterministic `CheckKnownNonSubjectAddressNode` post-step (see [known non-subject address suppression](#known-non-subject-address-suppression)).
 </Step>
 <Step title="aggregate (AggregateNode)">
 Computes `{ issuesFound, totalDocumentsAnalyzed, fieldsWithMultipleDocuments }`. If issues are found and the DB and `auditRunId` are present, it inserts issue rows into **`audit_errors`** (`agent_name: "piiValidation"`). It emits `EVENTS.AGENT.PII_VALIDATION.COMPLETE` and always returns `completed: true`.
@@ -102,7 +102,19 @@ Map non-empty **and** `classifySplitRunStatus === "complete"` **and** still zero
 **The deterministic filter overrides the LLM.** If `scoping.searchFilters` is set, it replaces any `search_filters` the LLM put in its tool args (`params = { ...baseParams, search_filters: args.searchFilters }`). Doc-type scoping must not be LLM-controlled (LOA-564). The trace records `search_filters_overridden`.
 </Warning>
 
-After retrieval, a smoke-alarm WARN (`pii.pushdown_leak`) fires if any returned snippet's `file_id` is outside `eligibleFileIds`, detecting a case where LlamaCloud failed to honor the filter. The filter is otherwise trusted — there is no post-retrieval eligibility filtering. The core retrieval prompt hardcodes `alpha: 0.3, hybrid: true, rerank: true, top_k: 64, bm25_top_k: 100, files_top_k: 5`, a 2-pass adaptive baseline, returning up to 30 snippets.
+After retrieval, `enforceEligibleFileScope` is the authoritative post-retrieval scope gate (LOA-1601). When scoping is active (`scoping.eligibleFileIds` is set), it **drops** any returned snippet whose `metadata.file_id` is outside the eligible set and emits a `pii.scope_leak` WARN naming the leaked `file_id`s — a smoke alarm for the push-down being ignored (filter-shape regressions, `page_label` coercion, LlamaCloud version drift). The push-down is best-effort; this gate is the enforcement.
+
+<Warning>
+Enforcement is **file-scope only and runs only when scoping is active**. Every whole-index fallback path (no rules service, no rules, empty classification map, classify-split incomplete) leaves `eligibleFileIds` undefined, so snippets pass through untouched — retrieval coverage is never silently narrowed. Page-range eligibility is **not** re-checked post-retrieval (`ScopingDecision` carries no per-file page ranges), so page scoping stays best-effort push-down. Snippets with no usable `file_id` are kept. This file-scope check is net-new (not a restoration): doc-type scoping has been push-down-only since LOA-564, and `SnapshotScope.filterSnippets` only enforces snapshot/loan membership, not the per-field doc-type-eligible subset.
+</Warning>
+
+The core retrieval prompt hardcodes `alpha: 0.3, hybrid: true, rerank: true, top_k: 64, bm25_top_k: 100, files_top_k: 5`, a 2-pass adaptive baseline, returning up to 30 snippets.
+
+### Eligibility vs recall — per-field retrieval prompts (LOA-1617)
+
+Eligibility (which segments a field *may* use) and recall (which documents the query text actually surfaces) are two independent controls, and they can drift apart. `pii_field_doc_type_rules` sets the eligibility ceiling; the per-field **retrieval prompt** defines the query passes that rank documents into the top-k under keyword-weighted hybrid search (`alpha=0.3`). A document can be eligible yet never retrieved if no pass anchors on its vocabulary — eligibility is necessary but not sufficient.
+
+`FullName` was the field where the two had drifted: its rules admit `split_type IDENTITY` (migration `0111`), but its prompt only queried borrower / applicant / account-holder / employment / LOE labels, so an eligible driver's license — whose OCR text carries none of those labels — never ranked into the top-k and the name was never corroborated against it. The FullName prompt now runs **6 passes** (was 5), adding an identity-document pass (`Driver License` / `Identification Card` / `State ID` / `Passport`, scored `+6`); `DateOfBirth` and `MailingAddress` — the other `IDENTITY`-eligible fields — already query IDs. A retrieval↔doc-type-rule parity guard (`identity-doc-rule-prompt-parity.spec.ts`) pins each `IDENTITY`-eligible field's retrieval prompt to its rules so the two cannot silently diverge again.
 
 ## PII fields and comparison modes
 
@@ -144,6 +156,16 @@ The core prompt's `issueKind` taxonomy:
 - `filterPreviousEmployerNoise` (EmployerName/EmployerAddress only) — when a document has at least one valid match plus inconsistent results from the same document, drop the inconsistent ones (likely previous-employer pages in a multi-record WVOE).
 - `deduplicateDateFindings` — collapse same-document findings with the same normalized doc value, preferring `hasIssue=true`.
 - digitsOnly — distinguish a genuine valid match from OCR-overridden chunks; if every chunk is an OCR artifact, surface as `missing`.
+
+## Known non-subject address suppression
+
+A deterministic post-validation step (LOA-932 / LOA-1587) suppresses a `PropertyAddress` **inconsistent** finding whose document address matches a property the borrower owns but is not financing — for example a mortgage statement for a retained non-subject home. It runs inside the `validate-field` graph node, *after* `ValidateFieldNode.execute`, because the per-field `field` and `knownNonSubjectAddresses` live only on the per-field `Send` payload and are invisible to any downstream node (which only ever sees the merged global state).
+
+`CheckKnownNonSubjectAddressNode.execute` acts only when `field === "PropertyAddress"` and `knownNonSubjectAddresses` is non-empty. For each document validation with `hasIssue && issueKind === "inconsistent"`, it compares `docValue` against each known address via `addressStringsMatch`; on a match it rewrites the row to `hasIssue: false`, `issueKind: undefined` with an explanatory message, then `recomputeOverall` rebuilds the field-level verdict. It logs `pii.known_non_subject_address` with the suppressed count. Findings that are not `inconsistent` (for example `identity_mismatch`) are never suppressed.
+
+`addressStringsMatch` first runs the shared structured `addressesMatch` with `allowSuffixOmission: true` (so `153 Ross` matches `153 Ross St`, while `Ross St` and `Ross Ave` stay distinct). #2436 added a fallback for the no-comma servicer layout (`STREET <whitespace> CITY, ST ZIP`, e.g. a Wells Fargo statement rendering `3 WOODSIDE DR` and `GREENWICH, CT 06830` on separate lines, which collapses to one comma before the state): when exactly one side parsed an empty city, it compares the combined street+city token on both sides, with state and ZIP still required to agree.
+
+The `knownNonSubjectAddresses` list is built upstream by [URLA extraction](/agents/urla-extraction) (`buildHouseholdKnownNonSubjectAddresses` in `transformAllBorrowersToPiiFields`): it aggregates every borrower's Section 1 current/mailing/former residences and Section 3 owned properties across the whole household, excludes the subject property (same suffix-tolerant matcher, so the excluder is never stricter than the suppressor), deduplicates, and attaches the same set to every borrower's `PropertyAddress` field — so a co-borrower's property is covered under each borrower's validation.
 
 ## Outputs
 

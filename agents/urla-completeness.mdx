@@ -14,9 +14,9 @@ Source root: `loanlight-api/packages/api/src/langgraph/agents/urlaCompletenessRu
 
 ## Graph
 
-`buildRulesEngineSubgraph` is a single-node graph: `__start__ → execute-rules → __end__`. State carries `urlApplicationData` (`UrlApplicationView`), `lenderCode?`, `loanProgram?`, `allBorrowersData?`, `bottomRatioPercent?`, `borrowerCountryOfCitizenship?`, and `borrowerCountryFieldPath?`, and outputs `{ summary: RuleExecutionSummary, completed }`.
+`buildRulesEngineSubgraph` is a single-node graph: `__start__ → execute-rules → __end__`. State carries `urlApplicationData` (`UrlApplicationView`), `lenderCode?`, `loanProgram?`, `loanType?`, `allBorrowersData?`, `bottomRatioPercent?`, `borrowerCountryOfCitizenship?`, and `borrowerCountryFieldPath?`, and outputs `{ summary: RuleExecutionSummary, completed }`.
 
-`ExecuteRulesNode` builds a `RulesExecutor()` (which loads `ALL_RULES`). When a `UrlaCompletenessRulesConfigService` is wired, it first reads `getDisabledRuleIds(lenderCode, loanProgram)` and `buildRuleOptionsMap(...)` from the lender YAML, then calls `rulesExecutor.execute(urlApplicationData, { disabledRuleIds, loanProgram, allBorrowersData, bottomRatioPercent, borrowerCountryOfCitizenship, borrowerCountryFieldPath, ruleOptions })`.
+`ExecuteRulesNode` builds a `RulesExecutor()` (which loads `ALL_RULES`). When a `UrlaCompletenessRulesConfigService` is wired, it builds a program metadata bag (`buildProgramMetadata(loanProgram, loanType)`), reads `getDisabledRuleIds(lenderCode, metadata)` and `buildRuleOptionsMap(..., metadata)` from the lender YAML, and resolves a canonical program code (`resolveProgramCode(...)`). It then calls `rulesExecutor.execute(urlApplicationData, { disabledRuleIds, loanProgram, allBorrowersData, bottomRatioPercent, borrowerCountryOfCitizenship, borrowerCountryFieldPath, ruleOptions })`, where `loanProgram` is the resolved canonical code (so program-gated rules such as `DSCR_BORROWER_INCOME_PRESENT` see the canonical program even when only `loanType` carried it).
 
 ## Executor
 
@@ -50,7 +50,7 @@ SECTION_8_DEMOGRAPHICS
 
 ## Rule IDs
 
-`RuleId` (`types/rule-ids.enum.ts`) has 31 values, grouped by URLA section:
+`RuleId` (`types/rule-ids.enum.ts`) has 32 values, grouped by URLA section:
 
 <AccordionGroup>
 <Accordion title="Section 1A — personal info & address">
@@ -66,7 +66,7 @@ SECTION_8_DEMOGRAPHICS
 `REO_REFINANCE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH` (deprecated), `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`
 </Accordion>
 <Accordion title="Sections 4, 5, 7, 8 and cross-section">
-`SECTION_4_LOAN_AND_PROPERTY_DETAILS`, `SECTION_4_PROPERTY_VALUE_REQUIRED`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS`, `SECTION_8_FACE_TO_FACE_VISUAL_OBSERVATION`, `DTI_EXCEEDS_50_PERCENT` (cross-section)
+`SECTION_4_LOAN_AND_PROPERTY_DETAILS`, `SECTION_4_PROPERTY_VALUE_REQUIRED`, `SECTION_4D_GIFT_FUNDS_PRESENT`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS`, `SECTION_8_FACE_TO_FACE_VISUAL_OBSERVATION`, `DTI_EXCEEDS_50_PERCENT` (cross-section)
 </Accordion>
 </AccordionGroup>
 
@@ -81,6 +81,7 @@ Representative behaviors:
 - **`PERSONAL_INFO_BASIC_DETAILS`** — requires name, SSN-or-ITIN, DOB, citizenship, marital status, and at least one contact method. Invalid SSNs (`111111111`, `999999999`, blank) FAIL unless citizenship is `NON_PERMANENT_RESIDENT_ALIEN`; NPRA also requires Country of Citizenship (from `borrowerCountryOfCitizenship` / `borrowerCountryFieldPath`). Emits a single PASS when all checks pass.
 - **`CURRENT_ADDRESS_RULES` / `FORMER_ADDRESS_RULES`** — US address completeness (street/city/state/zip/country) vs foreign (street+city only); if less than 24 months at the current address, emits INFO `IS_AT_CURRENT_ADDRESS_LESS_THAN_2_YEARS` plus a FAIL when former addresses do not cover the 24-month history; RENT housing type requires `rentalExpense`.
 - **`DSCR_BORROWER_INCOME_PRESENT`** — only when `loanProgram` is in `DSCR_PROGRAM_CODES`; FAILs when current-employment `monthlyIncome.total > 0` (DSCR qualifies on property cash flow, not borrower income).
+- **`SECTION_4D_GIFT_FUNDS_PRESENT`** — advisory `INFO` rule (default enabled, fires once per borrower) when `section2FinancialInfo.giftsOrGrants` holds a row whose `assetType` is a gift type (`GIFT_OF_CASH` / `GIFT_OF_PROPERTY_EQUITY` / `GRANT`). The gift detail (count, asset types, sources, values) is interpolated into the `message` because the portal renders only `message`; structured `metadata` is also persisted. It does not affect the pass/fail result and co-exists with the `SECTION_4_LOAN_AND_PROPERTY_DETAILS` FAIL loop that catches *incomplete* gifts (a typeless row is caught there, not here).
 - **`DTI_EXCEEDS_50_PERCENT`** — reads `context.bottomRatioPercent` (no value → no finding); threshold is `ruleOptions.threshold` else `DEFAULT_DTI_THRESHOLD = 50`; FAIL when DTI exceeds the threshold.
 - **`REO_REFINANCE_SUBJECT_PROPERTY`** (`scope: "loan"`) — for REFINANCE, the Section-4 subject property must appear in some borrower's Section-3 owned properties (uses `allBorrowersData`).
 
@@ -90,7 +91,7 @@ Representative behaviors:
 
 - `getDisabledRuleIds(lenderCode, loanProgram)` returns the union of top-level `disabled_rules` and per-program `disabled_rules`. The effective lender code defaults to `DEFAULT`; unknown rule IDs warn but are still added.
 - `getRuleOptions` / `buildRuleOptionsMap` build per-rule option objects (per-program overrides top-level, with no merge), for example the DTI `threshold`.
-- Program alias resolution uses `document_expiration.program_aliases`.
+- Program resolution honors `document_expiration.program_resolve_fields` (default `["loanProgramName"]`) and `program_aliases`, mirroring [Document-Health](/agents/document-health). It accepts a `{ loanProgramName, loanType }` bag, so `loanType` can carry the canonical program code (e.g. Priority's `dscr_investor_cashflow`) when the descriptive `loanProgramName` matches no alias (LOA-1584) — this is what lets a lender's per-program `disabled_rules` suppress employment and DTI rules on DSCR loans.
 
 ## Persistence
 
@@ -106,7 +107,7 @@ There are two entry paths, both ending in the same tables (see [URLA data model]
 - **`urla_rules_engine_results`** — `audit_run_id` (FK → `audit_runs` cascade), `loan_id`, `urla_extraction_result_id` (FK), `borrower_label` (default `BORROWER_1`). Unique `(audit_run_id, borrower_label)` — one row per borrower.
 - **`urla_rules_findings`** — `rules_engine_result_id` (FK), `rule_id` (`ruleIdEnum`), `rule_name`, `rule_category` (`ruleCategoryEnum`), `finding_type` (`findingTypeEnum`), `message`, `field_path`, `expected_value` (jsonb), `actual_value` (jsonb), `metadata` (jsonb).
 
-The Postgres enums (`database/schema/enums.ts`): `finding_type` = `['PASS','FAIL','INFO']`, `rule_category` = the 16 `SECTION_*` values, `rule_id` = the 31 rule IDs. See [enums reference](/data-model/enums-reference).
+The Postgres enums (`database/schema/enums.ts`): `finding_type` = `['PASS','FAIL','INFO']`, `rule_category` = the 16 `SECTION_*` values, `rule_id` = the 32 rule IDs. See [enums reference](/data-model/enums-reference).
 
 ## Read API
 

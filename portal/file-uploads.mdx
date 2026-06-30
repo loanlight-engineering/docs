@@ -23,6 +23,10 @@ The portal accepts large document uploads for appraisal, credit, income, and ban
   </Tab>
   <Tab title="Form-data POST proxies (income, bank statements)">
     Income and bank-statement uploads use form-data POST proxies through the BFF rather than direct S3 server actions. The bank-statement cap is 250 MB (the largest upload type). See [the bank statement / DSCR API surface](/portal/api-bank-statement-dscr).
+
+    <Note>
+    The bank-statement **Loan ID** is free-text (≤255 chars), not a UUID (#2426, LOA-1577). On enqueue, `resolveLoanLink` links a real `loan_id` only when the value is a UUID matching a loan in the tenant; otherwise the raw value is stored verbatim in `borrower_files.loan_reference` with `loan_id` left null (migration `0195`). The separate **income** upload still requires a UUID `loanId` (`@IsUUID()` on `CreateIncomeRunDto`). `formatUploadError` surfaces per-field validation errors in the upload UI.
+    </Note>
   </Tab>
 </Tabs>
 

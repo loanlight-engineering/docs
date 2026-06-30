@@ -39,10 +39,15 @@ stay closure-delivered and are never placed in graph state or serialized progres
 ```text
 __start__ → prepare → classify → detectScanned
   → (routeExtractionStrategy) → ocr? → reductoExtract
-  → spatialGenerate → resolveFields → normalizeAdapter → computeCoverage
+  → resolveFields → normalizeAdapter → computeCoverage
   → (attomGate) → attomFetch? → (routeAttomReplay) → validateProject
-  → aggregate → __end__
+  → mashvisorFetch → aggregate → __end__
 ```
+
+The canonical node order is pinned in `APPRAISAL_EVALUATION_NODE_IDS`. There is no
+`spatialGenerate` node — the legacy pdfjs spatial-candidate path was removed when extraction was
+consolidated onto Reducto (PR #2463), so `reductoExtract` is now the only extractor and
+`resolveFields` merges Reducto candidates with XML and corrections.
 
 Routing:
 
@@ -55,6 +60,7 @@ Routing:
 - `routeAttomReplay(attomFetch)`: when `hasReplayableEnrichmentData` (any of `avmDetail`,
   `attomAvmDetail`, `avmHistory`, `comparableSales`, `salesTrend`), back-edge to `detectScanned`
   for a second extraction pass; otherwise go to `validateProject`.
+- After `validateProject` the graph always runs `mashvisorFetch`, then `aggregate`.
 
 Every node is wrapped by `instrumentNode`, which emits `node:<name>` started / complete / failed
 milestones.
@@ -74,15 +80,14 @@ Inert except for an inert `boostScannedLlamaExtractCandidates`. The `ocrmypdf` p
 removed (LOA-1101); Reducto OCRs scanned PDFs natively.
 </Accordion>
 <Accordion title="reductoExtract">
-Reducto deep extraction. Forwards `enrichmentData` and a cached `_reductoResult` on ATTOM
-replay, and preserves the canonical form type (`1025` vs `1004` schema).
-</Accordion>
-<Accordion title="spatialGenerate">
-pdfjs spatial candidates; a no-op on scanned PDFs.
+Reducto deep extraction — the sole extractor since the legacy pdfjs path was removed (PR #2463).
+Forwards `enrichmentData` and a cached `_reductoResult` on ATTOM replay, and preserves the
+canonical form type (`1025` vs `1004` schema).
 </Accordion>
 <Accordion title="resolveFields">
-Merges candidate sources. XML priority 100 wins; seeds pseudo-candidates at `priority_override`
-0 when the Reducto map is empty.
+Merges candidate sources (Reducto, XML, and corrections). XML priority 100 wins; seeds
+pseudo-candidates at `priority_override` 0 (marked `is_guard_seed`) from `extractedData` when the
+Reducto map is empty.
 </Accordion>
 <Accordion title="normalizeAdapter">
 Syncs `formType` to the normalized `extractedData.form_type` before the coverage and ATTOM
@@ -97,25 +102,40 @@ ATTOM property enrichment, ceiling 2 minutes.
 <Accordion title="validateProject">
 Project / condo validations.
 </Accordion>
+<Accordion title="mashvisorFetch">
+STR/LTR rental-data enrichment via Mashvisor (LOA-1449, PR #2285), for DSCR appraisals only.
+Runs between `validateProject` and `aggregate`. Gated on a DSCR `programDocType`
+(`DSCR_PROGRAM_CODES`) — a non-DSCR or null program returns `{ rentalData: null }` with no fetch.
+With a DSCR program it guards on a complete subject street/city/state, applies a wall-clock
+ceiling (`MASHVISOR_ENRICHMENT_CEILING_MS`, 1 minute) on the single adapter call, and never
+throws (failure/timeout yields a null-data sentinel). The result rides graph state as
+`rentalData`; the processor merges rental findings (`mergeRentalFindings`) and persists
+`appraisal_runs.rental_data`.
+</Accordion>
 <Accordion title="aggregate">
 Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-pass warnings.
 </Accordion>
 </AccordionGroup>
 
-### agenticRefine is intentionally unwired
+### agenticRefine has been deleted
 
-The `agenticRefine` node factory exists but is **not** wired into the graph. It OOM-killed a
-production worker on scanned multi-page documents (run `803ada7d`, 2026-06-09). The factory is
-retained for a future reseed; do not re-wire it without addressing the memory profile.
+The `agenticRefine` node (factory and spec) was removed entirely in LOA-1043 — it OOM-killed a
+production worker on scanned multi-page documents. Do not reintroduce an agentic refine pass
+without addressing that memory profile. The `spatialGenerate` node was likewise removed when the
+legacy pdfjs extraction path was retired.
 
 ### ATTOM budgeting and deadlines
 
-`APPRAISAL_GRAPH_DEADLINE_MS` defaults to 88 minutes (`envMinutesMs`) and sits strictly between
-the legitimate split + ATTOM floor (`SUBSCHEMA_OVERALL_CEILING_MS` + 2 min ATTOM) and the worker
-lock (`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, about 90 minutes).
-`ATTOM_SECOND_PASS_CEILING_MS = SINGLE_CALL_DXT_CEILING_MS + SINGLE_CALL_DXF_TIMEOUT_MS`.
-`attomSecondPassExceedsLockBudget` budgets against elapsed time since `graphStartedAt` (a missing
-value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`, `APPRAISAL_GRAPH_DEADLINE_MS`.
+`APPRAISAL_GRAPH_DEADLINE_MS` defaults to 89 minutes (`envMinutesMs`) and sits strictly between
+the legitimate enrichment floor and the worker lock
+(`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, about 90 minutes). The floor
+(`APPRAISAL_GRAPH_DEADLINE_LEGIT_FLOOR_MS`) is now split 85 min (`SUBSCHEMA_OVERALL_CEILING_MS`) +
+2 min ATTOM + 1 min Mashvisor (`MASHVISOR_ENRICHMENT_CEILING_MS`, LOA-1449) = 88 minutes, so the
+pinned ordering invariant is `upload(10) < single-call(60) < split+ATTOM+mashvisor(88) <
+graph(89) < lock(90)`. `ATTOM_SECOND_PASS_CEILING_MS = SINGLE_CALL_DXT_CEILING_MS +
+SINGLE_CALL_DXF_TIMEOUT_MS`. `attomSecondPassExceedsLockBudget` budgets against elapsed time since
+`graphStartedAt` (a missing value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`,
+`APPRAISAL_GRAPH_DEADLINE_MS`.
 
 <Warning>
 LangGraph appraisal runs own ATTOM replay state. The processor must **not** perform legacy ATTOM
@@ -146,15 +166,69 @@ and the field maps.
 ### Appraisal rules
 
 The rule definitions live in `lib/appraisal-pipeline/rules/definitions` (registry
-`rule-registry.ts`) and span roughly 65 rules across many prefixes: `SUBJ_` (15), `SITE_` (8),
-`EXH_` (6), `NEIGH_` (6), `CONT_` (5), `COMP_` (5), `IMP_` (5), `APPR_` (3), `CONDO_` (3),
+`rule-registry.ts`) and span 66 rules across these prefixes: `SUBJ_` (15), `SITE_` (8),
+`EXH_` (6), `NEIGH_` (6), `COMP_` (6), `CONT_` (5), `IMP_` (5), `APPR_` (3), `CONDO_` (3),
 `REC_` (3), `INCOME_` (2), `RENT_` (2), `GEN_` (1), `UNIT_` (1). The rules are agency-aware
 (`AgencySource`: `fannie_mae`, `freddie_mac`), support compound conditions (`compound-walker`,
 `condition-schema`), and use `feature-gates`.
 
-The `appraisal_rules.operator` CHECK (`appraisal_rules_operator_check`) is the **16-value** union,
-which — unlike credit's 14-value union — adds `abs_less_than` and `abs_less_than_or_equal`. This union is drift-pinned by
-`operator-check-drift.spec.ts`; the Drizzle schema must mirror the latest migration SQL.
+The `COMP_` family is `COMP_001`–`COMP_005` plus `COMP_007` (there is no `COMP_006`). `COMP_007`
+(**Stated vs Actual Proximity**, LOA-1200 / PR #2315) verifies each comp's stated proximity
+against the geocoded actual distance; it exists in the in-code registry but production evaluates
+the DB-backed rules, so migration `0192_seed_comp_007_rule_template` seeds it into
+`appraisal_rule_templates` and backfills it into existing rule sets. Migration
+`0193_seed_missing_appraisal_rule_templates` likewise reconciles other in-code rules that were
+never seeded.
+
+The `appraisal_rules.operator` CHECK (`appraisal_rules_operator_check`) is the **16-value** union
+(adding `abs_less_than` and `abs_less_than_or_equal` to the base 14). Credit reached the same
+16-operator parity in migration `0190_credit_operator_abs_parity`, so the two unions now match.
+The appraisal union is drift-pinned by `operator-check-drift.spec.ts`; the Drizzle schema must
+mirror the latest migration SQL.
+
+### Deephaven Phase 1.5 rule bundle
+
+Lender-specific overlays are authored as staged bundles in the `portal-appraisal-rules` module
+(`staged-bundles/`). The **Deephaven Phase 1.5** bundle (`deephaven-phase-1.5.bundle.ts`,
+LOA-1367..1378) adds the single Deephaven lender's compound rules `DH_012`–`DH_052` (property
+condition, site/hazard + ADU, property-type classification, condo project, sales comparison, and
+occupancy/solar/income/deferred-maintenance groups) on top of new Phase 1.5 extraction signals in
+the adapter and `appraisal-data` schema. These DH rules are compound rules evaluated by the shared
+`compound-walker`; they are written only into the Deephaven lender's active rule set and are not
+part of the 66-rule core registry.
+
+The accessory-dwelling-unit (ADU) rules in Group B are `DH_025` (**No accessory dwelling unit** —
+a flat predicate that warns when `improvements.has_accessory_unit` is `true`) and `DH_026`
+(**ADU minimum area** — a conditional that, when an ADU is present, fails if `cost_approach.adu_sqft`
+is under 500 sq ft). Both read fields that originally existed only as Zod defs and so returned
+`NEEDS_INFO` on every appraisal; LOA-1497 (PR #2506) wired `improvements.has_accessory_unit` and
+`cost_approach.adu_sqft` through the Reducto/LLM extraction path plus adapter coercion (no
+rule-definition or Zod change) so the two rules actually evaluate. The XML bridge maps
+`…improvements[0].units[0].detail.is_adu → improvements.has_accessory_unit`, so DH_025 evaluates
+from MISMO too, but DH_026 stays `NEEDS_INFO` on XML-only ADU appraisals — MISMO carries an ADU
+count, not the cost-grid area, so only the PDF path fills `adu_sqft`.
+
+<Note>
+The fields were renamed between spec and as-built: LOA-1368/1374 spec'd `improvements.has_adu` and
+`adu_size_sqft`, but the rule-read paths are `improvements.has_accessory_unit` and
+`cost_approach.adu_sqft`. Grepping `has_adu` finds nothing.
+</Note>
+
+## Review summary export
+
+`POST /:id/export` (`PortalAppraisalController.export`) renders the appraisal **Review summary**
+as a branded PDF — property facts, an **Issues Found** section (the failed and warning rules,
+surfaced near the top), the full findings list, and program-rule outcomes. The payload comes from
+the same `getRunDetail` projection the review page renders (`appraisal-export-data.service.ts` →
+`renderAppraisalReviewHtml` / `appraisal-pdf-template.ts`), so the PDF matches the on-screen
+review. It reuses the `bank-statement-export` Puppeteer writer and signed-URL service.
+
+- **Roles**: `client_admin`, `client_user`, and `super_admin` (PR #2477). Throttled to 5
+  requests/minute per user; the run must be `completed` or `reviewed` or the export is refused.
+- **Findings gate** (PR #2496): the Findings section's empty state is keyed on whether enrichment
+  actually ran for **this** run — `findingsEvaluated = run.enrichmentData != null` — not the live
+  `ENABLE_ATTOM_ENRICHMENT` env flag. A run done while ATTOM was off (or where `attomGate` skipped
+  enrichment) shows no "No findings" block, so a later flag flip cannot mislabel historical runs.
 
 ## Data model
 
@@ -170,8 +244,9 @@ revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status
 `fieldStatusMap`, `fieldSourceLocationMap`, `coverageResult`, `coveragePercent`,
 `commentSummary`/`commentKeywords`, `extractionCost`, `extractionStep`, `errorCategory`,
 `isScanned`), `complianceResults`, `enrichmentData`, `findings`, `parentSnapshotData`,
-`photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`, and
-`selectedAgencySources[]`.
+`photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`,
+`selectedAgencySources[]`, and `rentalData` (Mashvisor STR/LTR enrichment, migration
+`0179_add_appraisal_runs_rental_data`).
 </ResponseField>
 
 <ResponseField name="rules, overrides, corrections" type="tables">
@@ -196,6 +271,7 @@ All under `api/v1/portal/appraisals` (`PortalAppraisalController`). Selected rou
 | GET | `/:id/status` | Poll status |
 | GET | `/:id/rules` | Rule outcomes |
 | GET | `/:id/review-fields` | Review fields |
+| POST | `/:id/export` | Export the Review summary PDF |
 | POST | `/:id/re-extract`, `/:id/retry-extraction` | Re-run extraction |
 | POST | `/:id/updated-run` | Create an updated run |
 | GET | `/:id/comparison` | Compare revisions |

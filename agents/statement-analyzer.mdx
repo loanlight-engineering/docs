@@ -1,0 +1,211 @@
+---
+title: Statement-Analyzer agent
+description: The trace-only LangGraph agent that ingests extracted bank statements into the asset ledger.
+icon: building-columns
+---
+
+The Statement-Analyzer agent (`statementAnalyzer`) is a three-node compiled LangGraph that turns
+a completed bank-statement extraction into borrower **asset accounts**. It resolves (or
+supersedes) an asset run, loads the persisted `bank_statements` for a borrower file, and ingests
+them into the `asset_accounts` / `asset_runs` ledger. It runs both inside a loan (loan-scoped) and
+as a standalone, loanless run.
+
+<Note>
+`statementAnalyzer` is a **trace-only** agent (`TraceOnlyAgentType` in
+`langgraph/agents/agent-trace.ts`). It emits its own LangSmith trace under the label
+`Statement-Analyzer`, but it is **not** a billed or scheduled platform agent: it has no row in the
+`agents` catalog, no `agent_runs` ledger row, and is not part of `AGENT_PIPELINE` or the router.
+It is invoked inline from bank-statement completion, not through the orchestrator. Its asset-run
+path is deliberately outside the shared heartbeat / `claimToken` / orphan-sweep fabric (OBS-3
+non-requirement) — supersession plus the DB-visible run state are the only liveness signals.
+</Note>
+
+The surface is dark-launched per lender behind the `statement_analyzer_enabled` flag on
+`lender_feature_flags` (seeded disabled by `seedStatementAnalyzerFlag`). With the flag off, no run
+is created and the `api/v1/portal/assets` read/review endpoints reject the request.
+
+## How it runs
+
+There is no portal "create run" endpoint. A run is born automatically when a bank-statement
+extraction completes.
+
+<Steps>
+<Step title="Extraction completes">
+`bank-statement.processor.ts` finishes a file, then calls `triggerAssetRun`, which reads
+`borrower_files.loan_id` (tenant-scoped). A lookup miss for the lender is skipped — a run may only
+be born from a borrower file proven to belong to the tenant, because its `borrower_file_id` is the
+binding every downstream account scope keys on.
+</Step>
+<Step title="Consumer gate">
+`AssetRunConsumer.onExtractionCompleted` checks the `statement_analyzer_enabled` flag. If enabled,
+it calls `LangGraphService.createStatementAnalyzerGraph` with `{ loanId, lenderId, borrowerFileId }`.
+A null `loanId` is forwarded as-is — that is the **standalone (loanless)** path (PR #2489).
+</Step>
+<Step title="Graph runs">
+The service mints an `auditRunId` (a trace correlation id only — it is not an `audit_runs` row),
+builds the graph, and invokes it. On success it returns `{ kind: "ok", runId }` or
+`{ kind: "no_rule_set" }`; on failure it flips the run to `failed` and rethrows.
+</Step>
+</Steps>
+
+Two gates can short-circuit without failing anything: the flag being off, and the lender having no
+active `asset_rule_set` (the `NO_RULE_SET` signal). Both are config states, never loan blockers —
+the consumer swallows them and creates no run.
+
+## The graph
+
+The graph is linear with one conditional exit:
+
+```text
+__start__ → resolveRun → (noRuleSet ? __end__ : loadStatements) → ingest → __end__
+```
+
+`StatementAnalyzerStateSchema` (`buildGraph.ts`) holds exactly nine scaffold channels and never
+carries blob payloads (raw PDF bytes, buffers, or OCR blobs stay out of graph state):
+
+| Channel | Purpose |
+|---|---|
+| `loanId` | Loan binding, or `null` on the standalone path |
+| `lenderId` | Tenant |
+| `auditRunId` | Trace correlation id (not an `audit_runs` row) |
+| `runId` | The minted `asset_runs.id` |
+| `borrowerFileId` | The statement set's binding — required on both paths |
+| `ruleSetId` | The active `asset_rule_sets` id the run was born under |
+| `statements` | The loaded `bank_statements` rows to ingest |
+| `ingestResult` | The `{ created, updated, rejected }` result |
+| `noRuleSet` | Set when the lender has no active asset rule set |
+
+<AccordionGroup>
+<Accordion title="resolveRun — birth state">
+Calls `AssetRunService.createOrSupersede({ loanId, lenderId, borrowerFileId })`. When the lender
+has no active `asset_rule_set` it returns the `NO_RULE_SET` signal and the node sets
+`noRuleSet: true`, routing straight to `__end__`. Otherwise it returns the new `runId` and
+`ruleSetId`. `createOrSupersede` is the single birth-state writer — `resolveRun` performs no second
+status flip after minting the run.
+</Accordion>
+<Accordion title="loadStatements — by borrower file">
+Selects the borrower file's `bank_statements` (`id`, `bankName`, `accountNumberMasked`,
+`statementPeriodEnd`, `closingBalance`), ordered newest period first, and maps each to an
+`IngestStatement` carrying `evidence: [{ doc_id: borrowerFileId }]`. A throw is re-wrapped to
+carry `runId` so the failure handler can flip the run to `failed`.
+</Accordion>
+<Accordion title="ingest — into asset accounts">
+Calls `AssetIngestionService.ingest({ loanId, borrowerFileId, statements })` and returns the
+`ingestResult`. Ingestion is loan-scoped and idempotent, so a superseded run ingesting is
+harmless — the completion guard in `LangGraphService` is what prevents a superseded run from owning
+the terminal status.
+</Accordion>
+</AccordionGroup>
+
+## Run lifecycle and supersession
+
+`asset_runs` mirrors `audit_runs` idempotency. `createOrSupersede`:
+
+- Resolves the active `asset_rule_sets` for the lender (`desc(updated_at), desc(id)` tiebreak), or
+  returns `NO_RULE_SET`.
+- Assigns a monotonic `run_number` (`max(run_number) + 1`) within scope — `(loan_id)` for
+  loan-bound runs, or `(borrower_file_id) WHERE loan_id IS NULL` for standalone runs — inserts the
+  new run with status `processing`, and supersedes every prior active run in scope
+  (`superseded_by` + `superseded_at` point at the new run).
+- Retries the `run_number` race (unique-violation `23505` on either unique index) up to five
+  attempts, re-selecting `max` each time. Every other error propagates.
+
+`asset_runs.status` is one of `pending`, `processing`, `complete`, `failed`. The graph's terminal
+writes are owned by `LangGraphService`:
+
+- **Success** flips `processing → complete` only while the run is still active and in-flight
+  (`status IN (pending, processing) AND superseded_at IS NULL`). A run superseded mid-flight
+  matches zero rows and stays superseded — a late finisher is a no-op, not a completion. The
+  `run_completed` health event is emitted only when that guard actually flips the row.
+- **Failure** flips `processing → failed` under the same active-and-in-flight guard, so a failure
+  never stomps a terminal or superseded run. A failed-row persistence error never masks the
+  original graph error.
+
+## Ingestion semantics
+
+`AssetIngestionService.ingest` maps each statement into an `asset_accounts` row, reconciling by
+`(bank_name, account_number_masked)` scoped to `loan_id` (loan-bound) or `borrower_file_id`
+(standalone). Key rules:
+
+- **Never-merge on null mask** (P0-8): a statement whose `account_number_masked` is `null` always
+  INSERTs a fresh account; it can never key-match.
+- **Strictly-newer balance**: on a key match the row is UPDATEd in place — `current_balance` and
+  `source_statement_id` are refreshed only when the new statement's `statement_period_end` is
+  strictly newer than the row's sourced period; evidence is always appended; underwriter-mutable
+  fields are preserved.
+- **Evidence required** (P1-C): a balance whose evidence carries no resolvable `doc_id` is rejected
+  (collected in `result.rejected`), never written with empty evidence.
+- **Standalone binding**: a standalone account persists `borrower_file_id` (its scope); a
+  loan-bound account leaves it `null` and binds via `loan_id`, so a loan-scoped re-upload that
+  supersedes the file cannot cascade-delete the current account.
+
+The result is `{ created, updated, rejected }`. A co-borrower collision (two existing accounts
+sharing a reconciliation key) keeps the first-seen row and logs rather than merging distinct
+accounts.
+
+## Asset accounts, review, and qualifying
+
+The asset run is reviewed through the `portal-asset` module. New extracted accounts land in
+`account_state = requires_review` with `asset_type_normalized = unknown`. Reviewers drive the
+`requires_review → included → excluded` state machine (`AssetStateMachineService`):
+
+- **Assign type** writes an `asset_correction`, resolves the qualifying haircut via
+  `AssetHaircutResolver` (from `asset_qualifying_schedules`), supersedes the old type's open
+  documentation conditions and emits the new type's conditions, then sets `included`. An account
+  cannot be `included` while its type is `unknown`.
+- **Exclude** requires a 1–500 character reason; an excluded account contributes `0`.
+
+`asset_type_normalized` covers `checking`, `savings`, `money_market`, `cd`, `brokerage`, `bonds`,
+`ira`, `roth_ira`, `401k`, `pension`, `529`, `business`, `crypto` (migration
+`0187_add_crypto_asset_type`), `gift_funds`, `life_insurance`, `other`, and `unknown`.
+
+Qualifying assets are computed deterministically on read:
+`qualifying_assets = qualifying_balance × qualifying_percent × ownership_percent`
+(`computeQualifyingAssets`; excluded accounts contribute `0`). Documentation conditions are emitted
+per type by `AssetConditionService` — for example retirement types emit
+`ASSET_RETIREMENT_WITHDRAWAL_TERMS`, `business` emits `ASSET_BUSINESS_CPA_EA` and
+`ASSET_BUSINESS_OWNERSHIP_25`, `brokerage` emits `ASSET_BROKERAGE_LIQUIDATION_PROOF`, and `crypto`
+emits `ASSET_CRYPTO_LIQUIDATION_USD` (crypto qualifies at 0% until converted to USD).
+
+<Note>
+State-machine transitions (assign type / include / exclude) are deferred for standalone (loanless)
+accounts in V1 — they throw `manual_account_requires_loan`. The single-run view also surfaces
+read-only `large_deposit` findings, which are produced by the bank-statement pipeline (joined from
+the `findings` table), with any `large_deposit_overrides` applied. The large-deposit threshold mode
+on `asset_rule_sets` (`pct_avg_gross_deposits` | `fixed`, migrations
+`0185_create_large_deposit_overrides` / `0186_add_large_deposit_threshold_mode`) only persists
+config today; it does not feed `qualifying_balance`.
+</Note>
+
+## HTTP endpoints
+
+All under `api/v1/portal/assets` (`AssetsController`), every route gated by
+`assertStatementAnalyzerEnabled`; write routes additionally require `@Roles("client_admin", "client_user")`:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | List asset runs |
+| GET | `/:runId` | Get a run (accounts, summary, large-deposit findings) |
+| GET | `/:runId/accounts/:id` | Get an account |
+| PATCH | `/:runId/accounts/:id` | Patch an account (corrections, state transition) |
+| POST | `/:runId/accounts` | Create a manual account (loan-bound only) |
+| DELETE | `/:runId/accounts/:id` | Delete an account |
+| POST | `/:runId/accounts/bulk-assign-type` | Bulk-assign asset type |
+| POST | `/:runId/export` | Export qualifying assets (xlsx + pdf, zipped) |
+
+The export reuses the `bank-statement-export` PDF/Excel writers and the signed-URL service;
+exported numbers equal the run view (corrections applied, excluded accounts zeroed).
+
+## Data model
+
+The agent writes the `asset_runs` and `asset_accounts` ledger and reads the bank-statement family
+(`borrower_files` → `bank_statements`). The rule config lives in `asset_rule_sets`,
+`asset_rules`, and `asset_qualifying_schedules`; review artifacts in `asset_corrections` and
+`asset_conditions`. See [the financial data model](/data-model/financial-data-model) for the full
+catalog. For the asset-depletion **income** family (a different subsystem that also touches
+"assets"), see [Income analysis pipeline](/agents/income-analysis).
+
+<Tip>
+Investigating a Statement-Analyzer run that failed or stalled? See
+[Investigating a failed run](/runbooks/investigating-a-failed-run).
+</Tip>

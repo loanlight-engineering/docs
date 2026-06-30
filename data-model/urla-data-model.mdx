@@ -57,7 +57,7 @@ One rules pass per borrower. PK `id`, `audit_run_id`, `loan_id`, `urla_extractio
 
 The individual findings. PK `id`, `rules_engine_result_id` → `urla_rules_engine_results` (cascade).
 
-<ParamField path="rule_id" type="rule_id (pgEnum)">31-value enum. See [enums reference](/data-model/enums-reference).</ParamField>
+<ParamField path="rule_id" type="rule_id (pgEnum)">32-value enum. `SECTION_4D_GIFT_FUNDS_PRESENT` (section 4D gift funds) was added in migration `0191`. See [enums reference](/data-model/enums-reference).</ParamField>
 <ParamField path="rule_category" type="rule_category (pgEnum)">16-value section enum.</ParamField>
 <ParamField path="finding_type" type="finding_type (pgEnum)">`PASS | FAIL | INFO`.</ParamField>
 

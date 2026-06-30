@@ -1,21 +1,25 @@
 ---
 title: Billing reports
-description: Octy's billing/usage reporting and its known schema drift.
+description: Octy's catalog- and ledger-driven billing/usage reporting.
 icon: receipt
 ---
 
-Billing Reports at `/billing-reports` count billable usage per lender over a date range. The logic lives in `src/lib/billing.ts`; shared definitions are in `src/lib/billing-shared.ts`.
+Billing Reports at `/billing-reports` count billable usage per lender over a date range. The logic lives in `src/lib/billing.ts`; shared definitions are in `src/lib/billing-shared.ts`. As of the agent-platform work (octy #84), billing is **catalog- and ledger-driven**: the billable agent set comes from the `agents` catalog and per-agent credit comes from the `agent_runs` execution ledger, replacing the old per-result-table existence probes.
 
 ## The billable unit
 
-A billable unit is **a loan, counted once**. A loan is counted in a period when its **first** completed audit run lands in the window. "First completed" means:
+A billable unit is **a loan (or, for a loanless run, a single audit run), counted once**. A unit is billable in a report when its **first** completed audit run lands in the window. "First completed" means:
 
 - `audit_runs.status = 'complete'`
 - `completed_at` is not null
 - `is_shadow = false`
-- `completed_at` falls in `[from, to)` (half-open range)
+- `completed_at` (the unit's **earliest** such completion, `first_completed_at`) falls in `[from, to)` (half-open; both bounds optional for an open-ended report)
 
-The per-loan agent mix is the union of agents across **all** of that loan's completed runs (not just the first). Results are grouped by lender; loans with no `lender_id` are excluded.
+The unit key is `COALESCE(loan_id::text, audit_run_id::text)`, so loan-bound runs group per loan while each loanless run (a standalone portal appraisal, for example) is its own unit. Anchoring on first completion keeps re-audits from billing twice. The per-unit agent mix is the union of billable agents that completed across **all** of that unit's runs.
+
+<Note>
+Lender attribution is via **`audit_runs.lender_id`**, not `loans.lender_id`. The lender-anchored model makes `audit_runs.lender_id` non-null, which is what lets loanless runs bill correctly. For the rare loan whose runs span two lenders, the unit is attributed to the lender of its **earliest** completed run (the same first-completion anchor).
+</Note>
 
 ## API
 
@@ -25,13 +29,13 @@ The per-loan agent mix is the union of agents across **all** of that loan's comp
 `summary`, `detail`, or `lenders`.
 </ParamField>
 <ParamField query="from" type="string (ISO date)">
-Start of the window. Validated so `from <= to`. Defaults to the last full calendar month (`defaultBillingRange`).
+Start of the window (inclusive). Validated so `from <= to`. Omit for an open-ended start.
 </ParamField>
 <ParamField query="to" type="string (ISO date)">
-End of the window (exclusive).
+End of the window (exclusive). Omit for an open-ended end.
 </ParamField>
 <ParamField query="agent" type="string (repeated)">
-One or more billing keys to filter on.
+One or more billable `agent_type`s to narrow to.
 </ParamField>
 <ParamField query="lenderId" type="string (repeated)">
 One or more lender ids to filter on.
@@ -41,35 +45,27 @@ CSV export is available via `summaryToCsv` and `detailToCsv`.
 
 ## How agents are detected
 
-A loan is credited with an agent based on the **presence of rows in that agent's result table** for the loan's completed runs. `BILLING_AGENTS` maps billing keys to those tables:
+The billable agent set is the DB **`agents` catalog filtered to `is_billable`** (`billableAgentTypes()`), so marking a new agent billable in the catalog bills it automatically — there is no per-agent SQL. A unit is credited with agent `X` when there is an **`agent_runs` row with `agent_type = X` and `status = 'complete'`** among the unit's completed runs. `complete` mirrors the old "produced results" signal, but a `failed` agent that left a partial result row is now correctly **not** counted.
 
-| Billing key | Result table(s) probed |
-|---|---|
-| `urla` | `urla_extraction_results` |
-| `pii` | `pii_validation_results` |
-| `dochealth` | `doc_completeness_results` / `doc_expiration_results` |
-| `property` | `property_data_runs` |
-| `redflags` | `red_flag_results` |
-| `classification` | `classify_split_runs` (probed with `to_regclass`) |
+The query builds one shared `billable_filtered` CTE (`completed → unit_first → unit_agents → billable`) used by both the summary and detail views; its `agents` column is the `text[]` of billable agent_types that completed for the unit. The agent filter intersects the requested `?agent=` values against the billable catalog first: selecting every billable agent applies no predicate (the count stays complete), a strict subset keeps units whose detected set overlaps the selection, and a request that intersects nothing valid selects nothing.
 
-The `classify_split_runs` probe uses `to_regclass` because that table lags behind in some environments — the query first checks the table exists before joining it.
+If the catalog has no billable agents, the report is empty by construction.
 
-## Known schema drift
+## Schema-drift handling
 
 <Note>
-Billing carries documented drift between Octy's vendored schema and the live database. Treat these as caveats when reconciling counts, not as bugs to fix here.
+Octy reads a **vendored schema that runs ahead of some deployed databases**, so the billing reader probes for column existence rather than assuming it.
 
-- **No `lenders.is_internal` filter.** That column is not migrated in the database Octy reads, so internal/test lenders are **not** excluded from billing counts.
-- **uuid/text cast on the lender join.** The join `lenders.id = loans.lender_id` casts **both sides to text** to bridge a uuid/text type drift between the two columns.
-- **`classify_split_runs` existence probe.** Classification credit depends on the table existing in the current environment (the `to_regclass` check above).
-- **Property-Red-Flags can under-count clean loans.** Because agent credit is keyed on the presence of result rows, a loan that ran Property-Red-Flags but produced no flagged rows may not be counted for the `redflags` agent.
+- **`columnExists` drift-probe.** Platform reads (e.g. the `agent_runs` ledger reader) probe `information_schema.columns` once per `table.column`, cache the result, and **degrade to empty** rather than erroring when a column the migrations haven't landed yet is read. A genuine "absent" is cached; a transient failure is evicted so the next call re-probes.
+- **Lender join.** The unit's lender is joined as `lenders.id = audit_runs.lender_id` (uuid to uuid). The optional `?lenderId=` filter compares on `lender_id::text` on both sides, and the values are bound as discrete IN params (node-postgres rejects a JS array bound as one param).
+- **Ledger dependency.** Because credit is now keyed on `agent_runs.status = 'complete'`, an environment whose `agent_runs` ledger is not populated will under-count. This replaced the per-result-table `EXISTS` probes; the one intentional delta from the old probes is that credit runs which failed with partial output are now excluded.
 </Note>
 
 ## Related pages
 
 <Columns cols={2}>
-<Card title="Result tables" href="/data-model/result-tables" icon="table">
-The per-agent tables billing probes.
+<Card title="Agent runs ledger" href="/agents/runs-ledger" icon="list-checks">
+The `agent_runs` ledger billing now reads.
 </Card>
 <Card title="Audit run" href="/concepts/audit-run" icon="play">
 What "complete" and `is_shadow` mean.

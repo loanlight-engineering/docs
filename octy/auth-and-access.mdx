@@ -10,6 +10,10 @@ Octy is internal-only. Every protected route requires a WorkOS-authenticated use
 
 Authentication runs through `@loanlight-engineering/shared-auth` (a WorkOS AuthKit wrapper). The Next.js middleware (`src/middleware.ts`) calls `withAuth` on covered routes and applies security headers (CSP, `X-Frame-Options: SAMEORIGIN`, HSTS, `X-Content-Type-Options: nosniff`, Referrer-Policy, Permissions-Policy).
 
+<Note>
+The Content-Security-Policy in `src/middleware.ts` is deliberately permissive in a few places: `script-src` allows `'unsafe-eval'`, `blob:`, and `https://cdn.jsdelivr.net`, and `worker-src` allows `'self' blob:` — all so the Monaco JSON editor on [routing config](/octy/routing-config) can load and spawn its web workers. `img-src` allows `https://avatars.githubusercontent.com` / `https://*.githubusercontent.com` for the [GitOps](/octy/gitops) PR avatars, and `connect-src` allows WorkOS and S3.
+</Note>
+
 The thin auth routes wrap shared-auth:
 
 | Route | Handler |

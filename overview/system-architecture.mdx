@@ -56,29 +56,30 @@ flowchart TD
     PC --> ORCH
 
     ORCH --> S3["S3 download<br/>(MISMO XML + PDFs)"]
-    S3 --> P1["Phase 1: PreAuditStageService"]
+    S3 --> RT["AgentRouterService.route<br/>(entitlements + dependency closure)"]
+    RT --> OR["AgentOrchestrator.run<br/>(ExecutionPlan)"]
 
-    subgraph P1Branches["Phase 1 (parallel, with barrier)"]
-        CLS["Pre-Audit-Classification<br/>(classify-split)"]
-        URLA["URLA extraction<br/>(MISMO → JSON)"]
-        IDX["LlamaCloud indexing"]
+    subgraph P0["Phase 0 (parallel, with barrier)"]
+        CLS["preAuditClassification<br/>(classify-split)"]
+        URLA["urlaExtraction<br/>(MISMO → JSON)"]
+        IDX["llama_index infra step"]
     end
 
-    P1 --> P1Branches
-    P1Branches --> BAR{"Phase 1 → Phase 2<br/>barrier"}
-    BAR --> P2["Phase 2/3: AuditAgentsExecutor"]
+    OR --> P0
+    P0 --> BAR{"Phase 0 → Phase 1<br/>ledger barrier"}
+    BAR --> P12["Phases 1 and 2<br/>(dispatch by identity)"]
 
-    subgraph Agents["Audit agents (Promise.allSettled)"]
-        PII["PII-Validation"]
-        PD["Property-Data"]
-        CR["Credit-Evaluation"]
-        DH["Document-Health"]
-        RF["Property-Red-Flags"]
+    subgraph Agents["Audit agents (per phase)"]
+        PII["piiValidation"]
+        PD["propertyData"]
+        CR["creditEvaluation"]
+        DH["documentHealth"]
+        RF["redFlags"]
     end
 
-    P2 --> Agents
+    P12 --> Agents
     Agents --> RES["Per-agent result tables<br/>(keyed by audit_run_id)"]
-    RES --> DONE["completeAuditRun"]
+    RES --> DONE["tryCompleteAuditRun"]
     DONE --> DEL["SSE / polling + EventBridge<br/>back to Encompass / Partner"]
 ```
 
@@ -92,8 +93,8 @@ There are three entry paths into the pipeline:
 Production EPC audit requests arrive over SQS, not an HTTP webhook. The `POST /api/v1/integration-events/process` endpoint exists for internal testing only and is slated for removal.
 </Note>
 
-Once a run is created, the orchestrator runs two stages. Phase 1 (`PreAuditStageService`) fans out three parallel branches — classification, URLA preprocessing, and LlamaCloud indexing — and applies a barrier that awaits classification before agents fire. Phase 2/3 (`AuditAgentsExecutor`) runs the audit agents via `Promise.allSettled`. Per-agent failures never fail the run; they are recorded in `audit_errors` and the run still completes. See [end-to-end data flow](/concepts/data-flow) and [pipeline overview](/pipeline/overview).
+Once a run is created, every channel routes through one execution engine. `AgentRouterService.route(...)` mints the run, applies the lender's entitlement filter, expands the dependency closure, and seeds the `agent_runs` ledger; `AgentOrchestrator.run(...)` then executes the resulting plan phase by phase. Phase 0 fans out the foundation agents (classification, URLA extraction) plus a `llama_index` infra step behind a ledger barrier; phases 1 and 2 run the audit agents, dispatched by identity. Per-agent failures never fail the run; they are recorded in `audit_errors` and the run still completes. See [end-to-end data flow](/concepts/data-flow) and [pipeline overview](/pipeline/overview).
 
 ## The agent platform
 
-The audit agents are catalogued in a DB-backed registry (`agents` plus an `agent_dependencies` DAG), selected by a pure-functional router, and recorded in an additive `agent_runs` ledger. The platform is rolling out in two phases: observer mode (the ledger backfills rows over the existing "run all" fan-out, default in prod) and router ownership (per-lender feature flags, default off and fail-closed). The router does not yet own selection or execution by default; the legacy `AuditAgentsExecutor` still drives execution. See [agent platform overview](/agents/platform-overview) and [router and entitlements](/agents/router-and-entitlements).
+The audit agents are catalogued in a DB-backed registry (the `agents` table for identity plus the `AGENT_PIPELINE` phase/dependency graph in code), selected by a pure-functional router that filters to the lender's `lender_agent_entitlements`, and recorded in the `agent_runs` ledger. The router and orchestrator are the live execution path for every channel (EPC, Partner, and legacy LOS) — the ledger is the execution record, not an observer-mode shadow. The router seeds `pending` rows; each agent owns its own `processing → complete | failed` transition, and `tryCompleteAuditRun` completes the run by watching the ledger. See [agent platform overview](/agents/platform-overview) and [router and entitlements](/agents/router-and-entitlements).

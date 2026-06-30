@@ -34,6 +34,17 @@ checks, and route documents back into Encompass.
 Two LlamaCloud primitives back the phases: a **split job** (LlamaSplit, beta API) buckets pages into
 categories, and a **classify job** (LlamaClassify v2 API) assigns a subtype to a page range.
 
+<Warning>
+Filename sanitization at the split-upload boundary (LOA-1586, #2452). LlamaCloud's split endpoint
+derives the file type from the substring after the **last** `.`, so a partner/Encompass filename with
+text appended after the extension (`CR.pdf (1)`, `air.pdf_2 CDA`) makes the split job 400 with
+`Unsupported file type` — and a single unclassifiable doc could deadlock the whole audit at the
+classification-readiness wait. `resolveLlcUploadFilename` (`llama/llc-filename.util.ts`) normalizes the
+multipart `filename` on the **split path only**, moving the trailing junk in front of a supported
+extension (`CR.pdf (1)` → `CR (1).pdf`). Only the name handed to LlamaCloud changes;
+`loan_documents.file_name`, partner-facing display, and the dedup key are untouched.
+</Warning>
+
 <Note>
 The coarse/fine split is the model worth keeping in your head: `split_type` is the bucket (Phase 1),
 `classification_type` is the subtype (Phase 2). In some modes Phase 2 can also overwrite
@@ -93,8 +104,18 @@ splits across two mode behaviors.
 
 - **Classifications API** — `GET /api/v1/audit_runs/:id/classifications` and
   `GET /api/v1/partner/audits/:auditId/classifications` (both via `buildClassificationsResponse`).
-- **`loanlight.documents.classified` event** — emitted at the pre-audit settle barrier; integrations
-  carve and push each document into Encompass, routing `unknown` to the lender's manual-review folder.
+- **`loanlight.documents.classified` event** — classification is DB-only and settles during phase 0,
+  so the EPC push event is fired in a `finally` after the orchestrator runs (LOA-1565, #2408). A
+  LlamaCloud/index failure makes `orchestrator.run` throw, but the emit still fires, so a failure never
+  drops the client's doc push. The emit is fire-and-forget (`fireDocumentsClassifiedPublic` → best-effort
+  `emitForLoan`). Integrations carve and push each document into Encompass, routing `unknown` to the
+  lender's manual-review folder.
+- **`loanlight.documents.materialized` return leg** — after integrations carve the classified splits to
+  S3 they emit `documents.materialized`; `DocumentsMaterializedConsumerService` consumes it (its own
+  `documents-materialized-events` SQS queue + DLQ, short visibility timeout) and
+  `persistSplitLocations` writes each split's S3 location onto `document_classifications.split_storage_path`,
+  updating `loan_documents.storage_path` when the reorg moved the original (LOA-1337, #2205). See
+  [classify-split data model](/subsystems/classify-split-data-model).
 - **PII validation** — builds deterministic `file_id` + page-range `search_filters` from the
   segments. See [retrieval tools and PII scoping](/subsystems/retrieval-tools-and-scoping) and
   [PII-Validation agent](/agents/pii-validation).

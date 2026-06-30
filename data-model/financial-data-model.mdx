@@ -4,7 +4,9 @@ description: Credit, income, and appraisal tables.
 icon: dollar-sign
 ---
 
-The credit, income, and appraisal subsystems are the three standalone run ledgers. Each owns its own run table, rule engine (`*_rule_sets` + `*_rules`), overrides, corrections, and recovery columns, and each can attach to a parent [`audit_runs`](/data-model/core-tables#audit-runs) row through a nullable `audit_run_id`. The rule-engine pattern is uniform across all three.
+The credit, income, and appraisal subsystems are the three audit-attachable run ledgers. Each owns its own run table, rule engine (`*_rule_sets` + `*_rules`), overrides, corrections, and recovery columns, and each can attach to a parent [`audit_runs`](/data-model/core-tables#audit-runs) row through a nullable `audit_run_id`. The rule-engine pattern is uniform across all three.
+
+A fourth subsystem — **asset / Statement Analyzer** (`asset_runs` + the `asset_*` tables) — is also a standalone run ledger, but it does **not** attach to `audit_runs`; it binds to a loan or to a `borrower_files` statement set. It is documented in [The asset subsystem](#the-asset-subsystem) below, alongside the older **bank-statement income pipeline** (`borrower_files` → `bank_statements` → `transactions`) it reads from.
 
 ## The shared rule-engine pattern
 
@@ -41,10 +43,13 @@ Children: `credit_corrections` (run_id cascade, user_id restrict NOT NULL, field
 
 ### credit_rules — the FK difference
 
-`credit_rules` follows the shared shape with two differences:
+`credit_rules` follows the shared shape, with one structural difference from `appraisal_rules`:
 
 - **`source_template_id` is intentionally NOT a foreign key** (migration `0080` removed it — credit is decoupled from the appraisal module; pinned by `fk-ondelete-policy.spec.ts`).
-- The `operator` CHECK is the **16-value** union — it does **not** include `abs_less_than` / `abs_less_than_or_equal`.
+
+Its `operator` CHECK reached parity with `appraisal_rules` in migration `0190`: it is now the **16-value** union and **does** include `abs_less_than` / `abs_less_than_or_equal`.
+
+`credit_rule_split_drafts` (`credit-rule-split-drafts.ts`, migration `0189`) is dedicated credit split-draft persistence for the rule editor — distinct from the appraisal-backed `rule_split_drafts` table. PK `id`, `user_id` → `portal_users` (cascade), `lender_id` → `lenders` (cascade), `original_text`, `second_half_text`, `first_half_saved_rule_id` → `credit_rules` (set null), `created_at`, `dismissed_at`. Partial unique `(user_id, lender_id)` where `dismissed_at IS NULL`.
 
 ## Income
 
@@ -64,7 +69,7 @@ Plus `borrower_name`, `requires_review`, `pending_review_count`, `failure_reason
 
 Run children (all FK `run_id` → `income_runs`, cascade): `income_run_sources` (links to `loan_documents` + `document_classifications`), `income_extractions` (unique `(run_id, source_id)`), `income_streams`, `income_findings`, `income_conditions`, `income_rule_outcomes` (unique `(run_id, rule_code, rule_set_id)`), `income_run_rule_overrides`, and `income_extraction_corrections` (FK to `income_extractions`). Lender-scoped overrides live in `income_lender_rule_overrides` (migration-only COALESCE unique `(lender_id, rule_code, loan_program_id)`).
 
-`income_rules` matches `appraisal_rules` shape; its `source_template_id` → `appraisal_rule_templates` (set null), and it uses the **16-value** operator union (no `abs_less_than*`).
+`income_rules` matches `appraisal_rules` shape; its `source_template_id` → `appraisal_rule_templates` (set null), and it uses the **14-value** operator union (no `abs_less_than*` — income did not receive the migration `0190` parity widening that credit did).
 
 <Warning>
 Do not confuse the `income_runs` family with the older **bank-statement income pipeline** rooted at `borrower_files` → `bank_statements` → `transactions` (with `income_filters`, `findings`, `ai_summaries`). They are entirely separate table families.
@@ -83,14 +88,125 @@ See the [Appraisal-Evaluation agent](/agents/appraisal-evaluation).
 <ParamField path="rule_set_id" type="uuid → appraisal_rule_sets (set null)">Repointed in migration `0083`.</ParamField>
 <ParamField path="audit_run_id" type="uuid → audit_runs (set null)">Phase 0.3 link.</ParamField>
 
-Extraction outputs: `extracted_data`, `field_confidence_map`, `field_status_map`, `field_source_location_map`, `coverage_result`, `coverage_percent`, `comment_summary`, `comment_keywords`, `photo_manifest`, `enrichment_data`, `findings`, `compliance_results`, `output_snapshot`, `difference_summary`. Liveness/recovery (LOA-1101): `last_heartbeat_at`, `recovery_attempts`, `claim_token`. Plus `revision_number`, `input_filename` / `input_s3_key`, `xml_s3_key`, `xml_version`, `agent_version`, `model_version`, `langsmith_url`, `selected_agency_sources` text[], `reviewed_at`.
+Extraction outputs: `extracted_data`, `field_confidence_map`, `field_status_map`, `field_source_location_map`, `coverage_result`, `coverage_percent`, `comment_summary`, `comment_keywords`, `photo_manifest`, `enrichment_data`, `findings`, `compliance_results`, `output_snapshot`, `difference_summary`, `rental_data` jsonb (migration `0179`, for 1025/rental form extraction). Liveness/recovery (LOA-1101): `last_heartbeat_at`, `recovery_attempts`, `claim_token`. Plus `revision_number`, `input_filename` / `input_s3_key`, `xml_s3_key`, `xml_version`, `agent_version`, `model_version`, `langsmith_url`, `selected_agency_sources` text[], `reviewed_at`.
 
 ### appraisal_rules — operator difference
 
-`appraisal_rules` follows the shared shape, but its `operator` CHECK is the **17-value** union — it **does** include `abs_less_than` and `abs_less_than_or_equal` (drift-pinned by `operator-check-drift.spec.ts`). It keeps `source_template_id` → `appraisal_rule_templates` (set null).
+`appraisal_rules` follows the shared shape, but its `operator` CHECK is the **16-value** union — it **does** include `abs_less_than` and `abs_less_than_or_equal` (drift-pinned by `operator-check-drift.spec.ts`). It keeps `source_template_id` → `appraisal_rule_templates` (set null).
 
 Other appraisal tables: `appraisal_run_partials` (per-section partials), `appraisal_rule_sets`, `appraisal_rule_templates`, `appraisal_rule_overrides`, `appraisal_corrections`, `appraisal_field_metrics`, and `appraisal_ssr_documents` (Fannie/Freddie SSR findings).
 
 <Note>
 Two tables were dropped. The `appraisal_langgraph_*` columns were removed in migration `0158`, and `client_rule_sets` was dropped in `0130` — which is why appraisal/credit `rule_set_id` FKs now point at `appraisal_rule_sets` / `credit_rule_sets` rather than the old client table.
 </Note>
+
+## The bank-statement income pipeline
+
+The original bank-statement income family is rooted at **`borrower_files`** and is separate from the `income_runs` family above. It is also the statement source the [asset subsystem](#the-asset-subsystem) reads from.
+
+### borrower_files
+
+`borrower-files.ts`. One row per uploaded statement set. PK `id`, `lender_id` → `lenders`, `loan_id` → `loans` (set null).
+
+<ParamField path="loan_reference" type="text">Optional external loan reference. CHECK `loan_reference_length_check`: `≤ 255` characters (migration `0195`).</ParamField>
+<ParamField path="borrower_type" type="text NOT NULL" />
+<ParamField path="status" type="text">Default `processing`.</ParamField>
+<ParamField path="large_deposit_threshold_mode" type="text">Default `fixed`. CHECK `large_deposit_threshold_mode_check`: `fixed | pct_avg_qualifying_income | pct_avg_gross_deposits` (migration `0186`).</ParamField>
+<ParamField path="s3_keys" type="text[]">All source-PDF S3 keys for the set (migration `0188`).</ParamField>
+<ParamField path="pending_s3_keys" type="text[]">Subset of `s3_keys` the next (append-mode) processing job should extract; cleared at terminal state (migration `0199`).</ParamField>
+
+Other columns: `name`, `created_by`, the `processing_*` progress columns, `income_qualification` (default `12`), `ntropy_account_holder_id`, `large_deposit_threshold` decimal, `industry_type`, and timestamps.
+
+<Note>
+`borrower_files.large_deposit_threshold_mode` is a **text + CHECK** column, distinct from the `large_deposit_threshold_mode` **pgEnum** on `asset_rule_sets`. The text version adds `pct_avg_qualifying_income`, which the asset enum lacks — see [enums reference](/data-model/enums-reference).
+</Note>
+
+### bank_statements
+
+`bank-statements.ts`. PK `id`, `borrower_file_id` → `borrower_files` (cascade). One row per extracted statement.
+
+<ParamField path="extraction_method" type="text">CHECK `extraction_method_check`: `pdfjs | azure | hybrid | llamaparse | reducto` (`reducto` added in migration `0194`).</ParamField>
+<ParamField path="included_in_calculation" type="boolean NOT NULL">Default `true`. Excludes a statement from income/asset math without deleting it (migration `0197`).</ParamField>
+<ParamField path="source_file_hash" type="text">SHA-256 of the source PDF bytes, for dedup; partial index where not null (migration `0197`).</ParamField>
+<ParamField path="source_s3_key" type="text">Originating S3 key (migration `0197`).</ParamField>
+
+Other columns: `bank_name`, `account_number_masked`, `account_holder`, `statement_period_start` / `statement_period_end` (date, NOT NULL), `fraud_flags` jsonb, `pdf_metadata` jsonb, `created_at`.
+
+### transactions
+
+`transactions.ts`. PK `id`, `statement_id` → `bank_statements` (cascade).
+
+<ParamField path="type" type="text NOT NULL">CHECK `type_check`: `credit | debit`.</ParamField>
+<ParamField path="category" type="text">Ntropy-derived category (free text, not a CHECK). Migration `0208` normalized the legacy value `missing account holder information` to `not enough information` in both `category` and the single-element `category_hierarchy`.</ParamField>
+<ParamField path="synthetic_id" type="varchar(64)">Stable synthetic transaction identifier; partial index where not null (migration `0210`).</ParamField>
+
+Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-zero), `merchant_normalized`, `merchant_name`, `deposit_classification` (CHECK), `is_anomaly` / `anomaly_reason`, `evidence` jsonb, `category_hierarchy` jsonb, `categorized_at`, `created_at`.
+
+### findings
+
+`findings.ts`. The bank-statement finding ledger. PK `id`, `borrower_file_id` → `borrower_files` (cascade).
+
+<ParamField path="statement_id" type="uuid → bank_statements (set null)">Links a finding to the statement it came from; indexed (migration `0201`).</ParamField>
+<ParamField path="finding_type" type="text NOT NULL">15-value CHECK `finding_type_check`. Migration `0209` added `nsf_overdraft` and `income_trend` (and re-asserted `validation_balance_mismatch` / `validation_duplicate`). See [enums reference](/data-model/enums-reference#finding-type-unions-bank-statement-pipeline).</ParamField>
+<ParamField path="severity" type="text NOT NULL">CHECK `severity_check`: `info | warning | critical | error`.</ParamField>
+
+Other columns: `description` (NOT NULL), `evidence` jsonb, `feedback_status` (default `pending`), `feedback_value`, and timestamps.
+
+<Warning>
+This `findings` table is the **bank-statement** family ledger (FK to `borrower_files`). It is unrelated to the audit-pipeline [result tables](/data-model/result-tables), which FK to `audit_runs`.
+</Warning>
+
+### large_deposit_overrides
+
+`large-deposit-overrides.ts` (migration `0185`). Per-transaction override store for large-deposit flags. PK `id`, `borrower_file_id` → `borrower_files` (cascade), `transaction_id` text (NOT NULL), `mode` (`large_deposit_override_mode` pgEnum: `force | suppress`), `created_by` → `portal_users` (set null), timestamps. Unique `(borrower_file_id, transaction_id)`.
+
+Auto large-deposit findings are `DELETE`+`INSERT`-recomputed on every recompute, so overrides live in this dedicated table and are re-applied after each pass: the effective flag set is auto ∪ `force` − `suppress`.
+
+## The asset subsystem
+
+The **asset / Statement Analyzer** subsystem (migrations `0180`–`0187`, `0207`) extracts and qualifies borrower asset accounts from bank statements. Unlike the credit/income/appraisal ledgers it does **not** attach to `audit_runs`; an `asset_runs` row binds to a loan or, for standalone runs, to a `borrower_files` set.
+
+### asset_runs
+
+`asset-runs.ts`. The run model, mirroring `audit_runs` idempotency. PK `id`, `lender_id` → `lenders` (restrict, NOT NULL), `loan_id` → `loans` (set null), `rule_set_id` → `asset_rule_sets` (set null).
+
+<ParamField path="run_number" type="integer NOT NULL">Monotonic per loan.</ParamField>
+<ParamField path="status" type="varchar(20) NOT NULL">Default `pending`. CHECK `asset_runs_status_check`: `pending | processing | complete | failed` (note `complete`, the `audit_runs` spelling — not `completed`).</ParamField>
+<ParamField path="superseded_by" type="uuid (self-FK, set null)">A re-extraction supersedes the prior run; `superseded_at` is set before row reconciliation.</ParamField>
+<ParamField path="borrower_file_id" type="uuid → borrower_files (set null)">Statement-set binding for standalone (loanless) runs (migration `0207`).</ParamField>
+
+Unique `(loan_id, run_number)` (`asset_runs_loan_run_key`); for loanless runs, a partial unique `(borrower_file_id, run_number)` `WHERE loan_id IS NULL` (migration `0207`). Indexes on `lender_id` and a partial `loan_id` index `WHERE superseded_at IS NULL`. Plus `created_at`, `completed_at`.
+
+### asset_accounts
+
+`asset-accounts.ts`. One row per extracted or manual borrower asset account. PK `id`, `loan_id` → `loans` (cascade; nullable since migration `0207`), `borrower_file_id` → `borrower_files` (cascade, migration `0207`).
+
+<ParamField path="source" type="asset_source (pgEnum) NOT NULL">`extracted | manual`.</ParamField>
+<ParamField path="source_statement_id" type="uuid → bank_statements (set null)" />
+<ParamField path="matched_borrower_id" type="uuid → borrowers (set null)" />
+<ParamField path="asset_type_normalized" type="asset_type_normalized (pgEnum) NOT NULL">Default `unknown`. `crypto` added in migration `0187`.</ParamField>
+<ParamField path="asset_class" type="asset_class (pgEnum)">`liquid | near_liquid | retirement | restricted | manual | unknown`.</ParamField>
+<ParamField path="account_state" type="asset_account_state (pgEnum) NOT NULL">Default `requires_review`. `requires_review | included | excluded`.</ParamField>
+
+Numeric columns: `current_balance`, `qualifying_balance`, `qualifying_percent` numeric(5,4), `ownership_percent` numeric(5,4) (NOT NULL, default `1`), `qualifying_assets`. Plus `asset_type_raw`, `exclusion_reason`, `ineligibility_reasons` text[] (default `{}`), `evidence_refs` jsonb, timestamps. CHECKs gate the balances/percents to non-negative `[0,1]` ranges and require a `qualifying_balance` for `manual` rows (`asset_accounts_manual_requires_qualifying_balance`).
+
+<Note>
+`qualifying_assets = qualifying_balance × qualifying_percent × ownership_percent` is computed downstream; the table only guarantees the column exists.
+</Note>
+
+### asset_rule_sets and asset_qualifying_schedules
+
+`asset-rules.ts`. The asset rule engine **differs from the shared `*_rule_sets` pattern**: no `created_by`, no `template_version`, and no partial-unique-where-active.
+
+- **`asset_rule_sets`** — PK `id`, `lender_id` → `lenders` (cascade), `program_id` → `loan_programs` (set null), `name`, `version` (default `1`), `is_active` (default `true`), `large_deposit_threshold_mode` (`large_deposit_threshold_mode` pgEnum: `pct_avg_gross_deposits | fixed`), `large_deposit_threshold_value` numeric, timestamps.
+- **`asset_qualifying_schedules`** — the `(rule_set_id, asset_type, purpose)` → `qualifying_percent` haircut lookup. PK `id`, `rule_set_id` → `asset_rule_sets` (cascade), `asset_type` (`asset_type_normalized` pgEnum), `purpose` text (default `eligibility`), `qualifying_percent` numeric(5,4) (CHECK `[0,1]`). Unique `(rule_set_id, asset_type, purpose)`.
+
+### asset_rules and asset_conditions
+
+**`asset_rules`** (`asset-rules.ts`) mirrors the `appraisal_rules` conditional-assertion shape but is leaner: PK `id`, `rule_set_id` → `asset_rule_sets` (cascade), `code`, `name`, `category`, `severity` (CHECK `FAIL | WARNING`), `thresholds` jsonb, `required_fields` text[], `operator` / `field_path` / `expected_value` / `condition` (mutually exclusive — `asset_rules_type_exclusive`), `description`, `source` (text, default `loanlight`, **no CHECK**), `fail_message`, `pass_message`, `is_enabled`, timestamps. The `operator` CHECK is the **16-value** union including `abs_less_than` / `abs_less_than_or_equal`. There is **no** `evaluate_fn_key`, `form_types`, `loan_program_id`, or `source_template_id` — program/lender scope is inherited from the owning rule set.
+
+**`asset_conditions`** (`asset-conditions.ts`) — the documentation-condition lifecycle. PK `id`, `asset_account_id` → `asset_accounts` (cascade — FK'd to the account, not a run, so conditions survive run supersession), `rule_code`, `status` text (default `open`, CHECK `open | satisfied | waived | superseded`), `emitted_at`, `waived_at`, `waived_by` uuid, `waiver_reason`, timestamps.
+
+### asset_corrections
+
+`asset-corrections.ts`. Auditable UW-override rows for asset accounts (last-write-wins; older rows retained for audit). PK `id`, `asset_account_id` → `asset_accounts` (cascade), `field`, `old_value`, `new_value`, `changed_by` → `portal_users` (set null), `changed_at`, `reason`. Indexed on `(asset_account_id, field)`.

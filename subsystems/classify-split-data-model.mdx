@@ -57,6 +57,7 @@ One row per **segment** — a page range with a bucket and a subtype.
 | `classification_confidence_score` | real nullable | 0–1 from the classifier |
 | `classification_reasoning` | text nullable | Classifier reasoning |
 | `page_start`, `page_end` | integer nullable | Inclusive, 1-based |
+| `split_storage_path` | text nullable | Relative S3 key of the carved split PDF. Written by the `documents.materialized` return leg (`persistSplitLocations`, LOA-1337), not by the classify run |
 | `requires_review` | boolean NOT NULL default false | |
 | `split_job_id`, `classify_job_id` | text nullable | LlamaSplit / LlamaClassify job ids |
 | `classification_status` | varchar(30) NOT NULL default `'split'` | `split` → `classified` → `classification_failed` |

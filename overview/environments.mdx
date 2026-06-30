@@ -27,14 +27,13 @@ At runtime, `DEPLOYED_ENVIRONMENT` also prefixes queue names (`dev-` only when s
 |---|---|---|
 | LangSmith project | `loanlight-aus` | `loanlight-aus` |
 | Datadog `env` tag | `int` | `prod` |
-| WorkOS issuer (AuthKit) | `reassuring-veil-31-int.authkit.app` | `grand-interest-90-staging.authkit.app` |
+| WorkOS issuer (AuthKit) | `https://reassuring-veil-31-int.authkit.app` | `https://signin.loanlight.com` |
 | FusionAuth `authDomain` | `loanlight-dev.fusionauth.io` | `loanlight.fusionauth.io` |
 | Partner S3 bucket | `partner-loan-files` | `partner-loan-files-prod` |
 | Partner results base URL | `portal.int.loanlight.com/results` | `portal.loanlight.com/results` |
 
 <Note>
-The prod `workOsIssuer` context value is `grand-interest-90-staging.authkit.app`. The string contains "staging" but it is the value set in the prod CDK context. Verify before treating any other value as canonical.
-{/* TODO: verify prod workOsIssuer value is intentional and not a context misconfiguration */}
+The prod `workOsIssuer` is now the custom domain `https://signin.loanlight.com` (with audience `client_01KPE6RHK5E8G00FTAR43SSA1X`), set in `cdk.context.prod.json`. It previously pointed at `grand-interest-90-staging.authkit.app`, which caused the gateway authorizer to reject prod tokens with "Unknown issuer" (#2473). The int issuer remains the AuthKit domain `https://reassuring-veil-31-int.authkit.app`.
 </Note>
 
 The LangGraph Studio dev environment uses a separate LangSmith project, `loanlight-studio`. Octy can override its LangSmith project via CDK context.
@@ -46,4 +45,6 @@ The LangGraph Studio dev environment uses a separate LangSmith project, `loanlig
 
 ## Deploys
 
-Each service deploys with AWS CDK. Stack service names are `LLApi`, `LLIntegrations`, `Octy`, and `WebApp`. CI/CD is GitHub Actions: `loanlight-api` uses `cd-int.yml` / `cd.yml` (prod) and the matching app workflows; `octy` uses `deploy-octy-int.yml` / `deploy-octy-prod.yml`; integrations use `deploy-encompass-int/prod.yml`. `GIT_COMMIT_SHA` propagates into the Datadog `version`/`commit` tags and the RUM build version. See [infrastructure](/ops/infrastructure).
+Each service deploys with AWS CDK. Stack service names are `LLApi`, `LLIntegrations`, `Octy`, and `WebApp`. CI/CD is GitHub Actions: `loanlight-api` uses `cd-int.yml` / `cd.yml` (prod) and the matching app workflows (`cd-app-int.yml` / `cd-app-prod.yml`); `octy` uses `deploy-octy-int.yml` / `deploy-octy-prod.yml`; integrations use `deploy-encompass-int/prod.yml`. `GIT_COMMIT_SHA` propagates into the Datadog `version`/`commit` tags and the RUM build version. See [infrastructure](/ops/infrastructure).
+
+Two scheduled (non-deploy) workflows run against `int`: `nightly-e2e.yml` (the e2e suite nightly at 08:00 UTC) and `dependency-audit.yml` (a dependency audit on pull requests and weekly on Mondays at 07:00 UTC). Both also support `workflow_dispatch`.

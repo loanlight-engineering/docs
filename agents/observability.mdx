@@ -63,14 +63,19 @@ The event goes through a pluggable `terminalFailureEmitter` (default logs via `l
 
 ## LangSmith trace naming
 
-`LangGraphService.createAgentConfig(agentType, loanId, documentId, auditRunId, additionalMetadata?)` (`langgraph.service.ts`, ~line 1785) builds the LangSmith `RunnableConfig` used on every `app.invoke(...)`:
+`LangGraphService.createAgentConfig(agentType, loanId, documentId, auditRunId, additionalMetadata?)` (`langgraph.service.ts`, ~line 1972) builds the LangSmith `RunnableConfig` used on every `app.invoke(...)`. `agentType` is the **canonical catalog key** (e.g. `piiValidation`, `creditEvaluation`), in sync with the `agents` catalog. The human-readable run name is derived from the `AGENT_TRACE_LABEL` map (`langgraph/agents/agent-trace.ts`):
 
-- `runName`: `` `${agentType}-Loan-${loanId}` `` normally; for Credit-Evaluation with a real `documentId` it is `` `${agentType}-Loan-${loanId}-Doc-${documentId}` ``.
-- `tags`: `[agentTag, "audit", "langgraph"]` where `agentTag` is `"credit"` for Credit-Evaluation, else `agentType.toLowerCase().replace(/[^a-z0-9]/g, "-")`.
-- `metadata`: `{ loanId, documentId, auditRunId, agentType, timestamp, executionContext:"langgraph-service", environment: NODE_ENV, ...additionalMetadata }`.
+- `label = AGENT_TRACE_LABEL[agentType]` — e.g. `piiValidation` → `PII-Validation`, `creditEvaluation` → `Credit-Evaluation`, `redFlags` → `Property-Red-Flags`.
+- `runName`: `` `${label}-Loan-${loanId}` `` normally; for `creditEvaluation` with a real `documentId` it is `` `${label}-Loan-${loanId}-Doc-${documentId}` ``.
+- `tags`: `[agentTag, "audit", "langgraph"]` where `agentTag` is `"credit"` for `creditEvaluation`, else `label.toLowerCase().replace(/[^a-z0-9]/g, "-")`.
+- `metadata`: `{ loanId, documentId, auditRunId, agentType, timestamp, executionContext:"langgraph-service", environment: NODE_ENV, ...additionalMetadata }`. `metadata.agentType` is the **canonical key**, not the label — so downstream readers (`langsmith-traces` → `octy_issues.related_traces`) never receive a legacy hyphenated value.
 - `hide_inputs` / `hide_outputs`: both set to the anonymizer below.
 
-Callers may pin `config.runId` to a UUID so a resolvable trace URL exists up front (used by appraisal). The `agentType` values passed in are display forms like `"PII-Validation"`, `"Property-Data"`, `"Document-Health"`, `"Credit-Evaluation"`, `"Pre-Audit-Classification"` — not the catalog keys.
+Callers may pin `config.runId` to a UUID so a resolvable trace URL exists up front (used by appraisal).
+
+<Note>
+The label is presentation only; the canonical key is the identity. `agent-trace.ts` also exports `normalizeAgentType(raw)`, which maps a legacy hyphenated label (or an `agent_type` recovered from a historical trace) back to the canonical key, and is idempotent. `statementAnalyzer` is a `TraceOnlyAgentType`: it emits its own LangSmith trace but is not a billed/scheduled catalog agent, so it has no `agents` row.
+</Note>
 
 ## LangSmith PII anonymizer
 

@@ -22,7 +22,7 @@ This agent is **OpenAI-based** (`gpt-4.1`), not Claude/Anthropic. Section 1 runs
 
 ## What triggers it
 
-`UrlaPreprocessingService` invokes the agent unless `SKIP_LANGGRAPH_AGENTS === "true"`. It threads in `mismoXml`, `lenderCode` (the lender config profile), `resolvedLoanProgram` (the same canonical code used by [classification](/agents/pre-audit-classification)), `bottomRatioPercent`, and the normalized borrower/co-borrower countries of citizenship. On this path `runRulesEngine` is `true`.
+`UrlaPreprocessingService` invokes the agent unless `SKIP_LANGGRAPH_AGENTS === "true"`. It threads in `mismoXml`, `lenderCode` (the lender config profile), `resolvedLoanProgram` (the same canonical code used by [classification](/agents/pre-audit-classification)), `loanType` (the raw program code the rules engine resolves for DSCR rule suppression, LOA-1584), `bottomRatioPercent`, and the normalized borrower/co-borrower countries of citizenship. On this path `runRulesEngine` is `true`.
 
 ### MISMO-hash caching
 
@@ -36,14 +36,14 @@ This agent is **OpenAI-based** (`gpt-4.1`), not Claude/Anthropic. Section 1 runs
 The service returns `{ auditRunId, urlaExtractionResult: { borrowerRelationshipsResult, borrowerExtractionResults }, rulesEngineSummaries, completed }`, wrapped as `UrlaPreprocessingData` and used to derive:
 
 - `loanContext` via `extractLoanContextFromUrla` (primary borrower) → feeds Document-Health. Yields `loan_purpose`, `occupancy_type`, `employment_type`, `property_value`, `housing_status`, `military_status`, `property_type`, `property_state`, `refinance_purpose` (including delayed-financing detection).
-- `transformedPiiFields` via `transformAllBorrowersToPiiFields` → feeds PII validation. Emits `FullName`, `DateOfBirth`, `SocialSecurityNumber`, `ITIN`, `MailingAddress` (with former-address context), `PropertyAddress`, `MaritalStatus`, `EmployerName`, `EmployerAddress`. Normalizes 9-digit MISMO ZIP to `XXXXX-XXXX` and pads 7/8-digit SSN/ITIN to `XXX-XX-XXXX`.
-- `transformedPropertyAddresses` via `transformToPropertyAddresses` (first borrower) → feeds Property-Data. Builds `AddressExtraction { subjectAddress, borrowerAddress, reoProperties }` and dedupes REO entries that match the subject/borrower address via USPS-aware `addressesMatch`.
+- `transformedPiiFields` via `transformAllBorrowersToPiiFields` → feeds PII validation. Emits `FullName`, `DateOfBirth`, `SocialSecurityNumber`, `ITIN`, `MailingAddress` (with former-address context), `PropertyAddress` (carrying the household known-non-subject-address set — every borrower's Section 1 residences plus Section 3 owned properties, minus the subject — that drives PII's [non-subject suppressor](/agents/pii-validation#known-non-subject-address-suppression)), `MaritalStatus`, `EmployerName`, `EmployerAddress`. Normalizes 9-digit MISMO ZIP to `XXXXX-XXXX` and pads 7/8-digit SSN/ITIN to `XXX-XX-XXXX`.
+- `transformedPropertyAddresses` via `transformToPropertyAddresses` (first borrower) → feeds Property-Data. Builds `AddressExtraction { subjectAddress, borrowerAddress, reoProperties }`, keeps only Section 3 properties whose `occupancyType === "INVESTMENT"` (LOA-751), and dedupes REO entries that match the subject/borrower address via USPS-aware `addressesMatch`.
 
 Failures are caught and saved as an `audit_errors` row (`agentName: "urlaExtraction"`); downstream agents continue without `loanContext`.
 
 ## Top-level graph
 
-`UrlaExtractionStateSchema` (`Annotation.Root`) carries `xmlData`, `runRulesEngine`, `lenderCode`, `loanProgram`, `bottomRatioPercent`, the two `*CountryOfCitizenship` fields, `borrowerRelationshipsResult` (`BorrowerCreditGrouping`), `borrowerExtractionResults` (concat reducer), `rulesEngineSummaries` (concat reducer), and `completed`.
+`UrlaExtractionStateSchema` (`Annotation.Root`) carries `xmlData`, `runRulesEngine`, `lenderCode`, `loanProgram`, `loanType`, `bottomRatioPercent`, the two `*CountryOfCitizenship` fields, `borrowerRelationshipsResult` (`BorrowerCreditGrouping`), `borrowerExtractionResults` (concat reducer), `rulesEngineSummaries` (concat reducer), and `completed`. `loanProgram` and `loanType` are threaded through the rules-engine fan-out so URLA completeness can resolve DSCR programs (LOA-1584).
 
 ```text
 __start__ → extract-borrower-relationships

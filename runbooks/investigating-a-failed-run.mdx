@@ -31,7 +31,7 @@ Each row carries:
 | `retryable` | Defaults to `true` for `transient` errors. |
 
 <Note>
-  If a verdict is missing and there is **no** `audit_errors` row for that agent, the agent was probably never selected to run, rather than having failed. Check `audit_runs.agent_config` (the partner allow-list or router bridge) and the agent selection rules below.
+  If a verdict is missing and there is **no** `audit_errors` row for that agent, the agent was probably never selected to run, rather than having failed. The authoritative record of what ran is now the **`agent_runs` ledger** — one row per planned agent per audit run, carrying `status` (`pending` → `processing` → `complete` / `failed` / `skipped`) and a `skip_reason`. Read it (via [DB Studio](/octy/db-studio); there is no Oz data tool for it) before the selection rules below. `audit_runs.agent_config` still exists but is only a legacy compatibility bridge — the ledger, not `agent_config`, is the source of truth.
 </Note>
 
 ## A missing verdict: was the agent run, skipped, or failed?
@@ -39,8 +39,8 @@ Each row carries:
 Walk these in order. Each rules out one cause.
 
 <Steps>
-  <Step title="Was the agent selected?">
-    When `agents` is empty or undefined, the executor runs all agents. When an allow-list is present (partner `agents[]` or the router bridge in `audit_runs.agent_config`), only those agents run. A verdict absent because the agent was not in the allow-list is correct behaviour, not a bug. The agent router is feature-flagged per lender and OFF by default; when off, EPC runs all agents. See [router and entitlements](/agents/router-and-entitlements).
+  <Step title="Was the agent selected, or seeded as skipped?">
+    Selection is catalog- and entitlement-driven. The router builds the execution plan and **seeds the `agent_runs` ledger**: an agent the lender is not entitled to, or whose inputs cannot exist, is seeded `skipped` (with a `skip_reason`) and never dispatched. A verdict absent because the agent was seeded `skipped` is correct behaviour, not a bug — read the `skip_reason`. Entitlements are **default-on**: a lender with no `lender_agent_entitlements` rows runs all active catalog agents; once it has explicit rows, only `enabled = true` agents run. Standalone agents (appraisal) are strictly opt-in. See [router and entitlements](/agents/router-and-entitlements).
   </Step>
   <Step title="Did the agent gate itself out?">
     Some agents skip deterministically:
@@ -72,7 +72,7 @@ The `WORKFLOW.ERROR` progress event carries `errorStep`, `errorCode`, and `error
     The pre-audit classification agent threw (the `documentClassification` node is the only one that propagates). This is the one Phase-1 failure that can fail the whole run, because classification is the Phase-1 → Phase-2 barrier and the ledger row must reach a terminal state. Open the `Pre-Audit-Classification` trace.
   </Accordion>
   <Accordion title="preparing_pipeline / uploading_documents / waiting_for_pipeline">
-    LlamaCloud ingestion failed or timed out. Readiness is gated by `processing_jobs` and the poller; failure causes are `hard_deadline`, `absolute_ceiling` (57 min), `dedup_stale_row`, or `null_started_at`. A `PIPELINE_NOT_FOUND` triggers one recreate-and-retry. See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
+    LlamaCloud ingestion failed or timed out. Readiness is gated by `processing_jobs` and the poller; failure causes are `hard_deadline`, `absolute_ceiling` (57 min), `dedup_stale_row`, or `null_started_at`. A `PIPELINE_NOT_FOUND` triggers one recreate-and-retry. Indexing is also tracked in the `audit_infra_steps` ledger as a non-agent step (`capability = 'llama_index'`, status `pending` → `processing` → `complete` / `failed`); it carries no entitlement or billing but **gates the phase-0 barrier**, so a run stuck in phase 0 with that row non-terminal is waiting on indexing. See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
   </Accordion>
 </AccordionGroup>
 

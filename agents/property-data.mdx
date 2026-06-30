@@ -43,7 +43,10 @@ caller's try/catch.
 <Steps>
 <Step title="extractAddresses">
 If subject + borrower address overrides are present, uses them directly (REO addresses always come
-from the override). Otherwise runs an LLM extraction over the MISMO 3.4 XML
+from the override). The REO override carries only Section 3 properties whose
+`occupancyType === "INVESTMENT"` — `transformToPropertyAddresses` filters out every other occupancy
+type upstream (LOA-751), so retained primary residences and second homes never become phantom
+`investment` rows downstream. Otherwise runs an LLM extraction over the MISMO 3.4 XML
 ("MISMO 3.4 XML ADDRESS EXTRACTION EXPERT" prompt): the subject property address from
 `//SUBJECT_PROPERTY/ADDRESS` and the borrower current address from the borrower party's current
 residence. `monthlyRent` is extracted only when the borrower address has a unit. The LLM does not

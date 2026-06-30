@@ -32,12 +32,13 @@ Octy uses a plain `FargateTaskDefinition` with **no Datadog APM sidecar**. Unlik
 
 - Attaches the API's DB client security group (`LLApiDatabaseStack-DatabaseClientSecurityGroupId`) so the task can reach Aurora on 5432.
 - Publishes the Octy ECS security group id to SSM so loanlight-api permits it on its internal NLB (`api-internal.{zone}` on 443), giving Octy `LOANLIGHT_API_URL=https://api-internal.{zone}`.
+- Consumes the integrations service's internal NLB at `integrations-internal.{zone}` (HTTPS:443, ACM cert) for `INTEGRATIONS_INTERNAL_URL` — TLS is required because the shared internal api key rides every call. See [routing config](/octy/routing-config).
 
 ### Environment and secrets injected by CDK
 
-`getEnvironment` sets, among others: `NODE_ENV=production`, `PORT=3000`, the imported `DB_HOST`/`DB_PORT`/`DB_NAME`, `NEXT_PUBLIC_APP_URL` and WorkOS redirect URIs (`https://{fqdn}`), `OCTY_WEBHOOK_BASE_URL` (`https://{fqdn}`), `DEPLOYED_ENVIRONMENT`, `CI=true`, the LangSmith project, `WARP_ENVIRONMENT_ID`, the three S3 buckets, and `LOANLIGHT_API_URL`.
+`getEnvironment` sets, among others: `NODE_ENV=production`, `PORT=3000`, the imported `DB_HOST`/`DB_PORT`/`DB_NAME`, `NEXT_PUBLIC_APP_URL` and WorkOS redirect URIs (`https://{fqdn}`), `OCTY_WEBHOOK_BASE_URL` (`https://{fqdn}`), `DEPLOYED_ENVIRONMENT`, `CI=true`, the LangSmith project, `WARP_ENVIRONMENT_ID`, the three S3 buckets, `LOANLIGHT_API_URL`, `INTEGRATIONS_INTERNAL_URL` (`https://integrations-internal.{zone}`), and the non-secret GitHub App config from CDK context (`GITHUB_ORG`, `GITHUB_REPOS`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`).
 
-`getSecrets` pulls from Secrets Manager: the DB credentials (`Octy/{env}/DbSecret`), `Octy/WorkosApiKey`, `Octy/WorkosCookiePassword`, `Octy/ServerActionsEncryptionKey`, `Octy/WarpApiKey`, the shared `LLApi/LANGSMITH_API_KEY`, `LLApi/LANGSMITH_ORG_ID`, `LLApi/LLC_PROJECT`, `LLApi/LLC_ORG_ID`, `LLApi/OCTY_INTERNAL_API_KEY`, plus `OCTY_DATADOG_API_KEY` and `OCTY_DATADOG_APPLICATION_KEY`.
+`getSecrets` pulls from Secrets Manager: the DB credentials (`Octy/{env}/DbSecret`), `Octy/WorkosApiKey`, `Octy/WorkosCookiePassword`, `Octy/ServerActionsEncryptionKey`, `Octy/WarpApiKey`, the shared `LLApi/LANGSMITH_API_KEY`, `LLApi/LANGSMITH_ORG_ID`, `LLApi/LLC_PROJECT`, `LLApi/LLC_ORG_ID`, `LLApi/OCTY_INTERNAL_API_KEY`, `OCTY_DATADOG_API_KEY`, `OCTY_DATADOG_APPLICATION_KEY`, the GitHub App private key (`Octy/GithubAppPrivateKey`), the docs-refresh callback secret (`Octy/OzToOctyApiKey`), the Slack bot token (`Octy/SlackBotToken`), and the integrations internal key (`LLIntegrations/INTERNAL_API_KEY`, shared by reference with the integrations stack).
 
 The task role is granted **read** on the three buckets plus KMS decrypt on the integration-files and portal-upload keys. See [Environment variables](/octy/environment-variables) for what each value drives.
 

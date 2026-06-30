@@ -1,0 +1,110 @@
+---
+title: Statement Analyzer
+description: The portal-asset module and qualifying-assets review UI.
+icon: piggy-bank
+---
+
+The Statement Analyzer turns a borrower's analyzed bank statements into a reviewable qualifying-assets table. The backend is the `portal-asset` module (`AssetsController`); the portal renders it under `/statement-analyzer`. The underlying extraction is the same bank-statement pipeline used by [income analysis](/portal/api-bank-statement-dscr) — Statement Analyzer is the asset lens over it, driven by the [Statement Analyzer agent](/agents/statement-analyzer) (`agent_type` `statementAnalyzer`).
+
+The whole surface is dark-launched per lender. It is gated on the backend by the `statement_analyzer_enabled` row in `lender_feature_flags`, and in the portal by `flags.statementAnalyzer` (default-OFF; env `FEATURE_STATEMENT_ANALYZER`). See the [route and feature map](/portal/feature-map) for the flag.
+
+## How asset runs are created
+
+There is no "create asset run" endpoint. Runs auto-spawn from completed bank-statement extraction.
+
+<Steps>
+  <Step title="Bank-statement extraction completes">
+    The bank-statement processor marks a `borrower_files` row completed and then calls `AssetRunConsumer.onExtractionCompleted` directly (there is no EventEmitter/`@OnEvent` pattern in this codebase).
+  </Step>
+  <Step title="Feature flag is checked write-side">
+    The consumer re-checks `statement_analyzer_enabled` for the lender. If the flag is off or absent, it logs `asset_run.flag_off` and creates nothing — the write side stays dark so no run or account rows exist for an un-flagged tenant.
+  </Step>
+  <Step title="A run is created (or superseded)">
+    The consumer delegates to the Statement Analyzer LangGraph graph, which calls `AssetRunService.createOrSupersede`. A re-extraction supersedes the prior active run rather than duplicating it; `run_number` is monotonic and unique per scope (`(loan_id, run_number)` for loan-bound runs, a partial `(borrower_file_id, run_number)` index for standalone runs).
+  </Step>
+</Steps>
+
+<Note>
+A lender with the flag on but **no active `asset_rule_set`** produces no runs. `createOrSupersede` returns the `NO_RULE_SET` signal, the consumer swallows it (logging `asset_run.no_rule_set`), and the list endpoint surfaces it as an empty list with a `configError`, not an underwriting error. This is a config gap, never a loan blocker.
+</Note>
+
+### Loan-bound vs standalone runs
+
+A run created for a borrower file with a non-null `loan_id` is loan-bound and keys its accounts on `loan_id`. A run with no loan is standalone (loanless) and keys its accounts on `borrower_file_id`. Standalone runs are read-only in V1: every account-write path rejects them with `manual_account_requires_loan` (a `matched_borrower_id` write fails earlier with `matched_borrower_requires_loan`, because a loanless run has no borrower set to match against).
+
+## AssetsController
+
+Source: `portal-asset/assets.controller.ts` at `api/v1/portal/assets`. Class-guarded by [`PortalAuthGuard`](/portal/api-auth); write routes additionally gate with `@Roles`. Every route first calls `assertStatementAnalyzerEnabled(ctx)`, which throws `403 "Statement Analyzer is not enabled for this lender"` when the flag row is missing or disabled — so an un-flagged lender never reaches run or account data regardless of role. All reads/writes are tenant-scoped on `ctx.effectiveLenderId`.
+
+| Method / path | Roles | Purpose |
+|---|---|---|
+| `GET /api/v1/portal/assets` | auth | List runs (`ListAssetRunsDto`: `page`, `limit` ≤200, `loanId?`, `sort`). Returns `{ data, total, page, limit }`, or `{ data: [], configError: "NO_RULE_SET" }` when the lender has no active rule set |
+| `GET /api/v1/portal/assets/:runId` | auth | Run detail: `{ run, accounts, summary, large_deposit_findings, borrower_file_id }` |
+| `GET /api/v1/portal/assets/:runId/accounts/:id` | auth | Account detail with `corrections` audit trail and `conditions` |
+| `PATCH /api/v1/portal/assets/:runId/accounts/:id` | client_admin, client_user | Update an account (`PatchAssetAccountDto`) |
+| `POST /api/v1/portal/assets/:runId/accounts` | client_admin, client_user | Add a manual account (`CreateManualAccountDto`, HTTP 201) |
+| `DELETE /api/v1/portal/assets/:runId/accounts/:id` | client_admin, client_user | Delete a manual account (HTTP 204) |
+| `POST /api/v1/portal/assets/:runId/accounts/bulk-assign-type` | client_admin, client_user | Assign an asset type to many accounts (`BulkAssignTypeDto`, HTTP 200) |
+| `POST /api/v1/portal/assets/:runId/export` | client_admin, client_user | Export the qualifying-assets table (`ExportAssetsDto`, HTTP 200) |
+
+A missing/foreign run returns `404 asset_run_not_found`; a missing/foreign account returns `404 asset_account_not_found`.
+
+### PATCH validation and qualifying-assets recompute
+
+`PATCH .../accounts/:id` validates the whole body before persisting anything (a combined `{ qualifying_balance, matched_borrower_id: <foreign> }` must not save the numeric change and then reject the borrower). Range rules surface as `{ error: "validation_error", details: [...] }`:
+
+- percents are `0..1`; `qualifying_balance` is `0..current_balance` for an extracted account, `≥0` for a manual one.
+- a `reason` is required when changing `qualifying_balance`, `qualifying_percent`, or `ownership_percent` (each writes an auditable `asset_corrections` row).
+- an `exclusion_reason` is required when setting `account_state` to `excluded`.
+
+Setting `asset_type_normalized` to `unknown` forces `requires_review` (an unknown type can never be `included`); any other type runs the full `assign_type` state-machine transition. After every mutation the controller recomputes and persists the `qualifying_assets` column, so the stored row, the GET recompute, the run summary, and the export all agree (an excluded account is zeroed).
+
+### Large-deposit findings projection
+
+Run detail projects existing `large_deposit` findings for the run's loan (or `borrower_file_id` for a standalone run) as **read-only** context — they are never joined into `qualifying_balance`. A finding backed by a `force` large-deposit override is marked `is_override: true`; `account_id` is always null (there is no asset-account link in V1). The projection is tenant-scoped by `borrower_files.lender_id` on both paths. The override write/delete endpoints themselves live on the [bank-statement controller](/portal/api-bank-statement-dscr).
+
+### Export
+
+`POST .../export` (`ExportAssetsDto { format?: ("xlsx" | "pdf")[] }`, defaults to both) reuses the `bank-statement-export` Excel/PDF writers and signed-URL service — there is no separate export engine. Exported numbers read the `asset_corrections`-applied account columns, so they equal what the UI shows. When more than one format is requested they are bundled into a single ZIP and every entry shares that one signed URL (the frontend dedupes by URL); the response is `{ files: [{ format, url, filename }] }`.
+
+## BFF proxies
+
+The portal proxies the run-centric subset under `src/app/api/assets/*`:
+
+| Route handler | Backend |
+|---|---|
+| `GET /api/assets/run` | `GET /assets` (list) |
+| `GET /api/assets/[runId]` | `GET /assets/:runId` |
+| `GET/POST /api/assets/[runId]/accounts` | account list / manual add |
+| `GET/PATCH/DELETE /api/assets/[runId]/accounts/[id]` | account detail / update / delete |
+| `POST /api/assets/[runId]/export` | export |
+
+<Note>
+There is no BFF proxy for `bulk-assign-type`. It is reachable only against the backend directly.
+</Note>
+
+## Portal UI
+
+The UI lives in the `(app)` route group and is gated on `flags.statementAnalyzer`:
+
+- `/statement-analyzer` — the landing list (`StatementAnalyzerLanding`). When the flag is off the page renders a "not enabled" message instead of fetching.
+- `/statement-analyzer/[runId]` — the run detail with the qualifying-assets table.
+
+The list uses the shared `<Pagination>` + `useListPagination` hook, and the **Statement Analyzer** entry in `TopNav` is keyed on the `statementAnalyzer` flag.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Statement Analyzer agent" icon="building-columns" href="/agents/statement-analyzer">
+    The pipeline agent that builds asset runs.
+  </Card>
+  <Card title="Bank statement and DSCR" icon="landmark" href="/portal/api-bank-statement-dscr">
+    The extraction pipeline and large-deposit overrides.
+  </Card>
+  <Card title="Route and feature map" icon="map" href="/portal/feature-map">
+    The `statementAnalyzer` flag and route gating.
+  </Card>
+  <Card title="Authentication and authorization" icon="shield-check" href="/portal/api-auth">
+    PortalAuthGuard and per-lender feature gating.
+  </Card>
+</Columns>

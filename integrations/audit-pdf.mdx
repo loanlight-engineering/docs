@@ -36,7 +36,7 @@ interface GenerateAuditPdfV2Input {
 }
 ```
 
-`AuditSectionsInput` carries the five report sections:
+`AuditSectionsInput` carries the six report sections:
 
 ```ts
 interface AuditSectionsInput {
@@ -45,10 +45,45 @@ interface AuditSectionsInput {
   documentHealth;
   check1003;
   propertiesCheck;
+  credit;          // added in the credit-section redesign
 }
 ```
 
+The render order is loan details, summary, document health, data consistency, Check 1003, **credit**, properties check — so the credit section sits between Check 1003 and the properties check.
+
 When the audit state is not `Complete`, or sections are missing, the encompass service passes the data through so the library renders a status / NULL_SECTIONS PDF rather than a full report.
+
+### Credit section
+
+The `credit` section (`{ data: CreditReportInput[] }`) renders one block per credit report (loans usually have exactly one). Each `CreditReportInput` is `{ status?, inputFilename?, extractedData?, complianceResults? }`. A report with neither extracted data nor compliance results (for example a pending run) is skipped. Each block has:
+
+- A **bureau-score card** with columns **TransUnion**, **Experian**, **Equifax**, **Payments/mo.**, **Failed Rules**, **Warnings**. A primary-borrower row is always shown; a co-borrower row is added when a second borrower carries identifying info.
+- A **flagged-rules table** with columns **Rule**, **Result**, **Issue**. Only `FAIL` and `WARNING` outcomes appear, sorted FAIL before WARNING. The full `CreditRuleOutcome` set is `PASS`, `FAIL`, `WARNING`, `NEEDS_INFO`, `PENDING`, `SKIPPED`.
+- A green note, `"{X} of {Y} credit rules passed."`, when the report has any compliance results.
+
+### Loan Details card
+
+The Loan Details card (`summary.loanDetails`, a `LoanDetails`) renders 15 fields, three per row. All values are pre-formatted display strings resolved by loanlight-api; an absent field renders as `—`. The labels and keys are:
+
+| Label | Key |
+|---|---|
+| Borrower(s) | `borrowers` |
+| Loan # | `loanNumber` |
+| Property | `propertyAddress` |
+| Loan Program | `loanProgramName` |
+| Income Type | `incomeType` |
+| Est. Closing Date | `estimatedClosingDate` |
+| Purpose | `loanPurpose` |
+| Occupancy | `occupancyType` |
+| Note Rate | `noteRate` |
+| Loan Amount | `loanAmount` |
+| Purchase Price | `purchasePrice` |
+| Appraised Value | `appraisedValue` |
+| LTV / CLTV | `ltv` (renders `ltv` and `combinedLtv` together) |
+| Rate Lock Status | `rateLockStatus` |
+| Current Milestone | `currentMilestone` |
+
+The card grew from 9 to 15 fields: `incomeType`, `estimatedClosingDate`, `noteRate`, `appraisedValue`, `rateLockStatus`, and `currentMilestone` are new, and the labels changed from "Loan Number" to "Loan #" and from "Program" to "Loan Program".
 
 ## Source modules
 
@@ -67,7 +102,7 @@ The encompass `AuditReportPdfService.generate(...)` orchestrates the render:
 
 <Steps>
 <Step title="Fetch the sections">
-`AuditResultsFetcherService.fetchV2Inputs(auditRunId, requestorId, token)` pulls the five sections from loanlight-api via three endpoints (results, urla_completeness, property_data), with retry/backoff. See [Results access](/integrations/results-access).
+`AuditResultsFetcherService.fetchV2Inputs(auditRunId, requestorId, token)` pulls the sections from loanlight-api via four parallel calls (`Promise.allSettled`), each with retry/backoff: `GET /api/v1/audit_runs/{id}/results?includeNonIssues=true&includeEncompassLoanDetails=true`, `…/urla_completeness`, `…/property_data`, and `…/credit`. `includeEncompassLoanDetails=true` opts the `/results` response into the Encompass-only Loan Details fields (`incomeType`, `noteRate`); see [Results access](/integrations/results-access).
 </Step>
 <Step title="Render">
 The assembled `AuditSectionsInput` plus `auditState` are passed to `generateAuditPdfV2`. For split delivery, `generatePropertyPdf` is called once per property and the outputs are stored individually (or merged via `combinePdfs` for the combined path).

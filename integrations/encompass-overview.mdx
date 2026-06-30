@@ -76,10 +76,14 @@ code belongs to is the single most important framing for this area.
     [Integration orchestration pipeline](/integrations/orchestration-pipeline).
   </Step>
   <Step title="Results flow back to Encompass">
-    Classified documents are pushed back into Encompass via the
+    Classified documents are filed back into the Encompass eFolder via the
     `loanlight.documents.classified` event, and the plug-in can mint short-lived
-    results-access URLs to view the completed audit. See
-    [Results access URLs](/integrations/results-access).
+    results-access URLs to view the completed audit. The document push is gated
+    per lender by the `lender_feature` key `document_push` (default off; enabled
+    in INT), and the integrations consumer resolves the target Encompass loan by
+    `correlationId` rather than the (null) event field. See
+    [Results access URLs](/integrations/results-access) and
+    [Messaging](/integrations/messaging).
   </Step>
 </Steps>
 

@@ -1,0 +1,77 @@
+---
+title: Doc Refreshes
+description: The nightly documentation-refresh ledger and its Oz callback.
+icon: book-open-check
+---
+
+These engineering docs are kept in sync with the code by a nightly Oz skill, `octy-docs-refresh`. After each run the skill reports back to Octy, which records it and (optionally) posts to Slack. The **Doc Refreshes** page at `/docs` is the operator-facing ledger of those runs; the callback is `POST /api/oz/docs-refresh`.
+
+<Note>
+This is a different Oz flow from a [bug-report investigation](/octy/oz-run-lifecycle). It runs on a schedule (not against an `octy_issues` row), and it authenticates with a static shared secret rather than a per-run token. It is also unrelated to the Oz runtime: these docs are **not** wired into Oz runs as an MCP knowledge base today.
+</Note>
+
+## The Doc Refreshes page
+
+`/docs` (`src/app/(app)/docs/page.tsx` → `DocRefreshesClient.tsx`) lists the refresh records newest-first. It reads `GET /api/docs?page=&limit=` — WorkOS auth-gated, paginated (`limit` default 30, capped 100), returning `{ refreshes, page, limit, total, totalPages }`. Each record shows the headline, the page add/update/remove/rename counts, the docs commit link, the marker window, and the Slack delivery status.
+
+## The callback — `POST /api/oz/docs-refresh`
+
+The nightly skill posts one record per run. Auth is a static shared secret, **not** the per-run Oz token model (`requireOzToOctyKey` in `src/lib/oz-to-octy-auth.ts`, constant-time compared against `OZ_TO_OCTY_API_KEY`):
+
+```http
+POST /api/oz/docs-refresh
+Authorization: Bearer <OZ_TO_OCTY_API_KEY>
+Content-Type: application/json
+```
+
+<ParamField body="idempotency_key" type="string" required>
+Dedup key — the docs commit sha, or `docs-refresh:<date>` on a no-change night. The row is upserted on this key, so an Oz retry updates the existing record (and does not re-post to Slack).
+</ParamField>
+<ParamField body="status" type="string">
+`updated` (default), `no_changes`, or `failed` (`DOCS_REFRESH_STATUSES`).
+</ParamField>
+<ParamField body="headline" type="string">
+The one-line summary. **Required when `status` is `updated`.**
+</ParamField>
+<ParamField body="detail_md" type="string">
+A medium markdown summary, rendered in the panel and the Slack thread.
+</ParamField>
+<ParamField body="commit_url" type="string">
+Link to the docs commit on GitHub.
+</ParamField>
+<ParamField body="committed_at / window_from / window_to" type="ISO string">
+Commit time and the prior/new freshness-marker dates.
+</ParamField>
+<ParamField body="pages_added / pages_updated / pages_removed / pages_renamed" type="number">
+Per-bucket page counts (default 0).
+</ParamField>
+<ParamField body="changed_pages" type="array">
+`[{ status, path }]` — the per-page change list.
+</ParamField>
+<ParamField body="source_repos" type="object">
+Per-repo marker window for provenance.
+</ParamField>
+<ParamField body="warp_run_id" type="string">
+The Warp run that produced the refresh.
+</ParamField>
+
+Field-level validation collects all errors and returns **400** `MALFORMED_DOCS_REFRESH_PAYLOAD` with `field_errors`. On success the response is `{ ok, id, status, slack }`, where `slack` is `posted`, `skipped`, `failed`, or `disabled`.
+
+## The data
+
+Records are stored in `octy_docs_refreshes`. The table is owned by loanlight-api migration `0206_create_octy_docs_refreshes.sql` (on the shared Aurora DB), and Octy both reads and writes it via a vendored read-write mirror (`src/db/schema/docs-refreshes.ts`). Beyond the request fields it carries the Slack delivery columns (`slack_channel_id`, `slack_message_ts`, `slack_permalink`, `slack_posted_at`, `slack_error`) and is unique on `idempotency_key`.
+
+## Slack relay
+
+After saving, Octy relays the record to Slack **best-effort** — a Slack failure never fails the callback. It posts the headline to a channel and the detail in a thread, then stores the message timestamp so a retried callback does not double-post. The relay needs `SLACK_BOT_TOKEN` (`chat:write`); the target channel and the notify-on-no-changes toggle are code constants (`src/lib/slack/channels.ts`, `docs-refresh-notify.ts`). Without the token the DB record is still saved and `slack` comes back `disabled`.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+`OZ_TO_OCTY_API_KEY` and `SLACK_BOT_TOKEN`.
+</Card>
+<Card title="Oz run lifecycle" href="/octy/oz-run-lifecycle" icon="workflow">
+The other, token-scoped Oz flow.
+</Card>
+</Columns>

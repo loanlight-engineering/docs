@@ -20,10 +20,12 @@ USPAP rules were removed from active rule sets (LOA-726). `getAgencyAvailability
 
 ## isCompoundRulesEnabled gate
 
-Compound (multi-condition) custom rules are gated by `isCompoundRulesEnabled(lenderId)`, which is **default-enabled** — it returns `true` when the flag row is absent. The `POST .../rule-sets/:setId/rules` endpoints honor this gate when adding a compound rule.
+Compound (multi-condition) custom appraisal rules are gated by `isCompoundRulesEnabled(lenderId)`, which is **opt-in**, not default-enabled. At head it resolves from the umbrella `appraisal` flag (`isAppraisalEnabled`), so an absent flag row resolves to disabled (LOA-994). The `POST .../rule-sets/:setId/rules` endpoints honor this gate when adding a compound rule.
+
+Credit has its own independent compound gate, `isCreditCompoundEnabled` (`credit_compound`, also default-OFF). Both live in `lib/appraisal-pipeline/rules/feature-gates.ts`. See [authentication and authorization](/portal/api-auth) for the full gate list.
 
 <Note>
-The `use_client_rule_sets` subsystem was fully removed (LOA-820 T3). Anything referencing client-rule-set opt-out or `isClientRuleSetsExplicitlyDisabled` is stale. The only remaining rule write-gate is `isCompoundRulesEnabled`.
+The `use_client_rule_sets` subsystem was fully removed (LOA-820 T3). Anything referencing client-rule-set opt-out or `isClientRuleSetsExplicitlyDisabled` is stale. The only remaining rule write-gate is the compound gate above.
 </Note>
 
 ## portal-appraisal-rules
@@ -77,8 +79,9 @@ Controller: `portal-credit-rules/portal-credit-rules.controller.ts` at `api/v1/p
 
 | Method / path | Purpose |
 |---|---|
-| `GET /api/v1/portal/credit-rules/field-registry` | `CreditFieldRegistryResponse` |
+| `GET /api/v1/portal/credit-rules/field-registry` | `CreditFieldRegistryResponse` (includes `compoundRulesEnabled`) |
 | `POST /api/v1/portal/credit-rules/parse-nl` | NL parse (`ParseNlDto`, `credit-nl-parse.service.ts`) |
+| `POST /api/v1/portal/credit-rules/preview` | Preview a rule against samples (`PreviewCreditRuleDto`, `credit-preview.service.ts`) |
 | `GET /api/v1/portal/credit-rules/templates` | List templates |
 | `POST /api/v1/portal/credit-rules/rule-sets` | Adopt |
 | `GET /api/v1/portal/credit-rules/rule-sets` | List |
@@ -90,6 +93,22 @@ Controller: `portal-credit-rules/portal-credit-rules.controller.ts` at `api/v1/p
 | `PATCH /api/v1/portal/credit-rules/rule-sets/:setId/rules` | Bulk update |
 | `DELETE /api/v1/portal/credit-rules/rule-sets/:setId/rules/:ruleId` | Delete rule (HTTP 200) |
 | `DELETE /api/v1/portal/credit-rules/rule-sets/:id` | Delete set (HTTP 200) |
+| `GET /api/v1/portal/credit-rules/split-drafts` | List active split-rule drafts |
+| `POST /api/v1/portal/credit-rules/split-drafts` | Create a split draft (`CreateSplitDraftDto`) |
+| `GET /api/v1/portal/credit-rules/split-drafts/:id/resume` | Resume a draft |
+| `POST /api/v1/portal/credit-rules/split-drafts/:id/dismiss` | Dismiss a draft (HTTP 200) |
+
+All endpoints except the public list/get/template reads are admin-gated by `assertAdmin(ctx)` (`client_admin` or internal). Credit reached rule-authoring parity with appraisal in #2266: `preview` and the `split-drafts` wizard mirror the appraisal endpoints.
+
+<Note>
+Credit split drafts are backed by a **separate** table, `credit_rule_split_drafts` (migration `0189`, schema `credit-rule-split-drafts.ts`) — distinct from the appraisal `rule_split_drafts` table.
+</Note>
+
+<Warning>
+Adding a compound credit rule (one carrying a `condition`) while `credit_compound` is off returns `409 compound_rules_unavailable_legacy_evaluator` (`COMPOUND_RULES_LEGACY_ERROR_CODE`). The same code surfaces read-side as a `SKIPPED` evaluator outcome, so telemetry can join the two.
+</Warning>
+
+BFF proxies for these live under `packages/app/src/app/api/credit-rules/*`.
 
 ### Staged bundles (super-admin)
 

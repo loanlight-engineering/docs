@@ -1,62 +1,152 @@
 ---
 title: Agent platform schema
-description: agents, agent_dependencies, agent_runs, and lender_agent_entitlements.
+description: The agents catalog, agent_runs ledger, audit_infra_steps, and lender_agent_entitlements tables, plus the lender-anchoring of audit_runs.
 icon: boxes
 ---
 
-The agent platform tables (added in migrations `0177`/`0178`) back the DB-driven agent catalog, dependency DAG, run ledger, and per-lender entitlements described in [agents platform overview](/agents/platform-overview). They are recent, and all four are keyed on the **string natural key `agent_type`** (varchar(64)) — not surrogate uuids — which is shared by every child table.
+The agent platform tables back the agent catalog, the per-run execution ledger, the per-lender entitlements, and the non-agent infra-step ledger. They are created by migration `0203_agent_platform_schema.sql`, which also seeds the catalog and links `appraisal_runs` to its parent audit run. The same refactor relaxed `audit_runs` from loan-anchored to lender-anchored across migrations `0202` (EXPAND) and `0204` (CONTRACT).
+
+The three catalog-keyed tables — `agents`, `agent_runs`, and `lender_agent_entitlements` — all use the **string natural key `agent_type`** (`varchar(64)`), not a surrogate uuid. The pipeline structure (which phase an agent runs in and what it depends on) is **not** in the database; it lives in code at `langgraph/agents/agent-pipeline.ts`. See [Agent catalog and pipeline](/agents/catalog-and-dependencies).
 
 <Note>
-This platform is rolling out in two phases. In production it currently runs in **observer mode** (the `agent_runs` ledger is backfilled over the legacy "run all" fan-out); the router does not yet own selection or execution by default. Older docs that describe audit agents only via `audit_runs.agent_config` are incomplete.
+There is no `agent_dependencies` table, and `agents` has no `kind`, `audit_phase`, or `requires_llama_indexing` column. Earlier drafts of these docs described all four — the dependency DAG and phase placement moved into code. The migration `0203` spec asserts that table and those columns do not exist.
 </Note>
 
 ## agents
 
-The platform agent registry (`agents.ts`). **PK is `agent_type` varchar(64)**, seeded by migration `0178_agent_catalog_seed.sql`.
+The platform agent registry (`database/schema/agents.ts`). The PK `agent_type` is the natural key shared by `agent_runs` and `lender_agent_entitlements`. This table holds **identity and attributes only**.
 
-<ParamField path="agent_type" type="varchar(64) PK">The natural key, e.g. `PII-Validation`, `Document-Health`, `creditEvaluation`.</ParamField>
-<ParamField path="display_name" type="text NOT NULL" />
-<ParamField path="kind" type="varchar(16)">CHECK `agents_kind_check`: `audit_stage | standalone`.</ParamField>
-<ParamField path="audit_phase" type="integer">Dense `0`/`1`/`2`, only for `audit_stage` agents.</ParamField>
-<ParamField path="requires_llama_indexing" type="boolean" />
-<ParamField path="is_billable" type="boolean" />
-<ParamField path="active" type="boolean">Default `true`.</ParamField>
+| Column | Type | Notes |
+|---|---|---|
+| `agent_type` | `varchar(64)` PK | Natural key, e.g. `piiValidation`. |
+| `display_name` | `text` NOT NULL | Human label, e.g. `PII Validation`. |
+| `is_billable` | `boolean` NOT NULL | Default `false`. |
+| `active` | `boolean` NOT NULL | Default `true`. Inactive agents are excluded from closure and selection. |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+| `updated_at` | `timestamptz` NOT NULL | Default `now()`. |
 
-Plus `created_at`, `updated_at`.
+### Seeded catalog
 
-## agent_dependencies
+Migration `0203` seeds the catalog with `ON CONFLICT DO NOTHING` (idempotent). Phase, dependencies, and runtime are **not** columns — they are shown here for reference and come from the `AGENT_PIPELINE` code map.
 
-The required-edge DAG between agents (`agent-dependencies.ts`). Composite PK `(agent_type, depends_on)`, both varchar(64) → `agents.agent_type`.
+| `agent_type` | `display_name` | `is_billable` | `active` | Phase (code) | Runtime (code) |
+|---|---|---|---|---|---|
+| `preAuditClassification` | Pre-Audit Classification | `true` | `true` | 0 | `inproc_graph` |
+| `urlaExtraction` | URLA Extraction | `true` | `true` | 0 | `inproc_graph` |
+| `piiValidation` | PII Validation | `true` | `true` | 1 | `inproc_graph` |
+| `propertyData` | Property Data | `true` | `true` | 1 | `inproc_graph` |
+| `creditEvaluation` | Credit Evaluation | `true` | `true` | 1 | `inproc_graph` |
+| `documentHealth` | Document Health | `true` | `true` | 2 | `inproc_graph` |
+| `redFlags` | Property Red Flags | `true` | `true` | 2 | `inproc_graph` |
+| `appraisalEvaluation` | Appraisal Evaluation | `true` | `true` | standalone | `queue_worker` |
+| `liabilitiesAssessment` | Liabilities Assessment | `true` | `false` | standalone | `inproc_graph` |
 
-<ParamField path="agent_type" type="varchar(64) → agents (no action)" />
-<ParamField path="depends_on" type="varchar(64) → agents (no action)" />
-
-Both FKs are `ON DELETE NO ACTION` — deleting a referenced agent that still has surviving edges fails loudly, preserving DAG integrity. Every edge is implicitly `required`; there is no kind column.
+<Note>
+`liabilitiesAssessment` is seeded `active=false` — it never appears in a plan. Liabilities and DTI live inside `creditEvaluation`. `urlaCompletenessRulesEngine` is deliberately absent: it is an embedded subgraph of `urlaExtraction` and is never scheduled or billed alone. There is no `income` catalog agent.
+</Note>
 
 ## agent_runs
 
-The per-(audit run, agent) execution ledger (`agent-runs.ts`). PK `id` uuid.
+The per-`(audit_run, agent)` execution ledger (`database/schema/agent-runs.ts`). One row per agent per audit run, tracking the status lifecycle plus the cross-phase handoff payload. The agent's own result rows live in their domain tables (`appraisal_runs`, `credit_runs`, `property_data_runs`, …), linked to the container by `audit_run_id` — this table is not a join hub.
 
-<ParamField path="audit_run_id" type="uuid → audit_runs (cascade, NOT NULL)" />
-<ParamField path="agent_type" type="varchar(64) → agents (no action, NOT NULL)" />
-<ParamField path="status" type="varchar(16)">Default `pending`. CHECK `agent_runs_status_check`: `pending | processing | complete | failed | skipped`.</ParamField>
-<ParamField path="skip_reason" type="text" />
-<ParamField path="external_run_id" type="uuid">Representative external/LangGraph run for fan-out agents.</ParamField>
-<ParamField path="langsmith_url" type="text" />
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | Default `gen_random_uuid()`. |
+| `audit_run_id` | `uuid` NOT NULL | FK `audit_runs(id)` ON DELETE CASCADE. |
+| `agent_type` | `varchar(64)` NOT NULL | FK `agents(agent_type)`. |
+| `status` | `varchar(16)` NOT NULL | Default `pending`. CHECK `agent_runs_status_check`. |
+| `skip_reason` | `text` | Populated only for `skipped` rows. |
+| `started_at` | `timestamptz` | Set when flipping to `processing`. |
+| `completed_at` | `timestamptz` | Set on any terminal flip; cleared on reopen. |
+| `errors` | `jsonb` | Per-agent error rollup. |
+| `output` | `jsonb` | Cross-phase handoff payload an agent persists on completion (e.g. `propertyData`'s `trustIndicator`); rehydrated into the next phase. |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
 
-Plus `started_at`, `completed_at`, `errors` jsonb, `created_at`. **Unique `(audit_run_id, agent_type)`** — one row per agent per audit run. Index on `(agent_type, status)`.
+Constraints and indexes:
+
+- UNIQUE `agent_runs_audit_run_id_agent_type_unique` on `(audit_run_id, agent_type)` — the idempotency anchor for `onConflictDoNothing`.
+- INDEX `idx_agent_runs_agent_type_status` on `(agent_type, status)`.
+
+### Status vocabulary
+
+`AGENT_RUN_STATUS = ["pending", "processing", "complete", "failed", "skipped"]` (type `AgentRunStatus`). Terminal: `complete`, `failed`, `skipped`. Non-terminal: `pending`, `processing`.
 
 <Warning>
-The terminal success value is **`complete`**, not `completed`. The standalone `appraisal_runs` / `credit_runs` / `income_runs` ledgers use `completed` instead. See [enums reference](/data-model/enums-reference) for the full status vocabularies.
+The success value is `complete`, not `completed`. The CHECK constraint pins this, and `audit_runs.status` uses the same value. The appraisal pipeline separately uses `completed` for `appraisal_runs.status` — a different table. See [enums reference](/data-model/enums-reference).
 </Warning>
+
+## audit_infra_steps
+
+A thin ledger for **non-agent** infra steps that join a phase — today only LlamaCloud indexing on phase 0 (`database/schema/audit-infra-steps.ts`). These rows have no entitlement and no billing and do not count toward agent completion, but they **do** gate the phase barrier: a phase crosses only when all its `agent_runs` and all its infra steps are terminal. The orchestrator writes these rows directly via `IndexingService` — there is no recorder seam.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | Default `gen_random_uuid()`. |
+| `audit_run_id` | `uuid` NOT NULL | FK `audit_runs(id)` ON DELETE CASCADE. |
+| `capability` | `varchar(32)` NOT NULL | Today only `llama_index`. |
+| `status` | `varchar(16)` NOT NULL | Default `pending`. CHECK `audit_infra_steps_status_check`. |
+| `started_at` | `timestamptz` | |
+| `completed_at` | `timestamptz` | |
+| `errors` | `jsonb` | |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+
+Constraints and indexes:
+
+- UNIQUE `audit_infra_steps_audit_run_id_capability_unique` on `(audit_run_id, capability)` — gives idempotency and restart safety (a re-run of the indexer is a no-op upsert).
+- INDEX `idx_audit_infra_steps_audit_run_status` on `(audit_run_id, status)`.
+
+`AUDIT_INFRA_STEP_STATUS = ["pending", "processing", "complete", "failed"]`. There is no `skipped` state — an infra step either runs to a terminal `complete`/`failed` or is never created for the run.
 
 ## lender_agent_entitlements
 
-Per-lender agent enable/disable (`lender-agent-entitlements.ts`). PK `id`.
+Per-lender enable/disable for each agent (`database/schema/lender-agent-entitlements.ts`).
 
-<ParamField path="lender_id" type="uuid → lenders (cascade, NOT NULL)" />
-<ParamField path="agent_type" type="varchar(64) → agents (no action, NOT NULL)" />
-<ParamField path="enabled" type="boolean">Default `false`.</ParamField>
-<ParamField path="updated_by" type="uuid → portal_users (set null)" />
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | Default `gen_random_uuid()`. |
+| `lender_id` | `uuid` NOT NULL | FK `lenders(id)` ON DELETE CASCADE. |
+| `agent_type` | `varchar(64)` NOT NULL | FK `agents(agent_type)`. |
+| `enabled` | `boolean` NOT NULL | Default `false`. |
+| `updated_by` | `uuid` | FK `portal_users(id)` ON DELETE SET NULL. |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+| `updated_at` | `timestamptz` NOT NULL | Default `now()`. |
 
-Plus `created_at`, `updated_at`. **Unique `(lender_id, agent_type)`**. The absence of a row means "use the platform default" — see [router and entitlements](/agents/router-and-entitlements).
+UNIQUE `lender_agent_entitlements_lender_id_agent_type_unique` on `(lender_id, agent_type)`.
+
+<Note>
+A lender with **no** rows runs the platform default (every active agent). The first save converts the lender to a managed allowlist — one row per active agent, `enabled=true` for the wanted ones and `enabled=false` for the rest. See [Agent router and entitlements](/agents/router-and-entitlements).
+</Note>
+
+## audit_runs lender-anchoring
+
+The refactor relaxed `audit_runs` from loan-anchored to **lender-anchored, loan-optional, program-optional** so the table is the universal primitive every channel writes (EPC, LOS, partner, portal). The full table is documented in [core tables](/data-model/core-tables); the platform-relevant columns are:
+
+| Column | Type | Notes |
+|---|---|---|
+| `lender_id` | `uuid` NOT NULL | FK `lenders(id)` ON DELETE RESTRICT. Tightened to NOT NULL by `0204` after the backfill. |
+| `loan_id` | `uuid` | Now nullable; FK `loans(id)` ON DELETE SET NULL. Loanless runs (standalone appraisal/income) carry NULL. |
+| `loan_program_id` | `uuid` | Nullable; FK `loan_programs(id)` ON DELETE SET NULL. |
+| `run_number` | `integer` | Now nullable. CHECK `audit_runs_run_number_requires_loan`: required whenever `loan_id` is present. |
+| `trigger_source` | `varchar(32)` NOT NULL | CHECK `audit_runs_trigger_source_check`: `epc`, `los`, `partner`, `portal`, `admin_rerun`, `shadow`. Tightened to NOT NULL by `0204`. |
+
+Index and uniqueness changes:
+
+- The unique index `audit_runs_loan_run_key` is now **partial** — `(loan_id, run_number)` WHERE `loan_id IS NOT NULL` — so loanless runs are unconstrained.
+- INDEX `idx_audit_runs_lender` on `(lender_id)` for tenant-scoped reads.
+
+The EXPAND/backfill/CONTRACT deploy order behind these changes is documented in [Rollout and backfill](/agents/feature-flags-and-rollout).
+
+## appraisal_runs link
+
+Migration `0203` adds `appraisal_runs.audit_run_id` (`uuid`, nullable, FK `audit_runs(id)` ON DELETE SET NULL) so the appraisal agent attaches to its parent audit run. Legacy rows stay NULL, and a `createUpdatedRun` revision legitimately shares its parent's `audit_run_id` (so there is no partial-unique). Indexes: `idx_appraisal_runs_audit_run_id` on `(audit_run_id)` and `idx_appraisal_runs_loan_audit` on `(loan_id, audit_run_id)`.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Agent platform overview" icon="layout-grid" href="/agents/platform-overview">
+    How the catalog, router, orchestrator, ledger, and entitlements fit together.
+  </Card>
+  <Card title="Runs ledger and orchestrator" icon="list-checks" href="/agents/runs-ledger">
+    The reconciler, the phase barrier, and the orchestrator execution loop.
+  </Card>
+</Columns>

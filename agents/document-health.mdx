@@ -40,8 +40,11 @@ target.
 
 ## Models
 
-All Document-Health LLM calls run `ChatOpenAI` with `temperature: 0`, `timeout: 120000ms`,
-`maxRetries: 2`. The model map is `DOCUMENT_HEALTH_MODELS` in `models.ts`.
+All Document-Health LLM calls run `ChatOpenAI` with `temperature: 0` and, with one exception,
+`timeout: 120000ms`, `maxRetries: 2`. The model map is `DOCUMENT_HEALTH_MODELS` in `models.ts`. The
+exception is `signatureVision`, which uses a vision-specific `timeout: 45000ms` (env
+`DOCUMENT_HEALTH_SIGNATURE_VISION_TIMEOUT_MS`) and `maxRetries: 1` to bound the worst-case vision
+tail under load (LOA-1566).
 
 | Key | Model | Used for |
 |---|---|---|
@@ -193,8 +196,10 @@ __start__ → select-signature-pages
   --(conditional)--> select-cue-batch (parallel batches of 10) → aggregate-cue-results
                  OR (XML tags / not required / error / no snippets) → fetch-screenshots
   aggregate-cue-results → fetch-screenshots
-  fetch-screenshots --(conditional)--> verify-single-page (parallel, one per image) → build-result
-                                   OR (no screenshots) → build-result
+  fetch-screenshots --(conditional)--> verify-single-page (parallel, one per image) → escalate-coverage
+                                   OR (no screenshots) → escalate-coverage
+  escalate-coverage --(signature found / tiers exhausted)--> build-result
+                    --(escalate)--> fetch-screenshots   (next coverage tier)
   build-result → __end__
 ```
 
@@ -209,9 +214,38 @@ Page selection uses three strategies in order:
 Vision verification fetches page screenshots via
 `llama.getPageScreenshotPresignedUrl(documentId, pageNumber - 1)` (0-based), downloads them
 server-side as base64 data URLs (OpenAI cannot fetch S3 presigned URLs), then calls
-`signatureVision` (`gpt-5.2`) per page. `build-result` computes a
-`SignatureVerificationStatus` of `all_signed | partially_signed | unsigned | verification_failed`
-(no page results → `verification_failed`).
+`signatureVision` (`gpt-5.2`) per page.
+
+**Tiered vision coverage (LOA-1566).** Because text retrieval often misses an image or e-sign
+block, `verify-single-page` fans into `escalate-coverage`, which loops back to `fetch-screenshots`
+across cost-ordered tiers until a signature is found or the tiers are exhausted. A cumulative
+`checkedPages` set means no page is vision-verified twice:
+
+1. **Tier 0 — Cue:** the text-retrieval candidate pages (the cheap, normal path).
+2. **Tier 1 — Structural:** first/last page, a trailing window of the final pages, and the last
+   page of every known sub-document.
+3. **Tier 2 — Full sweep:** every page up to `MAX_SIGNATURE_VISION_PAGES = 80`, sampled evenly when
+   the document is larger than the cap.
+
+`build-result` computes a `SignatureVerificationStatus`:
+
+- `all_signed` — every verified page has a signature.
+- `partially_signed` — some verified pages signed, some not.
+- `unsigned` — no signatures detected **and** vision examined every page (full coverage).
+- `verification_failed` — no page results, **or** no signature found while coverage was incomplete
+  (doc exceeds the sweep cap, page count unknown, or screenshots unavailable).
+
+This verdict ladder is the false-blocker fix: a failed vision call (429/timeout) degrades to the
+non-blocking `verification_failed`, never a false `unsigned`, and a properly signed bundle's blank
+coverage pages no longer force a false `partially_signed`.
+
+<Note>
+Vision fan-out is bounded by process-scoped `p-limit`s (vision 4, cue 12, screenshot 8; each
+env-overridable) so a multi-document sweep cannot stampede `gpt-5.2` with 429s. The subgraph also
+enforces a wall-clock deadline (`raceWithDeadline`) plus the per-call 45s / 1-retry vision timeout
+and a bounded image download, so a runaway sweep cannot exceed the SQS visibility timeout and
+trigger a duplicate audit.
+</Note>
 
 ## Persistence
 
@@ -234,7 +268,9 @@ One row per page-completeness result.
 </ResponseField>
 
 <ResponseField name="doc_signature_verification_results (+ doc_signature_verification_evidence)" type="table">
-One row per signature finding, written transactionally (confidence stored as string).
+One row per signature finding, written transactionally (confidence stored as string). Each
+`doc_signature_verification_evidence` row carries a `verification_failed` boolean (migration `0200`,
+LOA-1566) so a failed vision call is distinct from a real "no signature on this page" reading.
 </ResponseField>
 
 <ResponseField name="audit_errors" type="table">

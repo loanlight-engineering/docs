@@ -58,7 +58,22 @@ agent:liabilities_assessment_*
 
 ### DocumentPushRule
 
-Matches source `["loanlight.api"]`, detail-type `["loanlight.documents.classified"]`, routing to the `document-push` queue. This drives the optional document-push pipeline (gated by `DOCUMENT_PUSH_ENABLED=true`), where loanlight-api asks encompass to attach classified documents back into Encompass. `handleDocumentPush` validates with `DocumentsClassifiedEventSchema` and calls `DocumentPushService.push`.
+Matches source `["loanlight.aus"]`, detail-type `["loanlight.documents.classified"]`, routing to the `document-push` queue. This drives the document-push pipeline, where the AUS asks encompass to file classified documents back into the Encompass eFolder.
+
+<Note>
+The source is `loanlight.aus`, not `loanlight.api`. loanlight-api emits `loanlight.documents.classified` with `Source: "loanlight.aus"` (its `publishDocumentsClassified` path). The rule matched `loanlight.api` for a while, which meant the event never routed to the push queue — fixed during the LOA-1102 / LOA-1041 contract reconciliation. The in-code comment in `worker-stack.ts` still flags the old value.
+</Note>
+
+`QueueConsumerService.handleDocumentPush` runs the consumer:
+
+1. Checks the global kill-switch `appConfig.documentPushEnabled` (`DOCUMENT_PUSH_ENABLED`). When `false` it throws, returning the message to the queue (a prolonged stop eventually drains the backlog into the DLQ). It is `true` in INT.
+2. Validates the `detail` with `DocumentsClassifiedEventSchema` (invalid payloads are dropped).
+3. Resolves the transaction from the integrations DB by `correlationId` — `getTransactionRecordByCorrelationIdOrThrow(event.loanId)`, where `event.loanId == transaction_state.id == auditRunId == correlationId` (LOA-1491). The S3 path emits `encompassLoanId: null`, so the real Encompass loan GUID is read from the joined `loan` row, never the event field. Previously the consumer gated on `event.encompassLoanId`, which was always null, so every push was dropped.
+4. Skips shadow audits — when `transaction_record.is_shadow`, it logs `"Shadow audit; skipping document push"` and consumes the message (shadow audits never touch Encompass). See [Shadow audits](/integrations/shadow-audits).
+5. Drops the message when the resolved loan has no `encompass_loan_id` (no Encompass destination).
+6. Applies the per-lender enablement gate (LOA-1336): it resolves the lender from `transaction_record.client_id` and checks `EpcClientRepository.isLenderFeatureEnabled(lenderId, "document_push")` against the [`lender_feature` table](/integrations/database-schema) **before** any materialize work. Default off (no row); a not-enabled lender consumes the message. Enabled in INT.
+7. Calls `DocumentMaterializerService.materialize` (carve splits → S3 → persist to `materialized_split_record` → push into the Encompass eFolder). `parseS3Key` strips an `s3://bucket/` prefix so bare keys reach the S3 SDK unmodified.
+8. On a non-empty result, publishes the `documents.materialized` return leg (below) so loanlight-api can record where each split landed.
 
 ## Events published by encompass
 
@@ -111,5 +126,24 @@ Published by encompass (not only the AUS) when `processTransaction` fails after 
   }
 }
 ```
+
+### documents.materialized
+
+The return leg of the document-push pipeline (LOA-1337). After `DocumentMaterializerService` carves and stores the split documents, `EventPublishingService.publishDocumentsMaterialized` publishes this event so loanlight-api can persist each split's storage path.
+
+```json
+{
+  "Source": "loanlight.encompass",
+  "DetailType": "loanlight.documents.materialized",
+  "Detail": {
+    "type": "loanlight.documents.materialized",
+    "loanId": "...",
+    "auditRunId": "...",
+    "documents": []
+  }
+}
+```
+
+The `DetailType` is the shared-types constant `DOCUMENTS_MATERIALIZED_TYPE`. On the loanlight-api side an EventBridge rule routes it to the dedicated SQS queue `documents-materialized-events`, which loanlight-api consumes (it is the only consumer of this event).
 
 For the consuming side and the audit flow these events drive, see [Audit lifecycle](/integrations/audit-lifecycle) and [Orchestration pipeline](/integrations/orchestration-pipeline).

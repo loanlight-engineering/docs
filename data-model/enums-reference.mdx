@@ -18,11 +18,17 @@ Defined in `src/database/schema/enums.ts` unless noted.
 | `rule_category` | 16 section values: `SECTION_1A_PERSONAL_INFO`, `SECTION_1B_1C_1D_EMPLOYMENT`, `SECTION_1E_OTHER_INCOME`, `SECTION_2A_ASSETS`, `SECTION_2B_OTHER_ASSETS`, `SECTION_2C_LIABILITIES`, `SECTION_2D_OTHER_LIABILITIES`, `SECTION_3_REAL_ESTATE`, `SECTION_4A_LOAN_PROPERTY`, `SECTION_4B_OTHER_MORTGAGES`, `SECTION_4C_RENTAL_INCOME`, `SECTION_4D_GIFTS_GRANTS`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS` |
 | `octy_issue_intake_status` (`octy.ts`) | `new`, `acknowledged`, `delegated`, `ai_complete`, `in_review`, `closed`, `cancelled` |
 | `oz_run_status` (`octy.ts`) | `queued`, `pending`, `claimed`, `in_progress`, `succeeded`, `failed` |
+| `asset_source` (`asset-accounts.ts`) | `extracted`, `manual` |
+| `asset_type_normalized` (`asset-accounts.ts`) | `checking`, `savings`, `money_market`, `cd`, `brokerage`, `bonds`, `ira`, `roth_ira`, `401k`, `pension`, `529`, `business`, `crypto`, `gift_funds`, `life_insurance`, `other`, `unknown` (`crypto` added in migration `0187`) |
+| `asset_class` (`asset-accounts.ts`) | `liquid`, `near_liquid`, `retirement`, `restricted`, `manual`, `unknown` |
+| `asset_account_state` (`asset-accounts.ts`) | `requires_review`, `included`, `excluded` |
+| `large_deposit_threshold_mode` (`asset-rules.ts`) | `pct_avg_gross_deposits`, `fixed` (the **asset-side** enum; distinct from the text+CHECK `borrower_files.large_deposit_threshold_mode`) |
+| `large_deposit_override_mode` (`large-deposit-overrides.ts`) | `force`, `suppress` |
 
-The `rule_id` pgEnum has 31 values used only on `urla_rules_findings.rule_id`. See the [URLA data model](/data-model/urla-data-model).
+The `rule_id` pgEnum has 32 values used only on `urla_rules_findings.rule_id`. See the [URLA data model](/data-model/urla-data-model).
 
-<Accordion title="rule_id — all 31 values">
-`PERSONAL_INFO_BASIC_DETAILS`, `CURRENT_ADDRESS_RULES`, `FORMER_ADDRESS_RULES`, `IS_AT_CURRENT_ADDRESS_LESS_THAN_2_YEARS`, `MAILING_ADDRESS_RULES`, `CURRENT_EMPLOYMENT_DETAILS`, `CURRENT_EMPLOYMENT_LESS_THAN_2_YEARS`, `ADDITIONAL_EMPLOYMENT_RULES`, `PREVIOUS_EMPLOYMENT_RULES`, `EMPLOYMENT_HISTORY_2_YEAR_MINIMUM`, `OTHER_INCOME_SOURCES`, `ASSETS_ACCOUNT_DETAILS`, `OTHER_ASSETS_DETAILS`, `LIABILITIES_DETAILS`, `OTHER_LIABILITIES_DETAILS`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`, `SECTION_4_LOAN_AND_PROPERTY_DETAILS`, `SECTION_4_PROPERTY_VALUE_REQUIRED`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS`, `REO_REFINANCE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH`, `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `SECTION_8_FACE_TO_FACE_VISUAL_OBSERVATION`, `DTI_EXCEEDS_50_PERCENT`, `DSCR_BORROWER_INCOME_PRESENT`
+<Accordion title="rule_id — all 32 values">
+`PERSONAL_INFO_BASIC_DETAILS`, `CURRENT_ADDRESS_RULES`, `FORMER_ADDRESS_RULES`, `IS_AT_CURRENT_ADDRESS_LESS_THAN_2_YEARS`, `MAILING_ADDRESS_RULES`, `CURRENT_EMPLOYMENT_DETAILS`, `CURRENT_EMPLOYMENT_LESS_THAN_2_YEARS`, `ADDITIONAL_EMPLOYMENT_RULES`, `PREVIOUS_EMPLOYMENT_RULES`, `EMPLOYMENT_HISTORY_2_YEAR_MINIMUM`, `OTHER_INCOME_SOURCES`, `ASSETS_ACCOUNT_DETAILS`, `OTHER_ASSETS_DETAILS`, `LIABILITIES_DETAILS`, `OTHER_LIABILITIES_DETAILS`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`, `SECTION_4_LOAN_AND_PROPERTY_DETAILS`, `SECTION_4_PROPERTY_VALUE_REQUIRED`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS`, `REO_REFINANCE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH`, `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `SECTION_8_FACE_TO_FACE_VISUAL_OBSERVATION`, `DTI_EXCEEDS_50_PERCENT`, `DSCR_BORROWER_INCOME_PRESENT`, `SECTION_4D_GIFT_FUNDS_PRESENT` (migration `0191`)
 </Accordion>
 
 <Note>
@@ -34,7 +40,7 @@ The `loan_type` pgEnum exists, but `loans.loan_type` itself is a plain `text` co
 The two run-ledger families use **different terminal-success spellings**. Get this wrong and writes silently miss the status filter.
 
 <Warning>
-`agent_runs.status` terminal success is **`complete`**. The standalone `appraisal_runs` / `credit_runs` / `income_runs` use **`completed`**. `audit_runs.status` also uses `complete`.
+`agent_runs.status` terminal success is **`complete`**. The standalone `appraisal_runs` / `credit_runs` / `income_runs` use **`completed`**. `audit_runs.status` and the newer `asset_runs.status` use **`complete`**.
 </Warning>
 
 | Table | Status set |
@@ -44,6 +50,7 @@ The two run-ledger families use **different terminal-success spellings**. Get th
 | `credit_runs.status` | `pending | running | completed | failed | reviewed` |
 | `appraisal_runs.status` | `pending | running | completed | failed | reviewed` (service vocabulary) |
 | `income_runs.status` | default `pending` (`completed` on success) |
+| `asset_runs.status` | `pending | processing | complete | failed` (CHECK `asset_runs_status_check`; note `complete`, not `completed`) |
 | `loans.processing_status` | `processing | ready_for_audit | ready | error` |
 | `processing_jobs.status` | `queued | running | succeeded | failed` |
 | `classify_split_runs.status` | `pending | running | complete | failed | skipped | partial` |
@@ -75,6 +82,7 @@ The two run-ledger families use **different terminal-success spellings**. Get th
 | `pii_*.severity` | `high | medium | low` |
 | `doc_expiration_results.issue_kind` | `expired | expiring_soon | date_missing | date_invalid | valid | missing_document` |
 | `doc_completeness_results.document_structure` | `single_document | multi_document | composite_bundle | independent_collection | no_numbering` |
+| `doc_signature_verification_results.status` | `all_signed | partially_signed | unsigned | verification_failed` |
 
 ## Property and rule values
 
@@ -85,12 +93,27 @@ The two run-ledger families use **different terminal-success spellings**. Get th
 | rule `severity` (appraisal/credit/income) | `FAIL | WARNING` |
 | rule-override `outcome` | `PASS | FAIL | WARNING | NEEDS_INFO | SKIPPED` |
 | rule `source` | `loanlight | fannie_mae | freddie_mac | uspap | agency_common` |
-| `appraisal_rules.operator` | 17-value union, **incl. `abs_less_than` / `abs_less_than_or_equal`** |
-| `credit_rules.operator` / `income_rules.operator` | 16-value union (no `abs_*`) |
+| `appraisal_rules.operator` / `credit_rules.operator` / `asset_rules.operator` | 16-value union, **incl. `abs_less_than` / `abs_less_than_or_equal`** (credit reached parity in migration `0190`) |
+| `income_rules.operator` | 14-value union (no `abs_*`) |
 
 ## Finding-type unions (bank-statement pipeline)
 
-`findings.finding_type` (the `borrower_files` family): `large_deposit`, `anomaly`, `fraud_flag`, `income_classification`, `validation_date_out_of_range`, `validation_invalid_amount`, `validation_missing_field`, `fraud_pdf_integrity`, `fraud_font_consistency`, `fraud_continuity`, `llm_source_mismatch`. `findings.severity`: `info | warning | critical | error`.
+`findings.finding_type` (the `borrower_files` family, 15-value CHECK `finding_type_check`): `large_deposit`, `anomaly`, `fraud_flag`, `income_classification`, `validation_balance_mismatch`, `validation_date_out_of_range`, `validation_duplicate`, `validation_invalid_amount`, `validation_missing_field`, `fraud_pdf_integrity`, `fraud_font_consistency`, `fraud_continuity`, `llm_source_mismatch`, `nsf_overdraft`, `income_trend`. Migration `0209` added `nsf_overdraft` / `income_trend` and re-asserted `validation_balance_mismatch` / `validation_duplicate`. `findings.severity`: `info | warning | critical | error`.
+
+## Bank-statement and asset pipeline
+
+These CHECK-backed sets belong to the `borrower_files` bank-statement family and the asset subsystem. The asset pgEnums (`asset_source`, `asset_type_normalized`, `asset_class`, `asset_account_state`, `large_deposit_threshold_mode`, `large_deposit_override_mode`) are listed in the [pgEnum table](#postgres-native-enums-pgenum) above.
+
+| Column | Values |
+|---|---|
+| `bank_statements.extraction_method` | `pdfjs | azure | hybrid | llamaparse | reducto` (`reducto` added in migration `0194`) |
+| `borrower_files.large_deposit_threshold_mode` | `fixed | pct_avg_qualifying_income | pct_avg_gross_deposits` (text + CHECK, migration `0186` — distinct from the asset-side pgEnum of the same name) |
+| `transactions.type` | `credit | debit` |
+| `asset_conditions.status` | `open | satisfied | waived | superseded` |
+
+<Note>
+`transactions.category` is **free text** (Ntropy-derived), not a CHECK. Migration `0208` normalized the legacy value `missing account holder information` to `not enough information` in both `category` and the single-element `category_hierarchy`.
+</Note>
 
 ## Config sections
 

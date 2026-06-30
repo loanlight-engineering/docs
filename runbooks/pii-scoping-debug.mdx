@@ -138,7 +138,14 @@ filters: [
 ```
 
 <Warning>
-  A "smoke alarm" guards the push-down: after retrieval, any returned snippet whose `metadata.file_id` is outside `eligibleFileIds` triggers a WARN `pii.pushdown_leak`. This detects LlamaCloud not honouring `search_filters`. The filter is otherwise **trusted** — there is no post-retrieval eligibility filtering. If you see a `pii.pushdown_leak`, the bug is in LlamaCloud filter handling, not in scoping; the scope was computed correctly but not enforced by the index.
+  The push-down is **best-effort and no longer trusted**. Since the LOA-1601 scope-leak guard (loanlight-api #2457), `validateField` runs an authoritative post-retrieval gate, `enforceEligibleFileScope`: after retrieval it **drops** any returned snippet whose `metadata.file_id` is outside `scoping.eligibleFileIds` and emits a WARN `pii.scope_leak` naming the leaked `file_id`s and the dropped count. So an out-of-scope document that LlamaCloud returns despite the filter is removed before validation, not merely flagged.
+
+  Two limits to keep in mind:
+
+  - **File-scope only.** Page-range eligibility is *not* re-checked post-retrieval (`ScopingDecision` carries no per-file page ranges), so an in-scope file's out-of-range page can still pass. Page scoping stays best-effort pushdown.
+  - **Active-scoping only.** The gate runs only when `eligibleFileIds` is present. Every whole-index fallback path (no rules service, no rules, empty classification map, classify-split incomplete) leaves `eligibleFileIds` undefined and is returned **untouched** — coverage is never narrowed. Snippets with no `file_id` are also kept.
+
+  A `pii.scope_leak` means LlamaCloud ignored the `search_filters` (a filter-shape regression, `page_label` coercion, or version drift) — the scope was computed correctly but not honoured by the index, and the guard caught it. The older `pii.pushdown_leak` alarm was replaced by this enforcing gate.
 </Warning>
 
 ## A worked checklist
@@ -159,7 +166,7 @@ When a PII field looks wrong because of scoping:
     Call `classify-split-segments`. Confirm the document holding the value was classified into an allow-listed `split_type`/`classification_type`, or was salvaged (`classification_failed`). A document misclassified into `UNKNOWN`/`unknown` will be excluded — the fix is in classification, not scoping.
   </Step>
   <Step title="Confirm enforcement in the trace">
-    In the PII LangSmith trace, check `search_filters_overridden` and watch for `pii.pushdown_leak`. The first confirms the deterministic filter won over the LLM; the second flags LlamaCloud ignoring it.
+    In the PII LangSmith trace, check `search_filters_overridden` and watch for `pii.scope_leak`. The first confirms the deterministic filter won over the LLM; the second means LlamaCloud returned out-of-scope files and `enforceEligibleFileScope` dropped them post-retrieval (file-scope). A `pii.scope_leak` is an index-filter bug to chase in LlamaCloud, not a scoping defect — the documents were correctly excluded from validation.
   </Step>
 </Steps>
 

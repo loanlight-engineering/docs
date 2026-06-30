@@ -47,6 +47,10 @@ The fixed skills compose reusable fragments from `src/lib/oz-skills/shared.ts`:
 
 `SKILL_LABELS` (in `oz-skills/index.ts`) maps skill ids to display names, and `buildPreviousRunsContextSection()` renders selected prior-run summaries.
 
+<Note>
+The skill prompt is only the task half of a run. The universal **base** prompt — including the large, still-inline `systemArchitectureSection` that orients the agent on the agent platform, pipeline, scoping, S3, and LlamaCloud — is assembled by `buildBasePrompt` in the same `oz-skills/index.ts`. Despite these docs existing, the Mintlify docs MCP is **not** wired into Oz runs; the agent gets the inline architecture text, not a docs MCP. See [the prompt sections in the run lifecycle](/octy/oz-run-lifecycle).
+</Note>
+
 ## Prompt-tuning instructions (on-demand, not a skill)
 
 Prompt tuning is delivered as a methodology fetched mid-run, not as a skill. The agent calls:

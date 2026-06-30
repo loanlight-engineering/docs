@@ -10,38 +10,41 @@ npm packages under `@loanlight-engineering/*` to **GitHub Packages**
 versioned dependencies. The repo is the single source of truth for cross-repo
 TypeScript contracts, reusable CDK constructs, and LocalStack dev tooling.
 
-<Warning>
-The local on-disk checkout of `loanlight-shared` is **significantly behind what is
-published and consumed.** On disk there are only three packages
-(`shared-types@1.3.3`, `shared-cdk@1.9.2`, `shared-local@0.1.0`). The published
-repo additionally contains `shared-auth`, `shared-api-auth`, `shared-ui`, and
-`shared-lambda-auth`, and the published `shared-types`/`shared-cdk` are at much
-higher versions. Document behaviour from the **published/consumed** versions, not
-from the local source. Some types the rest of the system depends on (for example
-`RelatedTrace`) do not exist in the on-disk source at all.
-</Warning>
+<Note>
+The repo now tracks **all seven packages** at their current versions —
+`shared-types@1.13.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
+`shared-auth@0.3.0`, `shared-api-auth@0.2.0`, `shared-ui@0.8.0`, and
+`shared-lambda-auth@0.2.0`. (Older snapshots of this doc warned that only three
+packages existed on disk and that types like `RelatedTrace` were published-only;
+that is no longer true — `RelatedTrace` lives in `shared-types/src/octy.types.ts`,
+and the `cd.yml` publish matrix releases every package.) The `shared-ui` package
+lives under `packages/ui/` (its package name is still
+`@loanlight-engineering/shared-ui`). A consumer's installed version can still lag
+the latest publish, so cross-check the consumer's `package.json` when a contract
+looks missing.
+</Note>
 
 ## The packages
 
-| Package | Role | On disk? |
+| Package | Role | Version (repo HEAD) |
 |---|---|---|
-| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, Octy bug-report contract, roles) | Yes (stale 1.3.3) |
-| `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | Yes (stale 1.9.2) |
-| `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | Yes (0.1.0) |
-| `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | Published only |
-| `@loanlight-engineering/shared-api-auth` | NestJS WorkOS auth module | Published only |
-| `@loanlight-engineering/shared-lambda-auth` | API Gateway authorizer handler | Published only |
-| `@loanlight-engineering/shared-ui` | Shared React UI components and design tokens | Published only |
+| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, roles) | 1.13.0 |
+| `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 1.15.0 |
+| `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | 0.1.0 |
+| `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.3.0 |
+| `@loanlight-engineering/shared-api-auth` | NestJS WorkOS auth module (incl. WorkOS Connect M2M methods) | 0.2.0 |
+| `@loanlight-engineering/shared-lambda-auth` | API Gateway authorizer handler | 0.2.0 |
+| `@loanlight-engineering/shared-ui` | Shared React UI components and design tokens (under `packages/ui/`) | 0.8.0 |
 
 ## Who consumes what
 
-Versions below show how stale the local checkout is relative to what is installed.
+Each consumer pins its own version, so they drift independently. The loanlight-api rows below are current as of HEAD; the integrations and octy rows are from the last cross-repo pass.
 
 | Consumer | shared-types | shared-cdk | other |
 |---|---|---|---|
-| `loanlight-api/packages/app` (portal) | `^1.12.0` | — | `shared-ui ^0.7.43`, `shared-auth ^0.2.0` |
+| `loanlight-api/packages/app` (portal) | `^1.13.0` | — | `shared-ui ^0.8.0`, `shared-auth ^0.2.0` |
 | `loanlight-api/packages/app/infra` | — | `1.13.0` | — |
-| `loanlight-api/packages/api` (backend) | `^1.12.0` | `1.15.0` | `shared-api-auth 0.1.0` |
+| `loanlight-api/packages/api` (backend) | `^1.12.1` | `1.15.0` | `shared-api-auth 0.1.0` |
 | `loanlight-api/packages/api/infra/lambda/auth` | — | — | `shared-lambda-auth 0.2.0` |
 | `loanlight-integrations` (root) | — | `1.12.2` | — |
 | `loanlight-integrations/packages/frontend` | `^1.7.3` | `1.12.2` | `shared-ui ^0.7.40` |
@@ -87,9 +90,11 @@ filtered to `packages/**`) runs `npm view <name>@<version>` and publishes only i
 that version does not already exist, otherwise it skips.
 
 <Note>
-The on-disk `cd.yml` publishes only the three local packages. The four
-published-only packages are released by a newer workflow not present in the local
-checkout.
+The `cd.yml` publish matrix covers **all seven** packages: `shared-types` first
+(downstream packages depend on its build), then `shared-cdk`, `shared-local`,
+`shared-ui` (`packages/ui`), `shared-lambda-auth`, `shared-auth`, and
+`shared-api-auth`. Each entry is gated on a version bump, so an unchanged package
+is skipped.
 </Note>
 
 ### Local dev override
@@ -110,10 +115,35 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
 `DocumentHealthResponse`, `PropertyDataResult` / `RedFlagResult`,
 `UrlaRulesEngineResult`, and more; the portals render them into tables.
 
-The published `shared-types@1.8.0+` exports three modules absent from the on-disk
-1.3.3 source:
+`shared-types@1.13.0` exports these modules (all re-exported from `src/index.ts`):
+`field-value.types`, `table.types`, `audit-response.types`, `credit.types`,
+`common.types`, `api-response.types`, `property-data.types`,
+`urla-completeness.types`, `octy.types`, `portal-audits.types`, `role.types`,
+`access-policy.types`, and `epc-document-events.types`. The contract-bearing ones:
 
 <AccordionGroup>
+  <Accordion title="credit.types — the credit-evaluation contract (LOA-1461)">
+    Producer: loanlight-api. Consumers: the portal and the integrations frontend
+    (the shared `CreditLiabilitiesView`).
+
+    - `CreditComplianceResult` (rule, category, `CreditRuleOutcome`, message),
+      `CreditReportPayload` (incl. `auditedCreditDocumentFileName`), and
+      `PortalCreditReportPayload = Omit<CreditReportPayload, "triggeredBy" | "inputS3Key">`
+      — the redacted wire shape both EPC and portal audit endpoints project.
+    - `CreditAuditBlock` (a `BaseAuditResponse`) and `CreditTableRow`.
+    - `AuditRunResults.credits?: CreditAuditBlock[]` and
+      `AuditSummaryResponse.creditEvaluationFindingsCount?` were added (optional, for
+      backwards compat with 1.8.0 consumers) so the plural-credit shape reaches the
+      shared contract.
+  </Accordion>
+  <Accordion title="epc-document-events.types — the EPC document round-trip events">
+    The cross-service contract for the classify → carve → materialize round trip.
+    Exports `DOCUMENTS_CLASSIFIED_DETAIL_TYPE` / `DOCUMENTS_MATERIALIZED_TYPE`, the
+    `DocumentsClassifiedEvent` (outbound, api → integrations) and
+    `DocumentsMaterializedEvent` (inbound return leg, integrations → api). The api
+    messaging consumer validates the parsed EventBridge `detail` against a Zod
+    schema mirroring `DocumentsMaterializedEvent` before persisting split locations.
+  </Accordion>
   <Accordion title="octy.types — the Octy bug-report contract">
     Producer: loanlight-api. Consumers: integrations frontend and the Octy
     dashboard.
@@ -123,8 +153,8 @@ The published `shared-types@1.8.0+` exports three modules absent from the on-dis
       `BugReportAgentType`.
     - **`RelatedTrace`** = `{ trace_id: string; agent_type: BugReportAgentType;
       run_name: string }` — links an Octy issue to a LangSmith run, where
-      `run_name` is typically `"{agentType}-Loan-{loanId}"`. This type exists only
-      in the published artifact, not in the on-disk source.
+      `run_name` is typically `"{agentType}-Loan-{loanId}"`. It lives in
+      `shared-types/src/octy.types.ts`.
     - `BugReportPayload` = `{ description: string; selected_agent_types:
       BugReportAgentType[] }`.
     - `BugReportResult` = `{ id, audit_run_id, loan_id, description, intake_status,
@@ -145,9 +175,11 @@ The published `shared-types@1.8.0+` exports three modules absent from the on-dis
   </Accordion>
 </AccordionGroup>
 
-The on-disk 1.3.3 source has only the audit response/table types
-(`api-response.types`, `common.types`, `table.types`, `audit-response.types`,
-`property-data.types`, `urla-completeness.types`) — no agent types.
+The audit response/table types (`api-response.types`, `common.types`,
+`table.types`, `audit-response.types`, `property-data.types`,
+`urla-completeness.types`) are the original contract surface; the credit, EPC-event,
+octy, role, portal-audits, access-policy, and field-value modules were layered on
+since.
 
 ## shared-cdk: reusable constructs
 
@@ -163,7 +195,9 @@ Construct families (`shared-cdk/src/`): `base` (`BaseStack`), `compute`
 `EcsSecurityGroup`), `networking` (`NetworkStack`, `NetworkLoadBalancer`),
 `api-gateway` (`LoanLightApiGateway`, `ApiGatewayDomain`, `ApiGatewayVpcLink`,
 `AuthLambda`, CORS helpers), `messaging` (`SqsQueue`,
-`publishEventToEventBridge`), `database` (`DatabaseBastionHost`), and `common`
+`publishEventToEventBridge`), `database` (`DatabaseBastionHost`), `lambda`
+(`datadog-lambda-config`), `monitoring` (Datadog Lambda/RDS log-subscription
+constructs), `environment` (`parseEnvironment`), and `common`
 (`applyStandardTags`, snapshot helpers).
 
 ## shared-local: LocalStack tooling

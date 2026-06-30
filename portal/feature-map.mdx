@@ -25,6 +25,7 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/income/[familySlug]/[runId]` | Income run detail. |
     | `/income/bank-statements/[runId]` | Bank-statement run detail. |
     | `/dscr-agent` | DSCR calculator; gated on `flags.dscrAgent`. |
+    | `/statement-analyzer` (+ `/[runId]`) | Qualifying-assets review; gated on `flags.statementAnalyzer`. Renders a "not enabled" message when off. See [statement analyzer](/portal/statement-analyzer). |
     | `/classification` | Document classification (upload zone + results table). |
   </Tab>
   <Tab title="settings">
@@ -77,17 +78,29 @@ The `(auth)` group (`/login`, `/invite`, `/reset-password`) is unauthenticated a
 
 The `FeatureFlags` object (`src/lib/feature-flags.ts`) has these keys:
 
-`classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`.
+`classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`.
 
 `getFeatureFlags(lenderId)` GETs the backend `/lenders/${lenderId}/feature-flags`, which returns `{ featureKey, enabled }[]`; the result is transformed via `KEY_MAP` onto an env-default base. An empty array or any failure falls back to `getEnvDefaults()`.
 
 <Warning>
-Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (opt-in), mirroring the backend resolvers — an absent per-lender row does NOT light up the UI: `appraisal`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`.
+Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (opt-in), mirroring the backend resolvers — an absent per-lender row does NOT light up the UI: `appraisal`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`.
 </Warning>
 
-`feature-gates.ts` composes flags: `isChatEnabled(flags, isInternal) = flags.chat || isInternal`; `isAgencyRulesEnabled = appraisal && agencyRules`.
+`feature-gates.ts` composes flags: `isChatEnabled(flags, canBypassFlags) = flags.chat === true || canBypassFlags`; `isAgencyRulesEnabled = appraisal && agencyRules`. The second parameter of `isChatEnabled` was renamed `isInternal` → `canBypassFlags` so chat respects impersonation — callers now pass `getEffectiveContext().bypassFeatureFlags` (`isInternal && !isImpersonating`), not raw `isInternal`. See [impersonation](/portal/impersonation).
 
-`TopNav` nav items are keyed by flag: Appraisal→`appraisal`, Credit→`creditReview`, Income→`bankStatements`, DSCR→`dscrAgent`.
+`TopNav` nav items are keyed by flag: Appraisal→`appraisal`, Credit→`creditReview`, Income→`bankStatements`, DSCR→`dscrAgent`, Statement Analyzer→`statementAnalyzer`.
+
+## List pagination
+
+The shared `<Pagination>` component (`components/ui/pagination.tsx`) and the `useListPagination` hook (`lib/hooks/use-list-pagination.ts`) are wired into five list views: appraisal runs, credit runs, clients (admin), loan programs, and statement-analyzer runs. The income list is intentionally not paginated this way.
+
+## Standalone-run dashboard routing
+
+The dashboard distinguishes a pre-underwriting audit from a standalone agent run via the `AuditOverview` fields `isPreUnderwriting` and `linkedRuns` (`lib/api-types.ts`). A pre-underwriting audit filters on `audit.isPreUnderwriting`; a standalone run is matched through `audit.linkedRuns` by `agent`, and the row links to its first linked run. `AuditSidebar` renders the same `linkedRuns` as per-agent sidebar entries.
+
+<Warning>
+The staff properties-check page (`(detail)/loan-audits/[auditRunId]/properties-check`) passes `proxyImages={false}` to `PropertiesCheckView`. The partner results pages already opted out of the Encompass image proxy; this staff page had missed it (LOA-894).
+</Warning>
 
 ## Redirects (non-page paths)
 

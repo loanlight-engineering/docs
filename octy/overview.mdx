@@ -16,7 +16,7 @@ Octy is internal-only. Every protected route requires a WorkOS-authenticated use
 
 <Steps>
   <Step title="Receives bug reports (issues)">
-    Issues are created against a specific `audit_run_id` + `loan_id`, with optional LangSmith trace references. They come from the loanlight-api portal's loan lookup, or from Octy's own Loan Lookup bug-report panel. See [issues, runs, and labels API](/octy/issues-runs-labels-api).
+    Issues are created against a specific `audit_run_id` + `loan_id`, with optional LangSmith trace references. They come from the loanlight-api portal's loan lookup, or from Octy's own **Lookup** (`/lookup`) bug-report panel. See [issues, runs, and labels API](/octy/issues-runs-labels-api).
   </Step>
   <Step title="Delegates investigations to Oz">
     Octy builds a large prompt (identity, ground rules, system architecture, auth, a generated data-tool catalog, a completion contract, and one skill) and launches a Warp Oz run. See [the Oz run lifecycle](/octy/oz-run-lifecycle).
@@ -44,11 +44,20 @@ Beyond the Oz loop, Octy gives engineers a set of read-and-configure surfaces ov
     Edit categories, rules, and PII doc-type rules; run a live dry-run against loanlight-api.
   </Card>
   <Card title="Billing reports" href="/octy/billing" icon="receipt">
-    Count billable loans per lender, anchored on each loan's first completed non-shadow audit run.
+    Count billable units per lender from the `agents` catalog and the `agent_runs` ledger, anchored on each unit's first completed non-shadow run.
+  </Card>
+  <Card title="GitOps" href="/octy/gitops" icon="github">
+    A per-repo deploy timeline with deploy triggers, plus the team's live GitHub PR dashboard.
+  </Card>
+  <Card title="Routing config" href="/octy/routing-config" icon="route">
+    Edit the integrations EPC document-routing rule sets (versioned global and per-lender).
+  </Card>
+  <Card title="Doc Refreshes" href="/octy/doc-refreshes" icon="book-open-check">
+    The ledger of nightly documentation-refresh runs reported by the Oz `octy-docs-refresh` skill.
   </Card>
 </Columns>
 
-There is also a Dashboard (issue and run aggregates), Loan Lookup, Audit Runs, and a Lenders config editor. See [environment variables](/octy/environment-variables) and [infrastructure](/octy/infrastructure) for how Octy is wired and deployed.
+There is also a Dashboard (issue and run aggregates), **Lookup** (`/lookup` — by loan or lender), Audit Runs, and a **Lenders** config editor. The Lenders editor now carries per-lender **Agent Entitlements** (which catalog agents a lender runs), **Feature Flags**, and **YAML config** tabs; entitlements proxy to loanlight-api's agent-platform API (`/api/lenders/[id]/agent-entitlements`, backed by the `agents` and `lender_agent_entitlements` read-mirrors). See [environment variables](/octy/environment-variables) and [infrastructure](/octy/infrastructure) for how Octy is wired and deployed.
 
 ## What Octy connects to
 
@@ -58,7 +67,10 @@ There is also a Dashboard (issue and run aggregates), Loan Lookup, Audit Runs, a
 | Warp / Oz Agent SDK | Launches and polls autonomous agent runs |
 | LangSmith | Trace project `loanlight-aus`; surfaced in the UI and queried by the agent |
 | Datadog | MCP server attached to runs, env-scoped, when keys are present |
-| loanlight-api | Internal API for classify-split dry-runs and audit results, via shared secret |
+| loanlight-api | Internal API for classify-split dry-runs, audit results, and the agent-platform graph/entitlements, via shared secret |
+| Integrations service | Internal routing-config admin API for the [routing config](/octy/routing-config) editor, via a separate base URL + shared secret |
+| GitHub | A GitHub App installation backing [GitOps](/octy/gitops) — deploy triggers and the PR dashboard, over an allowlist of repos |
+| Slack | Best-effort relay of [Doc Refreshes](/octy/doc-refreshes) records (bot token), one channel + thread |
 | S3 | Three allowlisted buckets the agent can list and read (fail-closed) |
 
 <Info>

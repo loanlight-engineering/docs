@@ -68,6 +68,15 @@ The loanlight-api consumer does not trust the bucket name on the event blindly. 
 
 On download the consumer uses `s3PrefixToUse = s3Prefix?.trim() || correlationId`, so the loanGuid prefix is used to read `{loanGuid}/documents/` and `{loanGuid}/mismo.xml` via `S3FileRetrievalService.downloadTransactionFiles`.
 
+### Split/original locations (materialized return leg)
+
+After classification, integrations carve each classified split to S3 and emit `documents.materialized`. The api consumes it and persists where each split landed (LOA-1337, #2205):
+
+- `document_classifications.split_storage_path` — the relative S3 key of the carved split PDF (validated as a safe relative key: no leading `/`, no `..`, `>= 3` segments such as `loanId/documents/{docId}/…`).
+- `loan_documents.storage_path` — rewritten only when the reorg moved the original (`updatedOriginalLocation`), guarded so an already-applied move never churns `updated_at`.
+
+`persistSplitLocations` matches each split by `document_classifications.id` scoped to the event's `auditRunId` + `loanId`, so a stale/misrouted event cannot rewrite another run's row. See [classify-split data model](/subsystems/classify-split-data-model).
+
 ## Partner API layout
 
 The loanlight-api `S3Service` (`src/s3/s3.service.ts`) writes Partner loan files to `PARTNER_S3_BUCKET`. `getBucketName()` throws `"PARTNER_S3_BUCKET environment variable is required"` if the var is unset.
@@ -100,6 +109,21 @@ partner/{lenderId}/{loanId}/documents/{fileName}
 On audit (`POST /api/v1/partner/audits` → `processAuditForPartner`), the consumer reads `s3Bucket = process.env.PARTNER_S3_BUCKET` and calls `downloadPartnerTransactionFiles(s3Bucket, partnerId, loanId)` against `partner/{lenderId}/{loanId}/`.
 
 See [Partner API loans](/partner-api/loans) and [Partner API audits](/partner-api/audits).
+
+## Portal upload layout
+
+Portal modules (appraisal, credit, income, bank-statement) upload to the portal bucket resolved by `S3_UPLOAD_BUCKET → PORTAL_S3_BUCKET → PARTNER_S3_BUCKET`. Each module owns its own key prefix.
+
+### Bank-statement income module
+
+Bank-statement uploads key under `bank-statements/{borrowerFileId}/{filename}` (the `borrowerFileId` is the batch UUID). The keys are tracked on the `borrower_files` row:
+
+- `s3_keys` (`text[]`, migration 0188) — the full set of uploaded statement keys for the batch.
+- `pending_s3_keys` (`text[]`, migration 0199) — the subset of `s3_keys` the **next** processing job should extract. An "add statements" rerun enqueues an append-mode job whose keys are only the newly-uploaded files (so existing analysis is preserved); set by `addStatements`, consumed by the processor, and cleared when the job reaches a terminal state. The Redis job payload is ephemeral — this column is the durable record of that append intent.
+
+<Note>
+Bank-statement extraction moved off the legacy pdfjs-text + OpenAI path to Reducto OCR (LOA-1590, #2447); rows produced by the new engine record `bank_statements.extraction_method = 'reducto'` (migration 0194 added it to the CHECK alongside `pdfjs`, `azure`, `hybrid`, `llamaparse`).
+</Note>
 
 ## Reads, presigning, and PDFs
 

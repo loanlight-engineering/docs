@@ -63,6 +63,14 @@ On `PortalLendersController` (`/api/v1/portal/lenders`):
 
 `createLenderFromWorkosOrg` auto-seeds `enable_guideline_uploads = true` for WorkOS-provisioned lenders (also seeded in `portal-admin.service.ts`).
 
+### Internal bypass and impersonation
+
+Internal staff bypass client-facing feature flags **only in their own org**. The portal gate keys off `getEffectiveContext(session).bypassFeatureFlags` (`packages/app/src/lib/auth/session.ts`), defined as `isInternal && !session.isImpersonating`. So while a super-admin impersonates a client, `bypassFeatureFlags` is `false` and the client's actual flags are honored (LOA-998, #1691).
+
+<Note>
+`chat` was the only client-facing flag that internal users bypassed even while impersonating, because its gate used the raw `isInternal` status instead of `bypassFeatureFlags`. The fix wired the chat gates (`isChatEnabled`, the chat-sessions endpoints, the FAB) to `bypassFeatureFlags`. Other client-facing flags already gated correctly.
+</Note>
+
 ## Agent entitlements
 
 Table `lender_agent_entitlements` (`database/schema/lender-agent-entitlements.ts`):

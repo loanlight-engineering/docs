@@ -19,13 +19,14 @@ The column defaults to `pending` at insert, but creation code inserts `processin
 
 | Method | Effect | Guard |
 |---|---|---|
+| `tryCompleteAuditRun(id)` | completes the run once every expected `agent_runs` row and `audit_infra_steps` row is terminal (calls `completeAuditRun`) | watch-based, idempotent; vacuous when the ledger is empty |
 | `completeAuditRun(id)` | sets `completed_at`, `status="complete"` | `WHERE id = ? AND status IN ('pending','processing')` |
 | `failAuditRun(id, step, msg)` | sets `completed_at`, `status="failed"` | `WHERE status IN ('pending','processing')` (idempotent) |
-| `markAuditAsInterrupted(id)` | unconditionally sets `failed` | server-restart cleanup |
+| `markAuditAsInterrupted(id)` | unconditionally sets `failed` | retained, but no longer invoked by a startup cleanup |
 | `findIncompleteAudits(threshold=30)` | reads rows with `completed_at IS NULL AND started_at < threshold` | stuck-audit detection |
 
 <Note>
-`completeAuditRun` is guarded so a late success cannot overwrite a `failed` terminal state. This prevents a phantom success when an agent times out, the run is failed, and the agent then resolves late.
+`completeAuditRun` is guarded so a late success cannot overwrite a `failed` terminal state. This prevents a phantom success when an agent times out, the run is failed, and the agent then resolves late. `tryCompleteAuditRun` is the watch-based driver the orchestrator and queue workers call; its plan-aware guard reads `audit_runs.agent_config` so a phase-0 flip cannot complete a run whose later-phase rows have not been seeded yet.
 </Note>
 
 `AuditProcessingStep` (reported in failure events) runs through: `initializing, downloading_files, creating_loan, creating_audit_run, classifying_documents, preparing_pipeline, uploading_documents, waiting_for_pipeline, executing_agents, completing_audit`.
@@ -54,6 +55,36 @@ The 55-minute stale threshold (`STALE_PROCESSING_THRESHOLD_MINUTES`) is intentio
 </Info>
 
 There is also an in-memory `processingAudits = new Set<string>()` keyed by `correlationId`, but it is **warn-only** — it logs "Duplicate concurrent execution detected". The real duplicate guard is the DB unique constraint surfaced by `created === false`. The `finally` block deletes the key.
+
+## Stage deadlines and the false-kill invariant
+
+Every stage is bounded so the stuck-audit cleanup cron can never false-kill a still-running healthy audit (#2412). Before this, only credit had a deadline, so an unbounded stage could outrun the cron — which marked it `failed`, after which the status-guarded `completeAuditRun` silently no-op'd the real success (a lossy failure, terminal for partner audits with no SQS redelivery).
+
+- The four non-credit agents (`piiValidation`, `propertyData`, `documentHealth`, `redFlags`) are wrapped in `raceWithDeadline` against `NON_CREDIT_AGENT_BUDGET_MS` (default 15m, env-tunable). A timeout throws a tagged `NonCreditAgentDeadlineError`, recorded as an `audit_errors` row — the run still completes.
+- URLA extraction is bounded by `URLA_EXTRACTION_BUDGET_MS` (default 45m). Because its output feeds every downstream agent, a timeout throws `UrlaExtractionDeadlineError` and **fails** the run rather than degrading it.
+- The mechanism is abandonment (JavaScript cannot force-kill a promise): the race stops the wait and threads `config.signal` best-effort so abort-aware nodes can unwind.
+
+The cleanup cron `cleanupStuckAuditRuns` (`llama-poller.service.ts`) marks a run `failed` once it is older than `AUDIT_RUN_CLEANUP_DEADLINE_MS` (165m). The headroom invariant is that this deadline provably exceeds the sum of the per-stage budgets, asserted at boot so an env override that closes the headroom fails fast.
+
+## Recovery on deploy restart
+
+Boot-time recovery used to be source-blind and false-killed healthy in-flight integration/partner audits on every deploy (#2451): the `processing_jobs` and `audit_runs` boot sweeps (`resumeInterruptedJobs`, `resumeIncompleteAuditRuns`) selected any non-terminal row regardless of source and failed runs older than 30 minutes, even though integration audits legitimately run up to ~57m and partner up to ~95m.
+
+Now those boot paths recover **only `source = "los"`** work; integration and partner audits are left to the source-agnostic, headroom-aware cron above and to time-windowed orphan reapers:
+
+- `AgentRunOrphanReaperService` — sweeps every 5m, reaping `agent_runs` rows stuck longer than a 3h window (`reapStuckAgentRuns`). The window must exceed the slowest live agent's P99.9 so a healthy run is never reaped.
+- `AuditInfraStepOrphanReaperService` — the same pattern for `audit_infra_steps` rows on a 70m window.
+- The orchestrator's phase barrier (`PhaseBarrierTimeoutError`) has a 4h ceiling, deliberately above the 3h reaper window so a genuinely-stuck row is reaped to `failed` (which the barrier reads as terminal) before the barrier fires.
+
+`markAuditAsInterrupted` still exists but is no longer wired into a startup cleanup.
+
+## Classify-readiness gate and the snapshot
+
+The phase-0 classify-readiness gate (`awaitClassifyReadiness`) bounds each in-flight audit against a snapshot captured at intake — `audit_runs.snapshot_doc_ids` and `snapshot_taken_at` over the live, non-superseded `loan_documents`. A `classify_split_runs` row is excluded when its `started_at` is after the snapshot, so a classify run created inside the same audit cannot satisfy its own gate.
+
+<Note>
+The gate predicate must stay in lockstep with the classification reader (`getActiveClassificationsForLoan`). A re-audit of an already-classified loan produces only a `skipped` classify run for the current audit, so the loan's real classifications belong to a prior audit; the predicate is therefore status-scoped (`csr.status IN ('complete','partial')`) with no exclusive `audit_run_id` filter, matching the reader. Misaligning the two reintroduces the `snapshot_doc_no_csr` deadline that failed every integration re-audit before #2296.
+</Note>
 
 ## Run numbering and races
 
@@ -87,11 +118,12 @@ On the legacy path, `POST /api/v1/los/aus/webhook` uses `EncompassFieldChangeInt
 
 ## Creation entry points
 
-| Method | Path | `trigger_source` | Notes |
-|---|---|---|---|
-| `createAuditRun(correlationId, requestorId, loanId, mismoXmlHash?, shadowOptions?)` | EPC | `epc` | lender resolved from the loan |
-| `createAuditRunForPartner(lenderId, loanId, {agents?, mismoXmlHash?})` | Partner | `partner` | id = uuidv4 |
-| `createAuditRunDirect(auditRunId, loanId\|null, lenderId, triggerSource, {...})` | generic | any | |
-| `AuditRunFactory.create({...})` | generic | any | `epc` requires `correlationId` + `loanId` and delegates to `createAuditRun` |
+Runs are now minted by `AgentRouterService.route(...)`, which delegates to `AuditRunFactory.create(...)` — the canonical allocator — and surfaces a `created` flag for the dedup short-circuit above.
 
-`CreateAuditRunResult = { auditRunId, created, runNumber: number|null, existingStatus?, startedAt? }`. `AuditTriggerSource = "epc" | "los" | "partner" | "portal" | "admin_rerun" | "shadow"`.
+| Allocator | Path | `trigger_source` | Notes |
+|---|---|---|---|
+| `AuditRunFactory.create({...})` | all | any | the canonical allocator the router calls; dispatches by `trigger_source` |
+| → `createAuditRun(correlationId, ...)` | EPC | `epc` | the `correlationId`-keyed dedup wrapper; lender resolved from the loan |
+| → `createAuditRunDirect(auditRunId, loanId\|null, lenderId, triggerSource, {...})` | Partner / LOS | `partner`, `los` | fresh `id = uuidv4`; loan-optional |
+
+The legacy `createAuditRunForPartner` is no longer the partner entry point. `CreateAuditRunResult = { auditRunId, created, runNumber: number|null, existingStatus?, startedAt? }`. `AuditTriggerSource = "epc" | "los" | "partner" | "portal" | "admin_rerun" | "shadow"`.

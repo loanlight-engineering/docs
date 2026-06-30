@@ -96,7 +96,8 @@ Several controllers gate on per-lender feature flags in `lender_feature_flags`:
 
 - **DSCR agent** — flag `dscr_agent`, enforced by controller-level `assertDscrAgentEnabled`. See [bank statement and DSCR](/portal/api-bank-statement-dscr).
 - **Guideline uploads** — flag `guidelineUploads`; the service `assertEnabled()` throws `404` (not an empty list) when disabled.
-- **Compound rules** — `isCompoundRulesEnabled(lenderId)` is default-enabled (returns `true` when the flag row is absent). See [rules authoring](/portal/api-rules-authoring).
+- **Compound rules** — `isCompoundRulesEnabled(lenderId)` is **opt-in**, not default-enabled. At head it resolves from the umbrella `appraisal` flag (`isAppraisalEnabled`), so an absent flag row resolves to disabled (LOA-994). See [rules authoring](/portal/api-rules-authoring).
+- **Credit gates** — three independent, all default-OFF (absent row → disabled): `credit_review` (`isCreditReviewEnabled`, gates the credit pipeline), `credit_compound` (`isCreditCompoundEnabled`, gates compound credit authoring/eval), and `credit_custom_eval` (`isCreditCustomEvalEnabled`, gates production custom eval). All live in `lib/appraisal-pipeline/rules/feature-gates.ts`.
 - **Updated-appraisal-run flow** — an appraisal feature flag gates child run creation, mutation, and reads; all four endpoints throw `ForbiddenException` when off.
 
 ## PortalAuditsAuthGuard (per-audit sections)

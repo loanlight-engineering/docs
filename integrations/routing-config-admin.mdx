@@ -1,0 +1,80 @@
+---
+title: Routing-config admin API
+description: The secured internal API for authoring EPC document-routing config.
+icon: route
+---
+
+The integration service exposes a secured admin API for managing the EPC document-routing config — the global default rule set and per-lender overrides that decide which Encompass eFolder a classified document lands in. It is served by `RoutingConfigAdminController` and backed by the [`document_push_routing_config` table](/integrations/database-schema). Authoring or editing a lender's rules is pure DML against that table, never a schema migration (LOA-1188).
+
+The controller base path is `integrations/routing-config`. There is **no global route prefix** — every path below is literal.
+
+## Auth
+
+Every route is guarded by `InternalApiKeyGuard`. This API is internal, server-to-server only; it is not reachable through the public API Gateway.
+
+- The caller sends the shared secret in the `x-internal-api-key` header. The guard reads `INTERNAL_API_KEY` (trimmed) and compares with `crypto.timingSafeEqual`.
+- **Fail-closed**: an unset or blank `INTERNAL_API_KEY` returns `401` even with a matching header. A missing, blank, or array-valued header returns `401 "Missing internal API key"`; a length or value mismatch returns `401 "Invalid internal API key"`.
+- The optional `x-acting-user-id` / `x-acting-user-email` headers are **logged only** (they appear in the `routing_config_authored` / `_activated` / `_deactivated` audit log lines); they are not part of authorization.
+
+## Endpoints
+
+`:orgId` is a **WorkOS org id**, mapped to a `lender.id` via `lender.workos_org_id`. `:version` is parsed with `ParseIntPipe`.
+
+| Method & path | Action |
+|---|---|
+| `GET /integrations/routing-config/global` | The global rule set: active version, `defaultContainer`, rules, and version history. |
+| `POST /integrations/routing-config/global/versions` | Author a new global version. Body is `AuthorVersionDto`. Returns `{ version, ... }`. |
+| `POST /integrations/routing-config/global/versions/:version/activate` | Activate a global version. Returns `{ activated: version }`. |
+| `POST /integrations/routing-config/global/deactivate` | Deactivate the active global version. Returns `{ deactivated: true }`. |
+| `GET /integrations/routing-config/lenders` | List lenders with their active routing version. |
+| `GET /integrations/routing-config/lenders/:orgId` | A lender's overrides and history. Query `includeGlobal` and `resolve` (both `"true"`) add the global rule set and the resolved effective rules. |
+| `POST /integrations/routing-config/lenders/:orgId/versions` | Author a new per-lender version. Body is `AuthorVersionDto`. |
+| `POST /integrations/routing-config/lenders/:orgId/versions/:version/activate` | Activate a per-lender version. Returns `{ activated: version }`. |
+| `POST /integrations/routing-config/lenders/:orgId/deactivate` | Deactivate the lender's active override. Returns `{ deactivated: true }`. |
+
+### Request body
+
+The author endpoints take `AuthorVersionDto`:
+
+```ts
+interface AuthorVersionDto {
+  rules: unknown;          // the routing rule set (dynamic jsonb)
+  activateOnCreate?: boolean; // default false
+}
+```
+
+`rules` is dynamic jsonb, so the global `ValidationPipe` is intentionally a no-op for these bodies — the service validates the payload shape itself.
+
+## Error responses
+
+| Status | Body | When |
+|---|---|---|
+| `409` | `{ code: "LENDER_NOT_PROVISIONED", message }` | The `:orgId` does not resolve to a provisioned lender. |
+| `409` | `{ code: "ACTIVATION_CONFLICT", message }` | The activation conflicts with the one-active-per-scope invariant. |
+| `400` | `{ error: "invalid_routing_config", message }` | The submitted `rules` payload fails validation. |
+| `404` | `{ error: "version_not_found" }` | The requested version does not exist. |
+
+<Note>
+Only the `409` responses carry the structured `{ code, message }` shape. `400` and `404` use the `{ error, ... }` shape. Octy and loanlight-api map these codes to their own UI/telemetry.
+</Note>
+
+## Transport
+
+Octy and loanlight-api reach this API server-to-server over the integrations **internal NLB**, not the public gateway. The NLB has a `:443` TLS listener and is addressed at `https://integrations-internal.{zone}`; both callers' ECS security groups are admitted on TCP 443. The `INTERNAL_API_KEY` is delivered to the integrations ECS task as a secret from Secrets Manager (`LLIntegrations/INTERNAL_API_KEY`). See [Integrations infrastructure](/integrations/infrastructure).
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Integrations database schema" href="/integrations/database-schema" icon="database">
+    The `document_push_routing_config` table this API writes.
+  </Card>
+  <Card title="Messaging" href="/integrations/messaging" icon="send">
+    Where the resolved routing config is applied — the document-push consumer.
+  </Card>
+  <Card title="Octy routing config" href="/octy/routing-config" icon="bug">
+    Octy's view of the routing config.
+  </Card>
+  <Card title="Portal config API" href="/portal/api-config" icon="sliders-horizontal">
+    The lender-facing config surface.
+  </Card>
+</Columns>

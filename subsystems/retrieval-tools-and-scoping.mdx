@@ -140,9 +140,29 @@ recorded as `search_filters_overridden` in LangSmith metadata.
 | `eligibleFiles` empty, map non-empty and run status = `complete` (Scenario B) | field **skipped** entirely, WARN `pii.scoping_no_eligible_docs` |
 | Otherwise | `searchFilters = buildSearchFilter(eligibleFiles)`, LOG `pii.scoping_active` |
 
-The filter is **trusted** — there is no post-retrieval eligibility filtering of snippets. As a smoke
-alarm, any returned snippet whose `metadata.file_id` falls outside the eligible set raises WARN
-`pii.pushdown_leak` (LlamaCloud not honoring `search_filters`).
+## Post-retrieval scope enforcement (LOA-1601)
+
+The doc-type `search_filters` pushdown is **best-effort** — LlamaCloud can silently ignore or
+mis-apply it (filter-shape regressions, `page_label` coercion, version drift). Since #2457 there is an
+authoritative post-retrieval gate: `validateField/node.ts::enforceEligibleFileScope` drops any
+retrieved snippet whose `metadata.file_id` is outside the field's eligible set and emits WARN
+`pii.scope_leak` (naming the leaked `file_id`s and the dropped count).
+
+- It runs **only when scoping is active** — `computeScoping` returns a `ScopingDecision` carrying
+  `eligibleFileIds` (a `ReadonlySet`) on the `pii.scoping_active` branch. Every whole-index fallback
+  path (no rules service, no rules, empty classification map, classify-split incomplete) leaves
+  `eligibleFileIds` undefined, so enforcement is a **no-op** there and coverage is never narrowed.
+- Snippets with **no** `file_id` are kept.
+- **File-scope only.** Per-file page ranges are not carried on `ScopingDecision`, so page-range
+  eligibility stays best-effort pushdown — it is not re-checked post-retrieval.
+
+<Warning>
+This replaces the old `pii.pushdown_leak` smoke alarm, which only warned and did not drop. The bespoke
+`pushdown_leak` filter was deleted; `enforceEligibleFileScope` (`pii.scope_leak`) now actively drops
+out-of-scope snippets. A separate `SnapshotScope.filterSnippets` still enforces snapshot/loan
+membership (every loan doc) — that is a different, coarser layer and does not enforce the per-field
+doc-type-eligible subset.
+</Warning>
 
 ## Replaying a scoping decision
 

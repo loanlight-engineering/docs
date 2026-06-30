@@ -92,7 +92,7 @@ The previously uploaded loan to audit.
 </ParamField>
 
 <ParamField path="agents" type="string[]">
-Agent allow-list. If omitted, all agents run.
+Requested agents. The router intersects this with the lender's entitled set and expands the dependency closure. If omitted, all entitled agents run.
 </ParamField>
 
 <ParamField path="options.estimatedClosingDate" type="string (YYYY-MM-DD)">
@@ -105,18 +105,15 @@ Overrides the closing date used for document expiration checks.
   <Step title="Loan lookup">
     `loanService.getLoanByIdAndLender(loanId, lenderId)` → `404` if not found.
   </Step>
-  <Step title="Status gate">
-    Loan `processing_status` must be `ready_for_audit` or `ready`, else `409 Conflict`.
+  <Step title="Error gate">
+    The only `409 Conflict` is when the loan's `processing_status` is `error` — typically a prior failed audit that must be explicitly cleared. There is no longer a status gate on `ready_for_audit`/`ready` or a classification-in-progress gate.
   </Step>
-  <Step title="Classification gate">
-    `classifySplitPersistence.hasInProgressRunsForLoan(loanId)` → `409` if classification is still running.
-  </Step>
-  <Step title="Router branch (flag-gated)">
-    With the per-lender `PARTNER_VIA_ROUTER` flag ON, `agentRouter.route(...)` applies the entitlement filter and required-closure expansion. An empty plan deletes the freshly created run and returns `403` with `denied[]`. With the flag OFF (default), `auditService.createAuditRunForPartner(...)` runs the legacy allow-list.
+  <Step title="Route">
+    `agentRouter.route(...)` is the only path (no feature flag). It mints the run, applies the entitlement filter (requested ∩ enabled), expands the required-closure (a named downstream agent pulls in its upstreams), seeds the `agent_runs` ledger, and writes `audit_runs.agent_config`. If the resolved plan is empty (`plannedAgentRuns.length === 0`), the freshly-minted run is deleted best-effort and the endpoint returns `403` with `denied[]`.
   </Step>
 </Steps>
 
-The response is `{ auditId, loanId, status: "pending", agents, denied?, startedAt, progressUrl: "/api/v1/partner/audits/:auditId/progress" }`. Execution runs in the background via `processAuditForPartner`; its `.catch` calls `failAuditRun` to cover pre-try throws.
+The response is `{ auditId, loanId, status: "processing", agents, denied, startedAt, progressUrl: "/api/v1/partner/audits/:auditId/progress" }`, where `agents` is the resolved plan (the entitled request plus its required-closure) and `denied` lists any requested agents filtered out (empty when nothing was denied). Execution runs in the background via `processAuditForPartner` → `AgentOrchestrator.run`; its `.catch` calls `failAuditRun` to cover pre-try throws.
 
 See [Partner API audits](/partner-api/audits) and [Router and entitlements](/agents/router-and-entitlements) for detail.
 
@@ -124,8 +121,18 @@ See [Partner API audits](/partner-api/audits) and [Router and entitlements](/age
 
 `POST /api/v1/los/aus/webhook` (Encompass) and `POST /api/v1/los/aus` (Dev Connect) in `los/los.controller.ts` pull the loan and documents directly from the LOS provider API rather than from S3. The webhook uses `EncompassFieldChangeInterceptor` (alongside signature, requestor-id, and rate-limit interceptors) to decide whether the change is meaningful before triggering `EncompassAuditOrchestrationService.perform`.
 
-These orchestrators delegate to `LosService.processLoan`, `DocumentProcessingService.triggerDocumentProcessing`, and `LangGraphService`, completing the run via `LangGraphService.completeAuditRun`.
+These orchestrators delegate to `DocumentProcessingService`, which now also routes through `AgentRouterService.route(...)` → `AgentOrchestrator.run(...)` (`trigger_source = "los"`, `skipIndexing = true` since the LOS path indexes upstream) and completes the run by watching the ledger.
 
 <Warning>
 Treat the LOS-pull path as deprecated. The Encompass `LosProvider` is a non-functional stub. New work targets the EPC and Partner paths. See [Legacy Dev Connect](/integrations/legacy-dev-connect).
 </Warning>
+
+## Statement Analyzer standalone runs
+
+The [Statement Analyzer](/agents/income-analysis) has its own portal-driven entry path that produces an **asset run**, not an audit run. Portal staff upload bank statements through `POST /api/v1/portal/bank-statements/enqueue` (`BankStatementController`, guarded by `PortalAuthGuard`, roles `client_admin` / `client_user`). The request carries an optional free-text `loanId`.
+
+When no loan is linked, the run is a **standalone (loanless) run**: the typed value is stored as `borrower_files.loan_reference`, and the resulting `asset_runs` row has `loan_id = NULL` and binds to `borrower_file_id` instead (migration 0207). Before #2489 a loanless upload extracted successfully but never created a run — the work silently evaporated.
+
+<Note>
+A Statement Analyzer run is a separate pipeline from the audit run. It runs the `statementAnalyzer` LangGraph agent (not part of the audit `AGENT_PIPELINE`) and writes `asset_runs`, `asset_accounts`, `bank_statements`, and `findings` — there is no `audit_runs` row and no `trigger_source`. See [income analysis](/agents/income-analysis) and [bank statement and DSCR API](/portal/api-bank-statement-dscr).
+</Note>

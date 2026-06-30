@@ -31,6 +31,7 @@ Controller: `portal-appraisal/portal-appraisal.controller.ts` at `api/v1/portal/
 | `GET /api/v1/portal/appraisals/:id/status` | auth | Poll status |
 | `GET /api/v1/portal/appraisals/:id/rules` | auth | Compliance results |
 | `GET /api/v1/portal/appraisals/:id/review-fields` | auth | Fields flagged for review |
+| `POST /api/v1/portal/appraisals/:id/export` | client_admin, client_user, super_admin | Branded Review-summary PDF (HTTP 200, throttle 5/min) |
 
 #### POST /api/v1/portal/appraisals/run
 
@@ -91,6 +92,22 @@ The updated-run flow is gated by an appraisal feature flag. When it is off, all 
 | `DELETE /api/v1/portal/appraisals/:id/rule-overrides/:ruleCode` | client_admin | Revert override (HTTP 204) |
 | `GET /api/v1/portal/appraisals/:id/key-field-reviews` | read+ | Key-field reviews |
 | `PATCH /api/v1/portal/appraisals/:id/key-field-reviews/:fieldId` | client_admin, client_user | Patch a review |
+
+### Review-summary export
+
+`POST /api/v1/portal/appraisals/:id/export` renders a branded "Review summary" PDF (property facts, issues, and program-rule outcomes) from the same `getRunDetail` projection the page renders, so the PDF matches the on-screen review. Roles: `client_admin`, `client_user`, `super_admin` (super_admin was added by #2477). HTTP 200, throttled to 5/min (PDF render is expensive). It reuses the `bank-statement-export` Puppeteer writer and signed-URL service.
+
+<ParamField body="notes" type="string">
+Optional underwriter notes (`ExportAppraisalDto`, ≤2000 chars) rendered into the PDF.
+</ParamField>
+
+It returns `{ files: [{ format: "pdf", url, filename }] }`. A run that is not `completed` or `reviewed` returns `409` ("Appraisal review is not complete; export is unavailable") — only those statuses carry the findings and rule outcomes the summary needs. The PDF includes an "Issues Found" section (#2510).
+
+<Note>
+The Findings section's empty-state reflects whether ATTOM enrichment actually ran for **this** run (`run.enrichmentData != null`), not the current global `ENABLE_ATTOM_ENRICHMENT` env flag (#2496). Reading the env at export time would mislabel historical runs across flag flips.
+</Note>
+
+The BFF proxy is `POST /api/appraisal/[runId]/export`.
 
 ### Processing and the orphan sweep
 

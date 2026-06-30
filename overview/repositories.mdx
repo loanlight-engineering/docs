@@ -54,7 +54,7 @@ A pnpm-workspace monorepo that publishes versioned, scoped npm packages (`@loanl
 | `shared-cdk` | Reusable AWS CDK L2/L3 constructs (API Gateway, Fargate + Datadog, NLB + VPC link, SQS, bastion). |
 | `shared-local` | LocalStack dev tooling (queues, buckets, EventBridge bus). |
 | `shared-auth` | WorkOS AuthKit wrapper for Next.js apps (published only). |
-| `shared-api-auth` | NestJS WorkOS auth module (published only). |
+| `shared-api-auth` | NestJS WorkOS auth module (published only). `ApiAuthService` also exposes WorkOS Connect M2M methods (applications + client secrets) for per-lender EPC credentials. See [identity and auth](/concepts/identity-and-auth#workos-connect-m2m-per-lender-epc-credentials). |
 | `shared-lambda-auth` | API Gateway authorizer handler (published only). |
 | `shared-ui` | Shared React UI components, primitives, and design tokens (published only). |
 

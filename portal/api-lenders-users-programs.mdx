@@ -143,6 +143,7 @@ Controller: `portal-admin/portal-admin.controller.ts` at `api/v1/portal/admin`. 
 | `POST /api/v1/portal/admin/lenders` | Create lender (`CreateLenderDto`) — admin variant |
 | `GET /api/v1/portal/admin/appraisal-runs` | `ListAppraisalRunsQueryDto` → `PortalAppraisalService.adminListRuns` |
 | `POST /api/v1/portal/admin/appraisal-runs/:id/rerun` | `adminRerunRun(id, userId)` |
+| `GET /api/v1/portal/admin/appraisal-runs/:id/files` | Presigned download URLs for every run artifact (source PDF, optional MISMO XML, each SSR). Cross-tenant by design — resolves the run by id and presigns against the run's own lender; returns presigned URLs only, never raw S3 keys (#2392, LOA-1552) |
 
 Staged rule bundles also mount under `api/v1/portal/admin`; see [rules authoring](/portal/api-rules-authoring). Shadow-audit diffs and other internal-admin tools are documented in [internal admin and observability](/portal/api-admin-observability).
 
@@ -174,6 +175,16 @@ Verifies the `workos-signature` header via `ApiAuthService.constructWebhookEvent
 | `user.created` | `linkWorkosUser` |
 | `user.updated` | `updateLastSignIn` |
 | `organization_membership.created` / `.deleted` | membership handlers |
+
+<Note>
+`createLenderFromWorkosOrg` was hardened to three branches (#2277, LOA-1178):
+
+1. **Already linked** — a lender already bound to this `workos_organization_id` is an idempotent no-op (it just heals the org→client mapping).
+2. **Same-named, null org** — `lenders.name` is `UNIQUE`, so a same-named lender with no org is atomically claimed for this org (a conditional `WHERE` closes the TOCTOU race). If that lender is already bound to a *different* org, it logs `workos_org_created_name_conflict` and returns the existing row rather than clobbering it — the webhook is still acked so it does not retry-loop forever.
+3. **Brand new** — otherwise a fresh lender is created.
+
+This fixes the prior path where a same-named org would hit the `lenders.name` UNIQUE constraint and `500`.
+</Note>
 
 Just-in-time provisioning details are on [internal admin and observability](/portal/api-admin-observability).
 

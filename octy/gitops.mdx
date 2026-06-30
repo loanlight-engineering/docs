@@ -1,0 +1,94 @@
+---
+title: GitOps
+description: The unified deploy timeline and GitHub PR dashboard.
+icon: github
+---
+
+GitOps at `/gitops` is Octy's window onto the team's GitHub activity: a per-repo deploy timeline with one-click deploy triggers, and a live pull-request dashboard. It is read-and-act over the GitHub API — there is no database behind it and nothing to configure in the UI. The page lives in `src/app/(app)/gitops/` (`page.tsx` + `GitOpsClient.tsx`).
+
+<Note>
+GitOps merged what used to be two separate pages. The old PR Command Center at `/pull-requests` and the Deployments view at `/deployments` are now tabs on `/gitops`. `next.config.ts` keeps the old links working: `/pull-requests` redirects to `/gitops?tab=team` and `/deployments` to `/gitops?tab=deployments` (both 307, query string preserved).
+</Note>
+
+## Tabs
+
+The active tab is URL-driven (`?tab=`), so a view is shareable. The default is **Deployments**.
+
+| Tab | `?tab=` | Shows |
+|---|---|---|
+| Deployments | `deployments` | A repo's deploy timeline and deploy triggers. |
+| My PRs | `mine` | Your personal PR board, grouped by what needs you. |
+| Team PRs | `team` | The whole team's open-PR health. |
+
+Each tab fetches lazily when it first becomes active and shows the data's age and the remaining GitHub API rate limit in the header. A **Refresh** button forces a re-fetch (`?refresh=1`).
+
+## GitHub App configuration
+
+GitOps authenticates as a **GitHub App installation**, not a personal token. Configuration is entirely env-var driven (`src/lib/github/config.ts`) — see [environment variables](/octy/environment-variables):
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_ORG` | The GitHub org (e.g. `loanlight-engineering`). |
+| `GITHUB_REPOS` | Comma-separated allowlist of short repo names. The only repos GitOps will read or deploy. |
+| `GITHUB_APP_ID` | The GitHub App id. |
+| `GITHUB_APP_INSTALLATION_ID` | The installation id on the org. |
+| `GITHUB_APP_PRIVATE_KEY` | The App private key — raw PEM, `\n`-escaped, or base64 (all normalized in `config.ts`). |
+
+`isGithubConfigured()` is fail-soft: when any of these is missing, the page renders empty and the API routes return **503** `NOT_CONFIGURED` rather than throwing. Every GitOps API route is WorkOS auth-gated (`requireAuth()`), like the rest of the app.
+
+## Deployments tab
+
+The Deployments tab pairs a repo's recent commit timeline with the state of each deploy target, and lets you trigger a deploy. Pick a repo with `RepoPicker` (the `GITHUB_REPOS` allowlist).
+
+`GET /api/github/deployments?repo=<short-name>[&refresh=1]` returns `{ repos, state }`, where `state` is a cached snapshot of the repo's default branch, recent commits, workflow runs, and resolved deploy targets. Snapshots are cached (`deploy-cache.ts`) and invalidated after a dispatch.
+
+### Deploy targets — identity as code
+
+A repo's deploy targets are resolved in `src/lib/github/deploy-config.ts`, not from a database. Curated repos use an explicit `DEPLOY_OVERRIDES` entry; any other repo falls back to name-based auto-detection of deploy workflows.
+
+| Repo | App targets (int / prod workflows) |
+|---|---|
+| `octy` | **Octy** — `Deploy Octy INT` / `Deploy Octy PROD` |
+| `loanlight-api` | **API** — `Continuous Deployment (Integration)` / `Continuous Deployment`; **Portal** — `CD — App (Integration)` / `CD — App (Production)` |
+| `loanlight-integrations` | **Web App** and **Encompass** — `Deploy {App} INT` / `Deploy {App} PROD` |
+
+Repos not in `DEPLOY_OVERRIDES` are auto-detected: any active workflow whose name looks like a deploy (`deploy`, `cd`, `publish`, …) and names an environment (`classifyEnv` maps `prod`/`production`/`release`/`live` → `prod`, `int`/`integration`/`staging`/`dev`/`qa` → `int`). Adding an app to a curated repo is a one-line edit, never a migration.
+
+### Triggering a deploy
+
+The **Deploy** button posts to `POST /api/github/deployments/dispatch` with `{ repo, app, env }` where `env` is `"int"` or `"prod"`:
+
+```http
+POST /api/github/deployments/dispatch
+Content-Type: application/json
+
+{ "repo": "octy", "app": "Octy", "env": "int" }
+```
+
+The route resolves `(app, env)` to a workflow from the cached snapshot — the client can only dispatch a target the snapshot already knows — then calls GitHub's `workflow_dispatch` on the repo's **default branch** and invalidates the cache. On success it returns `{ ok, repo, app, env, ref, workflowName }`. It returns **400** for a bad or unknown repo/env, **404** when there is no matching workflow, and **422** when GitHub rejects the dispatch (commonly a workflow missing a `workflow_dispatch` trigger).
+
+## PR tabs
+
+Both PR tabs read one cached snapshot of the org's open PRs (`GET /api/github/pull-requests?scope=mine|team[&refresh=1]`) over the `GITHUB_REPOS` allowlist, and surface the GitHub rate-limit budget.
+
+<Tabs>
+  <Tab title="My PRs">
+    The personal board (`scope=mine`). Your GitHub login is resolved from your WorkOS email via the identity-as-code map in `src/lib/github/team.ts` (`resolveGithubLogin`). If your email is not mapped, the board returns `unmapped: true` and stays empty — add yourself to the map. `buildMineGroups` buckets your open PRs by what needs action and appends PRs merged in the last `RECENTLY_MERGED_DAYS` (7); a failed recently-merged fetch is non-fatal.
+  </Tab>
+  <Tab title="Team PRs">
+    The team board (`scope=team`, `computeTeamPayload`). It renders repo health, reviewer load, and a stranded-PR table across all allowlisted repos. A PR with no activity for `STALE_DAYS_THRESHOLD` (3) days is treated as stale/stranded.
+  </Tab>
+</Tabs>
+
+GitHub-side failures surface as **502** with the upstream message; the routes never leak the App credentials.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+The `GITHUB_*` App configuration.
+</Card>
+<Card title="Authentication and access control" href="/octy/auth-and-access" icon="lock">
+The WorkOS gate and the CSP that allows GitHub avatars.
+</Card>
+</Columns>

@@ -63,8 +63,16 @@ The YAML file is the source of truth. The in-memory cache survives a DB failure,
 Agents write their findings to per-agent result tables (see [Reading audit results](/pipeline/results)), and each issue-bearing row carries an issue-kind value:
 
 - The [PII agent](/agents/pii-validation) writes `pii_validation_results.issue_kind`. Its canonical enum is `missing | inconsistent | identity_mismatch`.
-- [Document health](/agents/document-health) writes `doc_expiration_results.issue_kind` and `doc_completeness_results` codes (`expired`, `expiring_soon`, `page_mismatch`, and so on).
+- [Document health](/agents/document-health) writes `doc_expiration_results.issue_kind` and `doc_completeness_results` codes (`expired`, `expiring_soon`, `page_mismatch`, and so on). Signature verification surfaces `doc_signature_verification_results.status` (`all_signed`, `partially_signed`, `unsigned`, `verification_failed`) as the issue kind; `verification_failed` is the non-blocking state added in migration 0200 for a failed vision call (distinct from a real `unsigned` reading).
 - [Property red flags](/agents/property-red-flags) surface a `rule_id` as the issue kind rather than a taxonomy code.
+- [Credit evaluation](/agents/credit-evaluation) surfaces `complianceResults[].ruleCode` (the `CRED_*` rule codes, for example `CRED_001`) with severity derived from each rule's `outcome` via `deriveSeverityFromOutcome` (`FAIL→HIGH`, `WARNING→MEDIUM`). These rule codes are not `issueKinds.yaml` codes; `credit_low` is the only credit entry in the YAML.
+
+## Adjacent taxonomies (not issue kinds)
+
+The issue-kind taxonomy above governs the audit-pipeline agents. Two adjacent classification surfaces are easy to confuse with it but are separate enums:
+
+- **Credit rule codes** — `CRED_*` codes on `credit_runs.complianceResults[].ruleCode`, governed by the credit rule bundles, not `issueKinds.yaml`.
+- **Statement Analyzer finding types** — the bank-statement / asset pipeline writes the `findings` table with its own `finding_type` CHECK constraint, a wholly separate taxonomy. Migration 0209 (`0209_extend_findings_check_for_new_types`) brought it to its current 15 values: `large_deposit`, `anomaly`, `fraud_flag`, `income_classification`, `validation_balance_mismatch`, `validation_date_out_of_range`, `validation_duplicate`, `validation_invalid_amount`, `validation_missing_field`, `fraud_pdf_integrity`, `fraud_font_consistency`, `fraud_continuity`, `llm_source_mismatch`, `nsf_overdraft`, and `income_trend` (`nsf_overdraft` and `income_trend` were the additions in 0209). The canonical list lives in `VALID_FINDING_TYPES` (`modules/bank-statement/bank-statement.processor.ts`). See the [enums reference](/data-model/enums-reference#finding-type-unions-bank-statement-pipeline) and [income analysis](/agents/income-analysis).
 
 ## Relation to result tables and severity buckets
 

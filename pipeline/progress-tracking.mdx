@@ -35,19 +35,17 @@ The pipeline reports progress through a single `emitEvent` call that dual-publis
 
 ### Progress integers (EPC path)
 
-The orchestrator emits an incrementing `progress` integer at each step:
+The channel emits an incrementing `progress` integer at each setup step:
 
-| Progress | Step |
-|---|---|
-| 5 | `WORKFLOW.START` |
-| 10 | downloading files |
-| 15 | creating loan |
-| 18 | classifying documents |
-| 20 | preparing pipeline |
-| 25 | uploading to AI |
-| 50 | documents ready |
+| Progress | Event | Step |
+|---|---|---|
+| 5 | `WORKFLOW.START` | workflow start |
+| 10 | `DOCUMENT_PROCESSING.DOWNLOADING` | downloading files |
+| 15 | `DOCUMENT_PROCESSING.INITIALIZATION` | creating loan |
+| 30 | `DOCUMENT_PROCESSING.UPLOADING_TO_AI` | uploading to LlamaCloud (phase-0 index step) |
+| 40 | `DOCUMENT_PROCESSING.PIPELINE_MONITORING` | waiting for pipeline readiness |
 
-Agent-level granular progress is emitted from within the LangGraph agents.
+Agent-level granular progress is emitted from within the LangGraph agents. The discrete classify/prepare/documents-ready integers were dropped when those steps moved into the orchestrator's phase 0.
 
 ## SSE and polling — SseController
 

@@ -7,7 +7,7 @@ icon: copy
 Shadow audits (LOA-731) run a second, parallel audit alongside a real one — typically to exercise additional agents (such as credit) or a different lender configuration without affecting what the lender sees in Encompass. The shadow audit produces a PDF stored in S3 and **never PATCHes Encompass**.
 
 <Note>
-Shadow audits are gated by `SHADOW_AUDIT_ENABLED=true` and default **off**, so production behaviour is unchanged unless the flag is set.
+Shadow audits are gated by `SHADOW_AUDIT_ENABLED=true` (`AppConfigService.shadowAuditEnabled`, which is `true` only when the env var is exactly `"true"`). The default is **off**, and `shadowAuditEnabled` is set to `"false"` in **both** `cdk.context.int.json` and `cdk.context.prod.json`, so the fan-out is currently disabled in every deployed environment.
 </Note>
 
 ## How a shadow run is created
@@ -19,7 +19,7 @@ After publishing the real "Audit Requested" event, `processTransaction` optional
 A synthetic shadow `loan`, `transaction_record` (`is_shadow = true`), and `transaction_state` are created. Their IDs are **deterministic**, derived from the real `correlationId`, so SQS re-deliveries dedup rather than spawning duplicate shadow runs.
 </Step>
 <Step title="Mark the loan number">
-The shadow loan gets a loan-number suffix: `SHADOW_LOAN_NUMBER_MARKER` plus 8 hex chars. This marker is what the defensive guards later detect.
+The shadow loan gets a loan-number suffix: `SHADOW_LOAN_NUMBER_MARKER` (`"-shadow-"`) plus 8 hex chars. This marker is what the defensive guards later detect.
 </Step>
 <Step title="Publish a second Audit Requested">
 A second "Audit Requested" event is published with an `additionalData` block:
@@ -62,6 +62,7 @@ When the shadow run completes, the AUS update consumer detects it and routes to 
 Several layers prevent a shadow run from ever touching the real Encompass transaction:
 
 - `workflow:start` handling **skips shadow runs entirely** (see [Messaging](/integrations/messaging)).
+- The document-push consumer `handleDocumentPush` skips shadow runs: when the resolved `transaction_record.is_shadow`, it logs `"Shadow audit; skipping document push"` and consumes the message, so a shadow run's classified documents are never filed into Encompass (see [Messaging](/integrations/messaging)).
 - `AusUpdateService.handleAusUpdate` checks `is_shadow` (or `additionalData.isShadowAudit`) and routes to `handleShadowAusUpdate` before any Encompass call.
 - Defense-in-depth `assertNotShadowLoan` throws `ShadowLoanLeakError` if a loan number carries the shadow marker on a path that would PATCH Encompass.
 - The stuck-audit recovery cron excludes shadow rows by design (see [Audit lifecycle](/integrations/audit-lifecycle)).

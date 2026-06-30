@@ -38,7 +38,7 @@ Run `db:migrate` against the target environment.
 </Step>
 </Steps>
 
-The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0179_audit_runs_tighten_not_null` at time of writing).
+The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0211_loa_1625_income_type_note_rate` at time of writing).
 
 <Warning>
 **The migration runner owns the outer transaction.** Do not add raw `BEGIN;` / `COMMIT;` inside a migration `.sql` — it broke atomicity in `0143`.
@@ -71,7 +71,9 @@ Because `drizzle-kit generate` re-derives SQL from the schema, a schema file tha
 | `fk-repoint.spec.ts` | `relations.ts` repoints match schema `foreignKeys` on both sides. |
 | `operator-check-drift.spec.ts` | The appraisal operator union (incl. `abs_less_than*`) matches the latest migration. |
 | `migration-0161-classification-split-modes.spec.ts` | The classification-mode CHECK set. |
-| `migration-0177-agent-platform.spec.ts`, `migration-0179-audit-runs-not-null.spec.ts` | The agent-platform and `audit_runs` NOT NULL migrations. |
+| `migration-0203-agent-platform.spec.ts`, `migration-0204-audit-runs-not-null.spec.ts` | The agent-platform and `audit_runs` NOT NULL migrations. |
+| `migration-0202-audit-runs-lender-anchor.spec.ts` | The `audit_runs` lender-anchor EXPAND migration. |
+| `migration-0201-asset-runs-loanless-runnum.spec.ts` | The `asset_runs` loanless `run_number` uniqueness. |
 | `result-readers.spec.ts` | `red_flag_results` reads use the triple `orderBy`. |
 
 <Note>

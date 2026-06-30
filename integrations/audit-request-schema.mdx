@@ -65,7 +65,10 @@ assembler will silently drop the field for SQS-delivered messages.
 </ParamField>
 <ParamField path="loanMetadata" type="loanMetadataSchema" required>
   Loan number, program, closing dates, ratios, citizenship, `lenderCode`, and other loan
-  fields (shared schema).
+  fields (shared schema). Recently gained two optional fields: `incomeType` (from
+  `CX.LOANLIGHT.INCOMETYPE`) and `noteRate` (note rate, percent), both surfaced on the audit
+  PDF's Loan Details card. The top-level `IntegrationAuditRequestSchema` contract is otherwise
+  unchanged.
 </ParamField>
 <ParamField path="documents[]" type="array (passthrough)">
   Optional document manifest. Each entry:

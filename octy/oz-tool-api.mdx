@@ -91,6 +91,21 @@ The registry groups tools into categories. The dataset id is the `[dataset]` pat
     | `red-flag-results` | `red_flag_results` | audit-run |
     | `audit-errors` | `audit_errors` | audit-run (newest first) |
   </Accordion>
+  <Accordion title="Appraisal Evaluation">
+    Appraisal evaluation is a **standalone lane** (`appraisalEvaluation`) that persists to `appraisal_runs` and its child tables, keyed by `audit_run_id`. A run may be **loanless**, and a revision shares its parent's `audit_run_id` (chained by `parent_run_id`), so these tools can return **more than one row** — correlate by `id` / `revision_number`. Start with `appraisal-runs`.
+
+    | dataset | `table` | scope / notes |
+    |---|---|---|
+    | `appraisal-runs` | `appraisal_runs` | audit-run; the revision chain (lifecycle/meta only). `status` is `pending\|running\|completed\|reviewed\|failed`. Start here. |
+    | `appraisal-extracted-data` | `appraisal_runs` | audit-run; the final `extracted_data` (`AppraisalData`) plus `difference_summary` vs the parent run |
+    | `appraisal-coverage` | `appraisal_runs` | audit-run; mandatory-field coverage (`coverage_result`, `field_status_map`) |
+    | `appraisal-compliance` | `appraisal_runs` | audit-run; rule outcomes (`compliance_results`) and `findings` — the core "what's wrong" |
+    | `appraisal-field-confidence` | `appraisal_runs` | audit-run; per-field `field_confidence_map` and `field_source_location_map` |
+    | `appraisal-enrichment` | `appraisal_runs` | audit-run; `enrichment_data` (ATTOM) and `rental_data` (Mashvisor, DSCR only) |
+    | `appraisal-corrections` | `appraisal_corrections` | via parent `run_id`; human field corrections (extraction-accuracy trail) |
+    | `appraisal-rule-overrides` | `appraisal_rule_overrides` | via parent `run_id`; manual rule-outcome overrides (the trail behind `compliance_results.overridden`) |
+    | `appraisal-ssr-documents` | `appraisal_ssr_documents` | via parent `run_id`; agency SSR sub-documents (Fannie/Freddie Submission Summary Reports) |
+  </Accordion>
   <Accordion title="Lender Configuration & Loan Documents / S3">
     | dataset | `table` | scope / params |
     |---|---|---|

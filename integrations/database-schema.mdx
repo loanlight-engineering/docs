@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **12 tables**. Migration `001_baseline_schema.sql` creates the original baseline; migrations 003 through 013 add the rest.
+The current schema has **15 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 019 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -31,9 +31,21 @@ The current schema has **12 tables**. Migration `001_baseline_schema.sql` create
 | `011_add_delivery_cancelled_after` | `transaction_state.delivery_cancelled_after` |
 | `012_create_lender_and_client_lender_id` | `lender`, `client.lender_id` |
 | `013_create_audit_delivery_log` | `audit_delivery_log` |
+| `014_add_workos_org_id_to_lender` | `lender.workos_org_id` |
+| `014_drop_client_token` | drops `client.client_token` |
+| `015_create_document_push_routing_config` | `document_push_routing_config`; `document_push_record.routing_config_version` + `routing_config_lender_version` |
+| `016_fix_credit_report_routing` | DML: fixes the active global routing rule for credit reports |
+| `017_seed_phase1_routing_doctypes` | DML: seeds the remaining EPC routing doc types into the active global config |
+| `018_create_materialized_split_record` | `materialized_split_record` |
+| `019_create_lender_feature` | `lender_feature` |
+| `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
-The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The six tables added by migrations 003–013 (`audit_details`, `transaction_document`, `document_push_record`, `epc_delivery_records`, `lender`, `audit_delivery_log`) are missing from it. Trust the schema, not the README.
+The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The nine tables added by migrations 003–019 (`audit_details`, `transaction_document`, `document_push_record`, `epc_delivery_records`, `lender`, `audit_delivery_log`, `document_push_routing_config`, `materialized_split_record`, `lender_feature`) are missing from it. Trust the schema, not the README.
+</Note>
+
+<Note>
+`zzzz_reapply_role_grants.sql` exists because `DbMigrate` runs every migration as the **app** user, while `db-init` set `ALTER DEFAULT PRIVILEGES` as the **master** user. Default privileges are keyed to the creating role, so tables created by the app user never inherit the read-role grants — a newly added table is invisible to `db_readonly` / `db_readwrite` until something re-grants it (this is how `lender_feature` first landed `permission denied` for `db_readwrite`). Re-grant lives only in this file; do not add per-table `GRANT`s to individual migrations.
 </Note>
 
 ## Tables
@@ -55,8 +67,11 @@ The EPC/lender client.
 |---|---|
 | `id` | PK |
 | `provider_client_id` | varchar(100), UNIQUE |
-| `client_token` | |
 | `lender_id` | FK → `lender` (added in 012) |
+
+<Note>
+The `client_token` column was **dropped** in `014_drop_client_token`. It was written on first-auth client creation but never read back (the live EPC auth path mints a fresh FusionAuth bearer from `provider_client_id`), and WorkOS tokens exceeded its `varchar(50)`, breaking client creation.
+</Note>
 
 ### transaction_record
 
@@ -141,7 +156,9 @@ Backs the document-push pipeline (see [Messaging](/integrations/messaging)). UNI
 | `id` | PK |
 | `transaction_record_id` | FK |
 | `document_id`, `s3_key`, `classification_type` | |
-| `state` | `pending` → `resource_created` → `uploaded` → `attached` → `completed` / `failed` |
+| `document_name`, `mime_type` | `mime_type` defaults `application/pdf` |
+| `state` | `CHECK` in `pending`, `resource_created`, `uploaded`, `attached`, `completed`, `failed` (default `pending`). `attached` is the terminal success state. |
+| `routing_config_version`, `routing_config_lender_version` | added in 015; stamp the governing global / per-lender routing-config version on each push (`routing_config_lender_version` is NULL when no lender override applied) |
 | `epc_resource_id`, container columns, error columns | |
 
 ### epc_delivery_records
@@ -169,8 +186,9 @@ Per-lender delivery behaviour (added in 012).
 | `id` | PK |
 | `name` | |
 | `audit_delivery_mode` | `single` / `split` / `pipeline`, default `single` |
+| `workos_org_id` | text, nullable; added in 014. The lender's WorkOS org id, sent as the `X-Requestor-ID` on the trusted internal audit-PDF data fetch. Unprovisioned lenders fall back to `provider_client_id`. |
 
-The `audit_delivery_mode` drives the single vs split delivery decision in [Audit lifecycle](/integrations/audit-lifecycle). Shadow audits resolve a lender by name via this table — see [Shadow audits](/integrations/shadow-audits).
+The `audit_delivery_mode` drives the single vs split delivery decision in [Audit lifecycle](/integrations/audit-lifecycle). Shadow audits resolve a lender by name via this table — see [Shadow audits](/integrations/shadow-audits). `workos_org_id` is also how the [routing-config admin API](/integrations/routing-config-admin) maps an `:orgId` path param to a `lender.id`.
 
 ### audit_delivery_log
 
@@ -182,6 +200,52 @@ Ledger for split deliveries (added in 013), written only after the Encompass PAT
 | `transaction_state_id` | |
 | `document_kind` | `aus_report` / `property` |
 | `property_address`, `file_name`, `s3_key`, `epc_resource_id`, `container_type` | |
+
+### document_push_routing_config
+
+Versioned EPC document-routing config (added in 015): a global default plus optional per-lender overrides. Authored and activated through the [routing-config admin API](/integrations/routing-config-admin); onboarding or editing a lender is pure DML against this table, never a schema migration.
+
+| Column | Notes |
+|---|---|
+| `id` | PK (uuid) |
+| `lender_id` | FK → `lender`; **NULL = global default scope**, non-NULL = per-lender override |
+| `version` | integer; unique within a scope |
+| `rules` | jsonb (`{ defaultContainer, rules: { <classificationType>: rule } }`) |
+| `is_active` | boolean, default `false` |
+| `created_at` | |
+
+Three partial unique indexes enforce the invariants: at most one active global row (`is_active AND lender_id IS NULL`), at most one active row per lender, and version uniqueness within each scope (global and per-lender versions advance independently).
+
+### materialized_split_record
+
+De-dup ledger for the split-document materializer (added in 018; LOA-1102). One row per materialized split, so re-audit and `forceReclassify` re-runs do not re-carve.
+
+| Column | Notes |
+|---|---|
+| `id` | PK (uuid) |
+| `loan_id`, `original_doc_id` | text |
+| `page_start`, `page_end` | integer, nullable (NULL = whole-doc) |
+| `content_hash` | SHA-256, nullable |
+| `classification_id` | text; threaded onto the `documents.materialized` return event |
+| `split_s3_key` | text |
+| `created_at` | |
+
+The de-dup key is a unique index over `(loan_id, original_doc_id, COALESCE(page_start,-1), COALESCE(page_end,-1), COALESCE(content_hash,''))`. It deliberately does **not** key on `classification_id` (which `forceReclassify` regenerates).
+
+### lender_feature
+
+Per-lender feature gates (added in 019; LOA-1336). Column names mirror octy's `lender_feature_flags`. The only key used today is `document_push`.
+
+| Column | Notes |
+|---|---|
+| `lender_id`, `feature_key` | composite **PK** |
+| `enabled` | boolean, default `false` |
+| `feature_value` | text, nullable |
+| `created_at`, `updated_at` | |
+
+<Note>
+Default OFF is the **absence of a row** — a lender is enabled for a feature only when a row exists with `enabled = true`. There is no backfill of existing lenders. The [document-push consumer](/integrations/messaging) checks `EpcClientRepository.isLenderFeatureEnabled(lenderId, "document_push")` before materializing.
+</Note>
 
 ## Access
 

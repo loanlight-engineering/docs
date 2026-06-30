@@ -72,9 +72,17 @@ applies a Phase 1 → Phase 2 barrier:
 Branch B is awaited first; on its failure the other two branches are drained
 (`Promise.allSettled`) before the error is rethrown, so straggler writes don't land after the
 run is failed. The barrier then awaits classification (Branch C) before any Phase 2 agent runs.
-At the settle barrier the stage fires the `loanlight.documents.classified` event (see
+The stage fires the `loanlight.documents.classified` event (see
 [Results access URLs](/integrations/results-access)) and resolves URLA data. See
 [Pre-audit stage](/pipeline/pre-audit-stage).
+
+<Note>
+`documents.classified` is now fired from a `finally` (`fireDocumentsClassifiedPublic`), not the
+phase-success hook (LOA-1565). The EPC document push depends only on classification, which
+settles during phase 0 before the LlamaCloud index step is awaited — so firing it in a `finally`
+means a LlamaCloud/index failure (which throws before the success hook runs) no longer drops the
+client's document push. The emit stays fire-and-forget and never throws.
+</Note>
 
 ## Phase 2/3 — audit agents
 

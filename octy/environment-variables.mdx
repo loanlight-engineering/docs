@@ -80,6 +80,36 @@ These three buckets form the fail-closed allowlist (`getAllowedBuckets()`); the 
 
 See [Classify and Split config](/octy/classify-split-config).
 
+## Integrations internal API (routing config)
+
+| Variable | Purpose |
+|---|---|
+| `INTEGRATIONS_INTERNAL_URL` | Base URL of the integrations service's internal API. Deployed value `https://integrations-internal.{zone}` (TLS in transit). |
+| `INTEGRATIONS_INTERNAL_API_KEY` | Shared secret sent as `x-internal-api-key` to integrations. In deployed envs both services read the same `LLIntegrations/INTERNAL_API_KEY` Secrets Manager secret. |
+
+A separate base URL and key from the loanlight-api pair — integrations is a distinct service. Calls also carry `x-acting-user-id` / `x-acting-user-email`. See [Routing config](/octy/routing-config).
+
+## GitHub App (GitOps)
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_ORG` | GitHub org the App is installed on. |
+| `GITHUB_REPOS` | Comma-separated allowlist of short repo names GitOps may read and deploy. |
+| `GITHUB_APP_ID` | GitHub App id. |
+| `GITHUB_APP_INSTALLATION_ID` | Installation id on the org. |
+| `GITHUB_APP_PRIVATE_KEY` | App private key — raw PEM, `\n`-escaped, or base64. From Secrets Manager (`Octy/GithubAppPrivateKey`) in deployed envs. |
+
+`isGithubConfigured()` is fail-soft: missing any of these renders GitOps empty and the API routes return **503**. See [GitOps](/octy/gitops).
+
+## Oz → Octy docs-refresh and Slack
+
+| Variable | Purpose |
+|---|---|
+| `OZ_TO_OCTY_API_KEY` | Static shared secret the nightly `octy-docs-refresh` skill sends as `Authorization: Bearer …` to `POST /api/oz/docs-refresh`. From Secrets Manager (`Octy/OzToOctyApiKey`). |
+| `SLACK_BOT_TOKEN` | Bot token (`chat:write`) for the best-effort Doc Refreshes Slack relay. Unset disables the relay; the DB record is still saved. From Secrets Manager (`Octy/SlackBotToken`). |
+
+See [Doc Refreshes](/octy/doc-refreshes).
+
 ## LlamaCloud
 
 | Variable | Purpose |

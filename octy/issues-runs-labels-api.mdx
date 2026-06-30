@@ -10,12 +10,14 @@ These routes manage Octy's own data model — issues (`octy_issues`), the runs l
 
 <ParamField path="POST /api/bug-reports" type="endpoint" />
 
-Creates an issue. This is the intake endpoint the loanlight-api portal (and Octy's own Loan Lookup bug-report panel) posts to.
+Creates an issue. This is the intake endpoint the loanlight-api portal (and Octy's own Lookup bug-report panel) posts to.
 
 <ParamField body="audit_run_id" type="uuid" required>
 The audit run the issue is about. Must reference an existing `audit_runs` row, else the route returns **422**.
 </ParamField>
-<ParamField body="loan_id" type="uuid" required />
+<ParamField body="loan_id" type="uuid | null">
+**Optional** (api migration 0197). Loanless audit runs — a standalone portal appraisal — carry no loan but always carry an `audit_run_id`. Must be a non-empty string or `null`.
+</ParamField>
 <ParamField body="description" type="string" required>
 The reported problem.
 </ParamField>
@@ -38,9 +40,9 @@ Paginated issue list with aggregates.
 |---|---|
 | `page`, `limit` | `limit` capped at 100 |
 | `status` / `intake_status` | comma list of intake statuses |
-| `agents` | comma `AGENT_TYPE_VALUES`, matched against `related_traces[].agent_type` via jsonb |
+| `agents` | comma agent types, each normalized to canonical `agent_type` + LangSmith aliases (`agentMatchValues`, catalog-tolerant of newly added agents), matched against `related_traces[].agent_type` via jsonb |
 | `labels` | comma label uuids |
-| `lenders` | comma lender uuids (matched on `loans.lender_id`) |
+| `lenders` | comma lender uuids, matched on `audit_runs.lender_id` (works for loanless issues, which have no loan) |
 | `q` | `loan_number` or `audit_run_id` ILIKE |
 | `sort` | `date_asc` or `date_desc` |
 </Expandable>

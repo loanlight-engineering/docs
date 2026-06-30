@@ -4,7 +4,7 @@ description: How a loan package becomes a completed audit, step by step.
 icon: route
 ---
 
-This page walks a loan package from ingestion to delivery. It follows the production EPC path; the Partner API path differs mainly in how files arrive and how Phase 1 is scoped (noted where relevant). For the orchestration internals, see [pipeline overview](/pipeline/overview).
+This page walks a loan package from ingestion to delivery. It follows the production EPC path; the Partner API path differs mainly in how files arrive and how phase 0 is scoped (noted where relevant). For the orchestration internals, see [pipeline overview](/pipeline/overview).
 
 <Steps>
   <Step title="Ingest">
@@ -21,34 +21,34 @@ This page walks a loan package from ingestion to delivery. It follows the produc
     `resolveLender(requestorId, name)` maps the Encompass client ID to a lender via `lender_auth_clients`, self-healing on a miss. The loan is upserted with `id = correlationId`. See [lender resolution](/integrations/lender-resolution).
   </Step>
 
-  <Step title="Create the audit run">
-    `computeMismoXmlHash` is stored on the run for reuse. `createAuditRun(correlationId, ...)` creates `audit_runs` with `id = correlationId`. If the run already exists in a terminal or fresh-processing state, the orchestrator emits a `DUPLICATE_AUDIT` event and returns early. See [lifecycle and dedup](/pipeline/lifecycle-and-dedup).
+  <Step title="Route and create the audit run">
+    `computeMismoXmlHash` is stored on the run for reuse. `AgentRouterService.route(...)` mints `audit_runs` with `id = correlationId`, applies the lender's entitlement filter, expands the dependency closure, and seeds the `agent_runs` ledger. If the run already exists in a terminal or fresh-processing state, the orchestrator emits a `DUPLICATE_AUDIT` event and returns early. See [lifecycle and dedup](/pipeline/lifecycle-and-dedup).
   </Step>
 
   <Step title="Register documents">
     Each downloaded file is registered into `loan_documents` (source identity, content hash, Encompass IDs). This is what change detection and classification key off.
   </Step>
 
-  <Step title="Phase 1 — pre-audit stage (three parallel branches)">
-    `PreAuditStageService.executePreAuditStage` runs three branches concurrently:
+  <Step title="Phase 0 — foundations (run by the orchestrator)">
+    `AgentOrchestrator.run` executes phase 0 concurrently:
 
-    - **Classification** — the Pre-Audit-Classification agent splits and classifies the PDFs into `document_classifications` (classify-split). Split happens inside the agent's `splitDocuments` node. See [pre-audit classification](/agents/pre-audit-classification).
-    - **URLA preprocessing** — the MISMO XML is extracted into structured per-borrower JSON (`urla_extraction_results`), reused via `mismo_xml_hash` when unchanged. See [URLA extraction](/agents/urla-extraction).
-    - **LlamaCloud indexing** — the documents are ingested into the loan's pipeline (`loans.llc_pipeline_id`). See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
+    - **`preAuditClassification`** — splits and classifies the PDFs into `document_classifications` (classify-split). Split happens inside the agent's `splitDocuments` node. See [pre-audit classification](/agents/pre-audit-classification).
+    - **`urlaExtraction`** — the MISMO XML is extracted into structured per-borrower JSON (`urla_extraction_results`), reused via `mismo_xml_hash` when unchanged. See [URLA extraction](/agents/urla-extraction).
+    - **`llama_index` infra step** — the raw documents are ingested into the loan's pipeline (`loans.llc_pipeline_id`). See [LlamaCloud retrieval](/subsystems/llamacloud-retrieval).
   </Step>
 
-  <Step title="Phase 1 → Phase 2 barrier">
-    The stage awaits the LlamaCloud branch first, then enforces the barrier on classification: no audit agent runs until classification has settled. URLA preprocessing is awaited at the end and its output (transformed PII fields and property addresses) is passed forward. See [pre-audit stage](/pipeline/pre-audit-stage).
+  <Step title="Phase 0 → Phase 1 barrier">
+    A ledger-observed barrier advances only when every phase-0 `agent_runs` row and the `llama_index` infra step are terminal, followed by a classify-readiness gate: no phase-1 agent runs until classification has settled. The phase-0 URLA handoff (transformed PII fields and property addresses) is rehydrated into the context for the phase-1 agents. See [pre-audit stage](/pipeline/pre-audit-stage).
   </Step>
 
-  <Step title="Phase 2/3 — audit agents">
-    `AuditAgentsExecutor.executeAuditAgents` runs the agents via `Promise.allSettled`. Phase 2 runs PII-Validation, Property-Data, and Credit-Evaluation in parallel; Phase 3 then runs Document-Health and Property-Red-Flags (which depend on Phase 2 output). Each agent writes its own result tables keyed by `audit_run_id`. See [audit agents stage](/pipeline/audit-agents-stage).
+  <Step title="Phases 1 and 2 — audit agents">
+    The orchestrator runs each phase's agents via `Promise.allSettled`, dispatched by identity. Phase 1 runs PII-Validation, Property-Data, and Credit-Evaluation; phase 2 then runs Document-Health and Property-Red-Flags (which depend on phase-1 output). Each agent writes its own result tables keyed by `audit_run_id`. See [audit agents stage](/pipeline/audit-agents-stage).
 
     Per-agent failures are recorded in `audit_errors` and never fail the run.
   </Step>
 
   <Step title="Complete and persist results">
-    `completeAuditRun(correlationId)` flips the run to `complete` (guarded against late-success races), and the loan status is best-effort set to `ready`. See [results](/pipeline/results).
+    `tryCompleteAuditRun(correlationId)` flips the run to `complete` once every ledger row is terminal (guarded against late-success races), and the loan status is best-effort set to `ready`. See [results](/pipeline/results).
   </Step>
 
   <Step title="Deliver">

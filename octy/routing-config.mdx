@@ -1,0 +1,78 @@
+---
+title: Routing config
+description: Editing the integrations EPC document-routing rule sets from Octy.
+icon: route
+---
+
+Routing Config at `/routing-config` is Octy's editor for the **EPC document-routing rule sets** — the configuration the integrations service uses to route Encompass documents. It is a thin, versioned config console over the integrations service's routing-config admin API; Octy stores none of this data itself. The page lives in `src/app/(app)/routing-config/` (`page.tsx` → `RoutingConfigPage.tsx`) and the typed API client in `src/lib/integrations-routing-client.ts`.
+
+<Warning>
+The integrations routing-config endpoint is **not live yet**. The Octy client and UI are built against the frozen LOA-1188 contract and unit-tested with mocked fetch. Treat this page as ready-but-waiting on the integrations service until that backend ships.
+</Warning>
+
+## Layout
+
+Two tabs, URL-driven (`?tab=`), with the selected lender (`?orgId=`) preserved across tab switches. The default tab is **Global**.
+
+| Tab | `?tab=` | Edits |
+|---|---|---|
+| Global | `global` | The org-wide default routing rule set. |
+| Per-Lender | `lenders` | A single lender's routing rule set, selected by `orgId`. |
+
+Each tab edits the rule set as JSON in a Monaco editor (`RoutingJsonEditor.tsx`) and shows the version history (`VersionHistory.tsx`). Edits go through server actions in `actions/` (`global.ts`, `lenders.ts`, shared error mapping in `shared.ts`).
+
+<Note>
+The Monaco editor is why the app's Content-Security-Policy allows `'unsafe-eval'`, `blob:`, `worker-src 'self' blob:`, and the `cdn.jsdelivr.net` script/style source. See [authentication and access control](/octy/auth-and-access).
+</Note>
+
+## The versioned config model
+
+Both the global and per-lender rule sets are **versioned and activatable** rather than edited in place. The lifecycle, exposed by the `routingConfig` client, is the same on both tabs:
+
+<Steps>
+<Step title="Read the active config">
+`global.get()` / `lenders.get(orgId)` returns the current rule set. The per-lender read accepts `includeGlobal` (fold in the global defaults) and `resolve` (return the effective merged config) options.
+</Step>
+<Step title="Create a new version">
+`createVersion(payload, { activateOnCreate })` posts the edited rule set as a new version. With `activateOnCreate: true` the new version goes live immediately.
+</Step>
+<Step title="Activate or deactivate">
+`activateVersion(version)` promotes a prior version; `deactivate()` turns the rule set off (falling back to the global default, for a lender).
+</Step>
+</Steps>
+
+These map to the integrations service's admin API under the `/integrations/routing-config` prefix:
+
+| Client call | Integrations endpoint |
+|---|---|
+| `global.get()` | `GET /integrations/routing-config/global` |
+| `global.createVersion()` | `POST /integrations/routing-config/global/versions` |
+| `global.activateVersion(v)` | `POST /integrations/routing-config/global/versions/{v}/activate` |
+| `global.deactivate()` | `POST /integrations/routing-config/global/deactivate` |
+| `lenders.list()` | `GET /integrations/routing-config/lenders` |
+| `lenders.get(orgId)` | `GET /integrations/routing-config/lenders/{orgId}` |
+| `lenders.createVersion(orgId)` | `POST /integrations/routing-config/lenders/{orgId}/versions` |
+| `lenders.activateVersion(orgId, v)` | `POST /integrations/routing-config/lenders/{orgId}/versions/{v}/activate` |
+| `lenders.deactivate(orgId)` | `POST /integrations/routing-config/lenders/{orgId}/deactivate` |
+
+## How Octy reaches integrations
+
+The client is a close cousin of the loanlight-api client, but points at a **separate service** over its own private internal route (`src/lib/integrations-routing-client.ts`). See [environment variables](/octy/environment-variables):
+
+| Variable | Purpose |
+|---|---|
+| `INTEGRATIONS_INTERNAL_URL` | Base URL of the integrations internal API. Deployed value `https://integrations-internal.{zone}` (TLS in transit). |
+| `INTEGRATIONS_INTERNAL_API_KEY` | Shared secret sent as `x-internal-api-key`. In deployed envs both services read the same `LLIntegrations/INTERNAL_API_KEY` Secrets Manager secret. |
+
+Every call also carries the acting WorkOS user for the integrations audit trail — `x-acting-user-id` (WorkOS user id) and `x-acting-user-email` — and uses a 120-second timeout. Non-2xx responses surface as `ApiClientError`; `actions/shared.ts` maps the contract's **401 / 400 / 404 / 409** statuses to UI messages, and keeps 401s generic so the internal key is never echoed back to the browser.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+`INTEGRATIONS_INTERNAL_URL` and the shared key.
+</Card>
+<Card title="Authentication and access control" href="/octy/auth-and-access" icon="lock">
+The CSP that lets the Monaco editor load.
+</Card>
+</Columns>

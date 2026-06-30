@@ -59,7 +59,11 @@ Other columns: `document_name`, `declared_total_pages`, `actual_pages`, `message
 <Tab title="Signatures">
 **`doc_signature_verification_results`** (`signature-verification.ts`). One row per document per audit run. PK `id`, `audit_run_id` (NOT NULL), `document_type`, `document_name`, `llama_cloud_file_id`, `status` (`all_signed | partially_signed | unsigned | verification_failed`), `message`, `checked_pages` int[], `signed_pages` int[], `created_at`.
 
-**`doc_signature_verification_evidence`**: per-page vision-LLM verdict. PK `id`, `result_id` → results (cascade), `page_number` (NOT NULL), `has_signature` bool (NOT NULL), `confidence` numeric(3,2), `reasoning`, `created_at`.
+**`doc_signature_verification_evidence`**: per-page vision-LLM verdict. PK `id`, `result_id` → results (cascade), `page_number` (NOT NULL), `has_signature` bool (NOT NULL), `confidence` numeric(3,2), `reasoning`, `verification_failed` bool (default `false`), `created_at`.
+
+<Note>
+`verification_failed` (migration `0200`) distinguishes a failed vision call from a genuine "no signature on this page" reading. A failed call writes `has_signature = false`, `confidence = 0`, `verification_failed = true`; the result row then reports `status` `verification_failed`.
+</Note>
 </Tab>
 </Tabs>
 

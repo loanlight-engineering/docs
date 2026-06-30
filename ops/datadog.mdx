@@ -29,6 +29,17 @@ logs surfaced under `service:llapi`, so its log panels query
 queries.
 </Warning>
 
+### Log status and levels
+
+loanlight-api logs reach Datadog through the CloudWatch Lambda **forwarder** (`source:cloudwatch`), which bypasses Datadog's built-in pino pipeline — so pino's numeric `level` (50) was never mapped to a log status and every backend 500 surfaced as `status:info`, invisible to `status:error` searches and monitors. Two fixes (LOA-1656, #2551) corrected this:
+
+- The pino logger config (`app.module.ts`, `loggerConfig.pinoHttp.formatters.level`) now emits a string `status` (Datadog's reserved log-status attribute) alongside the numeric `level` (preserved for existing `custom.level` queries).
+- The global exception filter (`common/filters/http-exception.filter.ts`) logs **4xx as `warn` and 5xx as `error`**, ships the exception `stack` as a structured field (object-first log call), and strips query-string values from the `req` serializer (PII the `redact` list cannot scrub inside a URL).
+
+<Tip>
+Query real server errors with `status:error` (5xx). Routine 401/404/422 client errors land under `status:warn`, so they no longer bury 500s.
+</Tip>
+
 ### Other registered services
 
 APM `DD_SERVICE` names also exist for the API Gateway authorizer lambdas and the

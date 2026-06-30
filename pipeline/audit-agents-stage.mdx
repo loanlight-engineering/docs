@@ -1,94 +1,72 @@
 ---
 title: Audit agents stage
-description: "Phase 2/3: agent selection, execution order, and error handling."
+description: "Phases 1 and 2: agent membership, dispatch by identity, and error handling."
 icon: boxes
 ---
 
-Phase 2/3 is owned by `AuditAgentsExecutor.executeAuditAgents` (`integration-events/services/audit-agents-executor.service.ts`). It runs the audit agents in two parallel batches and records per-agent failures without failing the run.
+After [phase 0](/pipeline/pre-audit-stage), the [agent orchestrator](/pipeline/overview#router-then-orchestrator) runs the remaining phases of the router's `ExecutionPlan`. Each phase's agents fire concurrently via `Promise.allSettled` and are dispatched **by identity** through `AgentDispatcher` (`switch(agentType)`). A ledger-observed barrier separates the phases.
 
-## Agent selection
+<Note>
+The legacy `AuditAgentsExecutor.executeAuditAgents` no longer drives execution. `AuditAgentsExecutor` survives as a helper (for example `resolveLoanProgram`); the per-agent invocation that used to live in it now lives in the dispatcher's per-identity handlers.
+</Note>
 
-When `agents` is empty or undefined, all agents run. Otherwise the executor checks membership against the canonical agent name strings:
+## Agent membership
 
-| Flag | Agent type string | Agent page |
-|---|---|---|
-| `shouldRunPii` | `piiValidation` | [PII validation](/agents/pii-validation) |
-| `shouldRunDocHealth` | `documentHealth` | [Document health](/agents/document-health) |
-| `shouldRunUrlaExtraction` | `urlaExtraction` | [URLA extraction](/agents/urla-extraction) |
-| `shouldRunPropertyData` | `propertyData` | [Property data](/agents/property-data) |
-| `shouldRunRedFlags` | `redFlags` | [Property red flags](/agents/property-red-flags) |
-| `shouldRunCreditEvaluation` | `creditEvaluation` | [Credit evaluation](/agents/credit-evaluation) |
+Membership and dependencies come from `AGENT_PIPELINE` (`langgraph/agents/agent-pipeline.ts`), filtered to the lender's entitled set by the router.
 
-The `agents` allow-list comes from the Partner DTO, the EPC router flip, or is left undefined to run all. See [Router and entitlements](/agents/router-and-entitlements) for how the flag-gated router populates this.
+| Phase | Agent type | Depends on | Agent page |
+|---|---|---|---|
+| 1 | `piiValidation` | `preAuditClassification`, `urlaExtraction` | [PII validation](/agents/pii-validation) |
+| 1 | `propertyData` | `preAuditClassification`, `urlaExtraction` | [Property data](/agents/property-data) |
+| 1 | `creditEvaluation` | `preAuditClassification`, `urlaExtraction` | [Credit evaluation](/agents/credit-evaluation) |
+| 2 | `documentHealth` | `preAuditClassification`, `propertyData`, `urlaExtraction` | [Document health](/agents/document-health) |
+| 2 | `redFlags` | `propertyData`, `urlaExtraction` | [Property red flags](/agents/property-red-flags) |
+| standalone | `appraisalEvaluation` | — | [Appraisal evaluation](/agents/appraisal-evaluation) |
 
-## Setup
+`piiValidation`, `propertyData`, and `documentHealth` carry `requiresIndexing` (they read the LlamaCloud pipeline). `creditEvaluation` and `redFlags` do not — credit loads S3 binary refs, red flags consume the property output.
 
-Before launching agents, the executor:
+## Dispatch and context handoff
 
-- Generates a shared synthetic `documentId = uuidv4()` passed to the graphs.
-- Resolves and persists the expected closing date: `resolveExpectedClosingDate({ override, estimated, scheduled, closing })` from `loans.{estimated_closing_date, loan_scheduled_closing_date, closing_date}`, written to `audit_runs.expected_closing_date`.
-- Re-resolves the canonical loan program via `lenderConfigService.resolveProgram(...)`.
-- Parses `bottomRatioPercent` and normalizes citizenship countries.
-- Reuses `urlaPreprocessingData` (`loanContext`, `urlaExtractionResultData`) from Phase 1 when present; on targeted or manual paths it runs URLA preprocessing inline as a fallback.
+For each in-plan agent the orchestrator calls `runAgent`, which dispatches by identity. Before phase 1 runs, the orchestrator rehydrates the phase-0 URLA handoff into the execution context so the phase-1 agents reuse it instead of re-extracting:
 
-## Phase 2 (parallel via `Promise.allSettled`)
+- `piiValidation` receives `fieldsOverride` from the URLA `transformedPiiFields` (falls back to LLM extraction if absent).
+- `propertyData` receives `addressOverrides` and the primary borrower's housing-expense type (which feeds the refinance ATTOM gate).
+- The dispatcher resolves and persists the expected closing date via `resolveExpectedClosingDate({ override, estimated, scheduled, closing })`, written to `audit_runs.expected_closing_date`.
 
-Runs `piiValidation`, `propertyData`, and `creditEvaluation`.
+Between phase 1 and phase 2, the property output enriches the shared context (for example `title_held_in_trust` from `propertyData.consolidatedSubject.ownership.trustIndicator`) before `documentHealth` and `redFlags` read it.
 
-<AccordionGroup>
-  <Accordion title="piiValidation">
-    `createPiiValidationGraphWithSharedAuditRun(...)` with `fieldsOverride = urlaExtractionResultData?.transformedPiiFields`. Falls back to LLM extraction if the override is absent.
-  </Accordion>
-  <Accordion title="propertyData">
-    `createPropertyDataGraphWithSharedAuditRun(...)` with `addressOverrides` and `borrowerHousingExpenseType` (which feeds the refinance ATTOM gate, primary borrower only).
-  </Accordion>
-  <Accordion title="creditEvaluation">
-    Built via `buildCreditEvaluationPhase2Promise(...)`. Income is parsed from the primary borrower's `currentEmployment.monthlyIncome.total`; the borrower address, name, and SSN-last4 are built via `buildCreditLoanContext`. See gating below.
-  </Accordion>
-</AccordionGroup>
+### Unmet dependencies
 
-After Phase 2, the executor enriches `loanContext.title_held_in_trust` from `propertyData.consolidatedSubject.ownership.trustIndicator` before Phase 3.
-
-## Phase 3 (parallel via `Promise.allSettled`)
-
-Runs the agents that depend on Phase 2 output.
-
-<AccordionGroup>
-  <Accordion title="documentHealth">
-    `createDocumentHealthGraphWithSharedAuditRun(...)` receives the enriched `loanContext`, the resolved expected closing date, and the **raw** `loanProgram` option (plus `obDocType`, `nonQmDocType`, `loanType`) — it resolves the program internally. Property red flags, by contrast, is passed the already-`resolvedLoanProgram`.
-  </Accordion>
-  <Accordion title="redFlags">
-    `runPropertyRedFlags(loanId, auditRunId, propertyData.consolidatedSubject, propertyData.consolidatedBorrower, primaryBorrowerUrla, lenderCode, allBorrowerNames, resolvedLoanProgram)` — depends on the consolidated property output from Phase 2.
-  </Accordion>
-</AccordionGroup>
+A phase advances only when the prior phase's `agent_runs` rows are terminal, but a dependency can still be `failed`. The channel decides per agent: an agent listed in `ctx.skipWhenDepsUnmet` whose in-plan predecessor did not reach `complete` is set `skipped` (for example LOS `redFlags` when `propertyData` failed); an agent not in the list runs **degraded** on undefined inputs (the EPC/Partner default for `documentHealth`/`redFlags`).
 
 ## Credit gating and fan-out
 
-`buildCreditEvaluationPhase2Promise(...)` returns `undefined` (skip credit) when any of these hold:
+The `creditEvaluation` handler skips work (no graph run) when:
 
-- `hasClassifiedCreditReportForLoan(loanId)` is false. This query joins `document_classifications` → `loan_documents` → `classify_split_runs`, requiring `classification_type IN CREDIT_REPORT_CLASSIFICATION_TYPES`, `classification_status = "classified"`, `is_dry_run = false`, `deleted_at IS NULL`, and `superseded_by IS NULL`.
+- `hasClassifiedCreditReportForLoan(loanId)` is false. This joins `document_classifications` → `loan_documents` → `classify_split_runs`, requiring `classification_type IN CREDIT_REPORT_CLASSIFICATION_TYPES`, `classification_status = "classified"`, `is_dry_run = false`, `deleted_at IS NULL`, and `superseded_by IS NULL`.
 - `creditS3Bucket` is missing.
-- `getCreditEvaluationLoanContext(loanId, lenderCode)` returns null (fails closed when `loans.lender_id` is null).
+- The credit loan context resolves to null (fails closed when `loans.lender_id` is null).
 
 <Warning>
 `CREDIT_REPORT_CLASSIFICATION_TYPES` is a three-value allowlist (`integration-events/constants/credit-report-classifications.ts`): `credit_report`, `credit_report_trimerge`, `credit_report_single`. A strict `eq("credit_report")` would silently drop most real credit reports in production.
 </Warning>
 
-When credit runs, `downloadDocumentByLoanIdAndClassification(...)` returns a settled array of per-document results. Each fulfilled document spawns a `createCreditEvaluationGraphWithSharedAuditRun(...)` call; graph rejections are collected into an `AggregateError` with `auditedCreditDocumentId` on each `cause`. Per-document failures write terminal `credit_runs` rows via `writeFailedSharedAuditCreditRun(...)`. Credit runs on shadow audits the same as any other agent.
+When credit runs, each downloaded document spawns a `createCreditEvaluationGraphWithSharedAuditRun(...)` call over the loaded docs (`Promise.allSettled`). Graph rejections are collected into an `AggregateError` with `auditedCreditDocumentId` on each `cause`; per-document failures write terminal `credit_runs` rows via `writeFailedSharedAuditCreditRun(...)`. S3-partial download failures write a terminal `credit_runs` row per rejected doc (no `audit_errors`), and the survivors continue to graph evaluation. Credit runs on shadow audits the same as any other agent.
+
+## The standalone lane
+
+After all phases settle, the orchestrator runs the standalone lane (`plan.standalone`) with no barrier. `appraisalEvaluation` is a `queue_worker` agent: the dispatcher enqueues a BullMQ job and the background worker owns its own `agent_runs` lifecycle (`processing → terminal`) and drives `tryCompleteAuditRun`.
 
 ## Per-agent error handling
 
-For each settled `[agentName, result]`:
+The dispatcher owns each agent's status and error recording:
 
-- `ledgerObserver.recordSettled(auditRunId, agentName, result)` (flag-gated, best-effort; never changes selection). See [Runs ledger](/agents/runs-ledger).
-- `fulfilled` → log success.
-- `rejected` with an `AggregateError` (credit's per-document fan-out) → one `saveAuditError` row per inner error, carrying `auditedCreditDocumentId` from `err.cause`.
-- Other `rejected` → a single `saveAuditError({ auditRunId, agentName, errorType: classifyAuditError(reason, EXECUTING_AGENTS), errorMessage, errorDetails })`.
+- An agent's `agent_runs` row transitions `pending → processing → complete | failed` inside the dispatcher; the orchestrator never writes those.
+- `dispatch()` never throws for a per-agent failure — it records the failed `agent_runs` row and the `audit_errors` row itself and tolerates the failure.
+- A credit `AggregateError` produces one `audit_errors` row per inner error, carrying `auditedCreditDocumentId` from `err.cause`.
 
 <Warning>
-Per-agent rejections do not fail the audit. The run still calls `completeAuditRun`; failures are recorded only in `audit_errors`. `failAuditRun` is reserved for infrastructure failures (XML download, classification, S3 retrieval, lender resolution) caught in the outer orchestrator. The canonical ADR is `docs/adr/ADR-audit-pipeline-error-semantics.md`.
+Per-agent failures do not fail the audit. The run still reaches `complete` via `tryCompleteAuditRun`; failures are recorded only in `audit_errors`. `failAuditRun` is reserved for infrastructure failures that escape `AgentOrchestrator.run` — the `llama_index` infra step, a phase-barrier timeout, config drift, or the fatal URLA-extraction deadline (#2412). The canonical ADR is `docs/adr/ADR-audit-pipeline-error-semantics.md`.
 </Warning>
 
-## Options reference
-
-`ExecuteAuditAgentsOptions` (`integration-orchestration.types.ts`): `auditRunId, loanId, pipelineId, mismoXml, creditS3Bucket?, estimatedClosingDate?, loanScheduledClosingDate?, closingDate?, lenderCode?, agents?, loanProgram?, obDocType?, nonQmDocType?, loanType?, bottomRatioPercent?, borrowerCountryOfCitizenship?, coborrowerCountryOfCitizenship?, urlaPreprocessingData?`.
+See [Runs ledger](/agents/runs-ledger) for the `agent_runs` status model and [Router and entitlements](/agents/router-and-entitlements) for how the plan is resolved.

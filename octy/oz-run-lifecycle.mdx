@@ -59,7 +59,7 @@ An Oz run is one autonomous investigation launched for an issue. It starts when 
 4. **LangSmith access** — verify the CLI, look for project `loanlight-aus`, retry with backoff; embeds the LangSmith CLI reference. `LANGCHAIN_API_KEY` is pre-set in the agent runtime.
 5. **Datadog access** — only when both Datadog keys are present; env-aware (`env:int` / `env:prod`), framed as a last resort.
 6. **LangChain / LangSmith documentation** — the `docs-langchain` MCP server.
-7. **LoanLight system architecture** — a large orientation section that explicitly says the code wins. {/* TODO: verify — this set of docs is intended to eventually replace this inline architecture section via the Mintlify MCP. */}
+7. **LoanLight system architecture** — a large, still-inline orientation section (`systemArchitectureSection` in `src/lib/oz-skills/index.ts`) that explicitly says the code wins. It now embeds the full agent-platform model (catalog / router / entitlements / `agent_runs` ledger orchestrator), the phased audit pipeline plus the standalone appraisal lane, PII retrieval scoping, the S3 layouts, LlamaCloud retrieval, and DB-migration rules. These docs are intended to eventually replace it, but the Mintlify docs MCP is **not** wired into Oz runs today — only `docs-langchain` (and optionally Datadog) are attached.
 8. **Authentication** — embeds the live access token, run id, and refresh token, and documents the 408 refresh flow.
 9. **Available data tools** — generated from `OZ_TOOL_REGISTRY`; notes responses are `{ table, data[] }` capped at 200 rows with automatic scoping.
 10. **Completion tool** — the [completion contract](/octy/completion-webhook).

@@ -10,6 +10,10 @@ The partner results viewer is a separate UI under `/results/audits/[auditId]` th
 
 `/results/audits/[auditId]` with sub-routes `1003-check`, `credit`, `data-consistency`, `document-health`, `property-data`, and `exchange`. It renders with `@loanlight-engineering/shared-ui` `Sidebar`/`SidebarLayout` and the "audit-catalyst" theme.
 
+<Note>
+The `credit` page now renders the shared `CreditLiabilitiesView` component (the same view used by the staff `credit-results` page), so partner and staff credit results stay in sync. Routes are unchanged.
+</Note>
+
 ## Single authorization point
 
 The layout `results/audits/[auditId]/layout.tsx` is the only authorization point. It authorizes via the `ll_results_view` cookie (a JWT verified by `verifyViewToken`, which must match the requested `auditId`) or mock mode.

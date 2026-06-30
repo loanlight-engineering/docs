@@ -10,23 +10,23 @@ The page lives in `src/app/(app)/bug-reports/page.tsx` plus its panel components
 
 ## The issue list
 
-The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue references an `audit_run_id` and a `loan_id`, and carries aggregate counts (run count, latest run status, PR count, comment count) plus its attached labels.
+The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue references an `audit_run_id` (always present) and a `loan_id` (optional — loanless portal-appraisal runs have none), and carries aggregate counts (run count, latest run status, PR count, comment count) plus its attached labels.
 
 Filters are URL-driven, so a filtered view is shareable:
 
 | Filter | Query param | Notes |
 |---|---|---|
 | Status | `status` / `intake_status` | Comma list. Default shows `new,acknowledged,delegated,ai_complete,in_review` (hides `closed`/`cancelled`). |
-| Agent | `agents` | Comma list of `AGENT_TYPE_VALUES`, matched against `related_traces[].agent_type`. |
+| Agent | `agents` | Comma list of agent types, each normalized to its canonical `agent_type` + LangSmith aliases (catalog-tolerant), matched against `related_traces[].agent_type`. |
 | Labels | `labels` | Comma list of label UUIDs. |
-| Lender | `lenders` | Comma list of lender UUIDs (resolved against `loans.lender_id`). |
+| Lender | `lenders` | Comma list of lender UUIDs (resolved against `audit_runs.lender_id`). |
 | Search | `q` | ILIKE over loan number or `audit_run_id`. |
 | Sort | `sort` | `date_asc` or `date_desc`. |
 
 The default page size is 20 (options 10/20/50/100). The `StatusChangerBadge` lets you change an issue's `intake_status` inline; it PATCHes `/api/octy-issues/[id]`.
 
 <Info>
-Issues are usually created upstream from the loanlight-api portal (or from Octy's own Loan Lookup BugReportPanel) via `POST /api/bug-reports`. See [Issues, runs, labels API](/octy/issues-runs-labels-api) for the intake contract.
+Issues are usually created upstream from the loanlight-api portal (or from Octy's own Lookup BugReportPanel) via `POST /api/bug-reports`. See [Issues, runs, labels API](/octy/issues-runs-labels-api) for the intake contract.
 </Info>
 
 ## The issue detail panel

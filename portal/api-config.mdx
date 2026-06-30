@@ -46,8 +46,11 @@ Controller: `portal-appraiser-deny-list/portal-appraiser-deny-list.controller.ts
 | `GET /api/v1/portal/appraiser-deny-list` | auth | List entries |
 | `POST /api/v1/portal/appraiser-deny-list` | client_user | Add an entry (HTTP 201) |
 | `POST /api/v1/portal/appraiser-deny-list/bulk` | client_user | Bulk add (HTTP 201) |
+| `POST /api/v1/portal/appraiser-deny-list/bulk-delete` | client_user | Bulk remove (`BulkDeleteDenyEntriesDto`, HTTP 200) |
 | `PUT /api/v1/portal/appraiser-deny-list/:id` | client_user | Update |
 | `DELETE /api/v1/portal/appraiser-deny-list/:id` | client_user | Remove |
+
+`bulk-delete` is a `POST` (not `DELETE`) because the id set travels in a JSON body. `BulkDeleteDenyEntriesDto` carries `ids` (1–500 UUIDs). CSV upload for bulk add is parsed **client-side** (`lib/parse-appraiser-csv.ts`, appraiser-only) before the rows reach `/bulk`.
 
 ## portal-global-appraiser-deny-list
 
@@ -58,6 +61,7 @@ Controller: `portal-global-appraiser-deny-list/portal-global-appraiser-deny-list
 | `GET /api/v1/portal/global-appraiser-deny-list` | List global entries |
 | `POST /api/v1/portal/global-appraiser-deny-list` | Add (HTTP 201) |
 | `POST /api/v1/portal/global-appraiser-deny-list/bulk` | Bulk add (HTTP 201) |
+| `POST /api/v1/portal/global-appraiser-deny-list/bulk-delete` | Bulk remove (`BulkDeleteDenyEntriesDto`, HTTP 200) |
 | `PUT /api/v1/portal/global-appraiser-deny-list/:id` | Update |
 | `DELETE /api/v1/portal/global-appraiser-deny-list/:id` | Remove |
 
@@ -78,6 +82,33 @@ Uploads use Fastify `req.parts()` multipart parsing (the API runs on the Fastify
 | `DELETE /api/v1/portal/lender-guideline-documents/:id` | client_admin | Delete |
 
 Loan programs link to these documents through the program-document endpoints on `portal-lenders` and `portal-loan-programs`; see [lenders, users, and programs](/portal/api-lenders-users-programs).
+
+## portal-routing-config
+
+Controller: `portal-routing-config/portal-routing-config.controller.ts` at `api/v1/portal/routing-config`. Class-level `@UseGuards(PortalAuthGuard, PortalThrottlerGuard)`, throttle 100/min. This module is unusual: the loanlight-api acts as an api-as-BFF, proxying **outward** to the integrations service's routing-config admin API rather than serving the portal app. See [routing-config admin API](/integrations/routing-config-admin) for the integrations side.
+
+It exposes three trees of the same author/activate/deactivate shape:
+
+| Tree | Routes | Access |
+|---|---|---|
+| Global | `GET /global`, `POST /global/versions`, `POST /global/versions/:version/activate`, `POST /global/deactivate` | `super_admin` + `requireInternal` |
+| Per-lender (any org) | `GET /lenders`, `GET /lenders/:orgId`, `POST /lenders/:orgId/versions`, `POST /lenders/:orgId/versions/:version/activate`, `POST /lenders/:orgId/deactivate` | `super_admin` + `requireInternal` |
+| Self-serve | `GET /my`, `POST /my/versions`, `POST /my/versions/:version/activate`, `POST /my/deactivate` | `client_admin`, `super_admin` |
+
+The self-serve `my/*` tree forces the caller's own `workos_organization_id` — a lender can only read and author its own routing config. An unprovisioned lender gets `409 lender_not_provisioned`.
+
+### Upstream call and error mapping
+
+The service calls integrations over `INTEGRATIONS_INTERNAL_URL` with an `x-internal-api-key` (`INTEGRATIONS_INTERNAL_API_KEY`) plus `x-acting-user-id` / `x-acting-user-email` headers — no WorkOS bearer is forwarded. Upstream responses are mapped to stable portal codes:
+
+| Upstream | Portal response |
+|---|---|
+| `400` | `400` (structured `{ error, message, hint }`) |
+| `404` | `404` |
+| `409` | `409` (structured) |
+| `401` (bad shared key) | `502 routing_config_unavailable` (logged; never leaked) |
+| timeout | `504 routing_config_timeout` |
+| other `5xx` / transport | `502 routing_config_unavailable` |
 
 ## Related pages
 

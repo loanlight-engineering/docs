@@ -24,6 +24,7 @@ Multiple identity providers coexist. WorkOS AuthKit handles human login and `sk_
 Human login goes through WorkOS AuthKit, wrapped by `@loanlight-engineering/shared-auth`. The portal middleware calls `withAuth(request)`; the server then hydrates the user by calling `GET /api/v1/portal/auth/me` with the WorkOS access token, which resolves the `portal_users` row and lender.
 
 - The backend verifies WorkOS tokens in `WorkOSTokenVerifier.verify(token)` (RS256 against the WorkOS JWKS), reading `sub` → `workosUserId` and `sid` → `workosSessionId`. Unknown users are JIT-provisioned from their WorkOS org membership.
+- The API Gateway authorizer validates tokens against the per-environment WorkOS issuer and audience from CDK context. In prod the issuer is the custom domain `https://signin.loanlight.com` (audience `client_01KPE6RHK5E8G00FTAR43SSA1X`); pointing it at the wrong issuer makes the gateway reject prod tokens with "Unknown issuer" (#2473). See [environments](/overview/environments).
 - Octy reuses the same `shared-auth` wrapper and additionally gates every protected route on an `@loanlight.com` email domain. A local-auth bypass (`USE_LOCAL_AUTH=true`, never in prod) returns a hardcoded `super_admin`.
 - The four portal roles are `super_admin`, `client_admin`, `client_user`, and `read_only`. `super_admin` requires an internal lender.
 
@@ -32,6 +33,16 @@ See [portal auth and roles](/portal/auth-and-roles) and [impersonation](/portal/
 ## Partner `sk_*` keys
 
 Partner API requests carry a WorkOS `sk_*` API key. An API Gateway authorizer lambda (`@loanlight-engineering/shared-lambda-auth`, Datadog service `api-auth`) validates the key on every `/api/v1/partner/*` request and sets `X-Requestor-ID` to the org id. The legacy `partner.ts` authorizer also hashes `x-api-key` with SHA-256 and looks it up in `partner_api_keys`, but WorkOS `sk_*` keys short-circuit to a deprecation response. See [partner authentication](/partner-api/authentication).
+
+## WorkOS Connect M2M (per-lender EPC credentials)
+
+`@loanlight-engineering/shared-api-auth` now exposes WorkOS **Connect → M2M** methods on `ApiAuthService` — the foundation for the lender-onboarding "Create credentials for EPC" flow (loanlight-shared #88). These are distinct from `sk_*` org API keys: a Connect M2M Application is an org-scoped record with a `client_id` plus rotatable Client Secrets, and M2M access tokens carry an `org_id` claim for tenant isolation.
+
+The methods are `ensureM2MApplication(orgId, name)` (find-or-create, `application_type: "m2m"`), `createClientSecret(appId)` (returns the plaintext secret once), `listClientSecrets(appId)` (metadata only, never the plaintext), and `deleteClientSecret(appId, secretId)`. The `@workos-inc/node` SDK has no Connect surface, so these call the generic `workos.get/post/delete`.
+
+<Note>
+This is an additive foundation in `shared-api-auth`. As of this window it is not yet consumed by `loanlight-api`, so no live auth surface mints per-lender M2M credentials yet.
+</Note>
 
 ## OCTY_INTERNAL_API_KEY
 

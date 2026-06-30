@@ -1,80 +1,90 @@
 ---
 title: Agent platform overview
-description: The DB-backed agent catalog, router, run ledger, and reconciler, and the phased rollout.
+description: The agent catalog, code-defined pipeline, router, universal orchestrator, run ledger, and per-lender entitlements.
 icon: layout-grid
 ---
 
-The agent platform is the infrastructure that decides which LangGraph agents an audit should run, records what each agent did, and drives the container audit run to completion. It is intentionally separate from the agents' business logic: this layer is about registration, routing, gating, sequencing, recording, and reconciliation.
+The agent platform is the infrastructure that decides which agents an audit should run, runs them in dependency order, records what each did, and drives the audit run to completion. It is separate from the agents' business logic: this layer is registration, routing, gating, sequencing, execution, and recording.
 
-It has four moving parts: a **DB-backed catalog** of agents and their dependencies, a **pure-functional router** that turns a request into a plan, an additive **`agent_runs` ledger** that records one row per (audit run, agent), and a **reconciler** that advances ledger rows and completes the container.
+Its organizing principle is an **audit-centric primitive**. `audit_runs` is now lender-anchored and loan-optional, so every channel — EPC, LOS, partner, portal — drives one universal, **channel-blind** orchestrator over the same primitive, with a per-lender agent catalog and entitlements deciding what runs.
 
-<Warning>
-The router does **not** yet own agent selection or execution by default. In production the platform runs in **observer mode**: the legacy fan-out still decides what runs ("run all"), and the platform only backfills ledger rows. Router ownership is gated by per-lender feature flags that default OFF. Do not document the router as selecting agents in production unless a lender flag is on. See [Feature flags and rollout](/agents/feature-flags-and-rollout).
-</Warning>
-
-## The four parts
+## The pieces
 
 <Columns cols={2}>
-  <Card title="Catalog and DAG" icon="table" href="/agents/catalog-and-dependencies">
-    The `agents` table (keyed by `agent_type` string) plus the `agent_dependencies` required-edge DAG. Loaded once at boot.
+  <Card title="Catalog and pipeline" icon="table" href="/agents/catalog-and-dependencies">
+    The identity-only `agents` table plus the `AGENT_PIPELINE` code map (phase, `dependsOn`, runtime, `requiresIndexing`), joined at boot by `AgentRegistryService`.
   </Card>
   <Card title="Router and entitlements" icon="route" href="/agents/router-and-entitlements">
-    `AgentRouterService.buildPlan` filters by `lender_agent_entitlements`, expands the required closure, applies data gates, and emits a `PipelineBlueprint`.
+    `AgentRouterService` filters by `lender_agent_entitlements`, expands the required closure, applies data gates, and emits an `ExecutionPlan`.
   </Card>
-  <Card title="Runs ledger and reconciler" icon="list-checks" href="/agents/runs-ledger">
-    The additive `agent_runs` ledger and `AgentRunReconciler`, which flips rows and drives `tryCompleteAuditRun`.
+  <Card title="Runs ledger and orchestrator" icon="list-checks" href="/agents/runs-ledger">
+    The `agent_runs` + `audit_infra_steps` ledgers, the `AgentRunReconciler`, and the `AgentOrchestrator` that runs the plan with ledger-observed phase barriers.
   </Card>
-  <Card title="Feature flags and rollout" icon="flag" href="/agents/feature-flags-and-rollout">
-    `AGENT_RUNS_LEDGER_ENABLED` (observer mode) versus the per-lender router-ownership flags.
+  <Card title="Rollout and backfill" icon="layer-group" href="/agents/feature-flags-and-rollout">
+    The EXPAND → backfill → CONTRACT deploy order behind the lender-anchored `audit_runs`, and the entitlement rollout.
   </Card>
 </Columns>
 
+## Catalog in the database, structure in code
+
+An agent's definition is split. The `agents` table is **identity only** — display name, billable, active — keyed by the natural string `agent_type`. The pipeline **structure** — which phase an agent runs in, what it depends on, how it executes, and whether it reads the indexed pipeline — lives in code in `AGENT_PIPELINE` (`langgraph/agents/agent-pipeline.ts`). `AgentRegistryService` joins them at boot.
+
+<Note>
+There is no `agent_dependencies` table, and `agents` has no `kind`, `audit_phase`, or `requires_llama_indexing` column. Changing where an agent runs or its dependencies is a code edit; only adding/retiring an agent or toggling its attributes touches the database. Earlier drafts of these docs described a DB-stored DAG and those columns — they no longer exist.
+</Note>
+
+## Channel-blind core, adapter-owned plan edges
+
+The core — `AgentRouterService`, `AgentOrchestrator`, `AgentDispatcher`, `AgentRunReconciler` — has zero `triggerSource` branches. The orchestrator takes an `ExecutionPlan` and an `ExecutionContext` and dispatches agents by identity. Each per-channel adapter owns its own **plan edges**: entitlement resolution, phase stripping (`deriveOrchestratorPlan`), whether it owns indexing at audit time (`ctx.skipIndexing`), and the final completion. So this is a channel-blind core plus adapter-owned edges, not a single end-to-end primitive.
+
 ## The platform classes
 
-All six classes are provided and exported by `LangGraphModule` (`langgraph/langgraph.module.ts`). Five live in `langgraph/agents/`; `GraphRegistryService` lives at `langgraph/graph-registry.service.ts`.
+The execution classes are provided by `LangGraphModule` (`langgraph/langgraph.module.ts`); the entitlement-management service lives in `AgentPlatformModule`. `IndexingService` is provided by `IndexingModule`.
 
 | Class | File | Role |
 |---|---|---|
-| `GraphRegistryService` | `langgraph/graph-registry.service.ts` | In-memory registry of LangGraph build factories (lazy import + memoized compile). |
-| `AgentRegistryService` | `langgraph/agents/agent-registry.service.ts` | Loads the DB catalog + dependency DAG; computes the required closure; validates the DAG at boot. |
-| `AgentRouterService` | `langgraph/agents/agent-router.service.ts` | Pure planner (`buildPlan` / `buildFlatPlan`) + transactional persistence (`route`, `instrumentExistingRun`) + parity harness (`diffPlanVsActual`). |
-| `AgentRunReconciler` | `langgraph/agents/agent-run-reconciler.ts` | `agent_runs` row lifecycle: `flip`, `ensure`, `reopen`, `tryCompleteAuditRun`. |
-| `AgentRunLedgerObserver` | `langgraph/agents/agent-run-ledger-observer.service.ts` | Env-flag-gated, best-effort wrapper over the reconciler for observer-mode ledger writes. |
-| flag helpers | `langgraph/agents/agent-router-flags.ts` | Per-lender feature-flag keys + the fail-closed reader for router-ownership flips. |
+| `AgentRegistryService` | `langgraph/agents/agent-registry.service.ts` | Joins the DB catalog with the `AGENT_PIPELINE` code map; computes the required closure; validates the DAG at boot. |
+| `AgentRouterService` | `langgraph/agents/agent-router.service.ts` | Pure planner (`buildPlan` / `buildFlatPlan`) + transactional persistence (`route`, `recordAgentRunsForExistingAudit`). |
+| `AgentOrchestrator` | `langgraph/orchestrator/agent-orchestrator.service.ts` | The execution control flow: phase-by-phase dispatch, ledger-observed barriers, the phase-0 indexing gate, the standalone lane. |
+| `AgentDispatcher` | `langgraph/orchestrator/agent-dispatcher.ts` | Dispatches one agent by its runtime — enqueue `queue_worker` agents, run `inproc_graph` agents by identity. |
+| `AgentRunReconciler` | `langgraph/agents/agent-run-reconciler.ts` | `agent_runs` / `audit_infra_steps` lifecycle, `tryCompleteAuditRun`, the phase-barrier reads, and the orphan reapers. |
+| `IndexingService` | `integration-events/services/indexing.service.ts` | The phase-0 `llama_index` infra step + classify-readiness gate. |
+| `AgentEntitlementService` | `agent-platform/agent-entitlement.service.ts` | Reads/writes per-lender entitlement intents; serves Octy's management UI. |
 
-## Two-phase rollout
+Supporting providers: `QueueAgentRegistry` (worker-agent enqueue adapters), `AuditErrorSinkService` and `CreditDocumentLoaderService` (injected directly by the dispatcher), `AgentRunOrphanReaperService` and `AuditInfraStepOrphanReaperService`, and `GraphRegistryService` (LangGraph build factories).
 
-The platform is rolling out in two phases. The phase a given lender and path is in depends on which flags are set.
+## How a run flows
 
 <Steps>
-  <Step title="Observer mode (live default)">
-    The router does not own selection. The live EPC / pre-audit fan-out still decides what runs. When the env flag `AGENT_RUNS_LEDGER_ENABLED` is `true`, the `AgentRunLedgerObserver` backfills per-agent `agent_runs` rows as agents settle, so the ledger reflects reality with zero change to which agents run. Phase-0 foundation rows are terminalized at the pre-audit barrier so a later container-completion check does not hang.
+  <Step title="Route">
+    The channel calls `route` (EPC/partner/portal) or `recordAgentRunsForExistingAudit` (LOS). The router filters by entitlements, expands the required closure, annotates data-gate skips, allocates the `audit_runs` row, and seeds the `agent_runs` ledger (`pending`/`skipped`) plus the `agent_config` bridge.
   </Step>
-  <Step title="Router ownership (per-lender, default OFF)">
-    Per-lender feature flags let `AgentRouterService` own selection on a path-by-path basis (EPC, LOS, partner, appraisal/portal). When ON, the router computes the entitled required-closure, writes the ledger plus an `audit_runs.agent_config` compatibility bridge, and the existing executor honors that selection. Every flip is fail-closed and reversible.
+  <Step title="Orchestrate">
+    The channel builds an `ExecutionContext` and calls `orchestrator.run(auditRunId, executionPlan, ctx, hooks?)`. Phase 0 may run a `llama_index` infra step concurrently with the classify/URLA agents. Each phase's agents fire concurrently; a ledger barrier gates advancement.
+  </Step>
+  <Step title="Dispatch + own status">
+    The dispatcher runs each agent by identity. Each agent owns its own `processing → complete/failed` transition; the orchestrator only writes `skipped` for a dependency-gated agent. Producers persist a cross-phase handoff to `agent_runs.output`.
+  </Step>
+  <Step title="Complete">
+    `tryCompleteAuditRun` completes the container once every expected agent (per `agent_config`) and every infra step is terminal. After `run()` returns, the channel issues the final guarded `completeAuditRun`.
   </Step>
 </Steps>
-
-## What the router does and does not do
-
-<Note>
-`buildPlan` / `route` produce a `PipelineBlueprint`, but the router does **not** execute phases. Handing a blueprint to a phase executor is future work. The existing `AuditAgentsExecutor` still drives execution, honoring `audit_runs.agent_config` (the compatibility bridge), not the blueprint. `agent_config` is a bridge, not the source of truth — the durable model is the blueprint plus the `agent_runs` ledger.
-</Note>
 
 ## Status vocabulary
 
 Both the container (`audit_runs.status`) and the ledger (`agent_runs.status`) use the value `complete`, never `completed`. The CHECK constraints pin this.
 
 - `agent_runs.status`: `pending`, `processing`, `complete`, `failed`, `skipped`. Terminal: `complete`, `failed`, `skipped`.
+- `audit_infra_steps.status`: `pending`, `processing`, `complete`, `failed` (no `skipped`).
 - `audit_runs.status`: `pending`, `processing`, `complete`, `failed`.
 
 <Warning>
-The string is `complete`. The appraisal pipeline separately uses `completed` for its own `appraisal_runs.status` — that is a different table. The reconciler only ever touches the container via `AuditService.completeAuditRun`, which emits `complete`.
+The string is `complete`. The appraisal pipeline separately uses `completed` for `appraisal_runs.status` — a different table. The reconciler only ever touches the container via `AuditService.completeAuditRun`, which emits `complete`.
 </Warning>
 
 ## Boot-time drift guard
 
-`AgentRegistryService.onModuleInit` fails the app boot if the code and the DB catalog diverge. Every non-hyphenated registered graph name and every `EXECUTOR_AGENT_KEYS` literal must map to an **active** catalog row, the DAG must be acyclic, and every dependency edge must point to a strictly lower phase. This keeps the seed and the code in sync. See [Agent catalog and dependency DAG](/agents/catalog-and-dependencies).
+`AgentRegistryService.onModuleInit` fails the app boot if the code and the DB catalog diverge. Every non-hyphenated registered graph name and every `EXECUTOR_AGENT_KEYS` literal must map to an **active** catalog row, the dependency DAG must be acyclic, and every edge must point to a strictly lower phase. See [Agent catalog and pipeline](/agents/catalog-and-dependencies).
 
 ## Observability
 

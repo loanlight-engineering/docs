@@ -24,6 +24,13 @@ Do not confuse this with the older, separate bank-statement income pipeline keye
 `income_runs` family.
 </Warning>
 
+<Note>
+The `asset_based` income family on this page is asset-depletion **income** (`calculateAssetDepletion`).
+It is not the same as the [Statement-Analyzer agent](/agents/statement-analyzer), which ingests
+bank statements into the `asset_accounts` / `asset_runs` ledger for asset verification. The two are
+separate subsystems that both touch "assets".
+</Note>
+
 ## Income families
 
 The family is **user-selected at run creation**, not auto-detected. The `income_family` pgEnum

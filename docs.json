@@ -89,6 +89,7 @@
               "agents/property-red-flags",
               "agents/credit-evaluation",
               "agents/income-analysis",
+              "agents/statement-analyzer",
               "agents/appraisal-evaluation",
               "agents/liabilities-assessment"
             ]
@@ -173,6 +174,7 @@
               "integrations/service-overview",
               "integrations/audit-lifecycle",
               "integrations/http-api",
+              "integrations/routing-config-admin",
               "integrations/messaging",
               "integrations/database-schema",
               "integrations/shadow-audits",
@@ -214,6 +216,7 @@
               "portal/auth-and-roles",
               "portal/impersonation",
               "portal/feature-map",
+              "portal/statement-analyzer",
               "portal/file-uploads",
               "portal/partner-results-viewer"
             ]
@@ -246,7 +249,8 @@
               "octy/oz-skills",
               "octy/oz-tool-api",
               "octy/completion-webhook",
-              "octy/issues-runs-labels-api"
+              "octy/issues-runs-labels-api",
+              "octy/doc-refreshes"
             ]
           },
           {
@@ -255,6 +259,8 @@
               "octy/bug-reports-console",
               "octy/db-studio",
               "octy/classify-split-config",
+              "octy/routing-config",
+              "octy/gitops",
               "octy/billing",
               "octy/auth-and-access",
               "octy/environment-variables",

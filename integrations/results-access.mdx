@@ -92,8 +92,7 @@ and completion (409) checks. See [Results and access URLs](/partner-api/results-
 
 ## documents.classified push-back
 
-At the Phase 1 settle barrier (LOA-1041 / LOA-743), `DocumentsClassifiedEmitter`
-(`classify-split/documents-classified.emitter.ts`) publishes the
+`DocumentsClassifiedEmitter` (`classify-split/documents-classified.emitter.ts`) publishes the
 `loanlight.documents.classified` EventBridge event via
 `EventPublishingService.publishDocumentsClassified`:
 
@@ -101,17 +100,32 @@ At the Phase 1 settle barrier (LOA-1041 / LOA-743), `DocumentsClassifiedEmitter`
 - `Source` = `loanlight.aus`.
 - The `Detail` is the raw event (the classified-document set for the loan).
 
-The `loanlight-integrations` side (LOA-1102) consumes it and carves each classified document
-back into Encompass, gated per-lender by an `encompass_document_push` flag keyed on `lender_id`
-(the emitter's `clientId`). This push-back is best-effort by contract — it never fails the
-audit. Emission is fire-and-forget (`fireDocumentsClassified` → `emitForLoan`) so it never
-blocks the run.
+It is now fired from a `finally` (`fireDocumentsClassifiedPublic`) after Phase 1, not the
+phase-success hook (LOA-1565). Classification settles before the LlamaCloud index step is
+awaited, so firing in a `finally` means a LlamaCloud/index failure no longer drops the push.
+Emission is fire-and-forget so it never blocks the run.
+
+The `loanlight-integrations` side (LOA-1102) consumes it and files each classified document into
+the Encompass eFolder, gated per-lender on the integrations side by the `lender_feature` key
+`document_push` (`EpcClientRepository.isLenderFeatureEnabled`, default off). This push-back is
+best-effort by contract — it never fails the audit. The consumer also publishes a
+`documents.materialized` return event so the AUS can record where each split landed. See
+[Messaging](/integrations/messaging).
+
+## Encompass loan details on the results fetch
+
+`GET /api/v1/audit_runs/:id/results` accepts `includeEncompassLoanDetails=true`. The
+integrations `AuditResultsFetcherService` sends it (alongside `includeNonIssues=true`) so the
+`loanDetails` block in the response carries the Encompass-only fields `incomeType` and `noteRate`
+for the audit PDF's Loan Details card. `incomeType` is sourced from `CX.LOANLIGHT.INCOMETYPE` and
+`noteRate` from MISMO. See [audit-pdf library](/integrations/audit-pdf) and
+[Integration audit request schema](/integrations/audit-request-schema).
 
 ## Related
 
 <Columns cols={2}>
   <Card title="Orchestration pipeline" href="/integrations/orchestration-pipeline" icon="workflow">
-    Where documents.classified fires in Phase 1.
+    Where documents.classified fires after Phase 1.
   </Card>
   <Card title="Partner results and access URLs" href="/partner-api/results-and-access-urls" icon="key">
     The partner-facing equivalent.

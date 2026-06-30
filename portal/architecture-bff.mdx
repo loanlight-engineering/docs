@@ -62,6 +62,10 @@ Route handlers under `src/app/api/` are grouped roughly by feature:
 | `settings/*` | users, rules, rule-sets, credit-rule-sets, loan-programs, key-field-sets, key-field-catalog, agency-adoptions, appraiser-deny-list, lender-guideline-documents |
 | `v2/audits/[auditRunId]/*` | overview, credit, data-consistency, document-health, property-data, urla-completeness, documents/[filename]/pdf, checks-completed — the partner + staff results surface |
 
+<Note>
+Not every backend portal module serves the app. `portal-routing-config` is an api-as-BFF that proxies **outward** to the integrations routing-config admin API — it adds no new app route family. See [per-lender configuration](/portal/api-config).
+</Note>
+
 ## Every section needs a matching proxy route
 
 The results surface is served under `/api/v2/audits/:id/<section>`. Each backend section needs a matching Next proxy route handler. If the backend adds a new `api/v2/audits/:id/<section>`, the portal needs the corresponding handler under `src/app/api/v2/audits/[auditRunId]/<section>/` or the page cannot fetch it.

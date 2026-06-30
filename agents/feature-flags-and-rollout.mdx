@@ -1,100 +1,86 @@
 ---
-title: Feature flags and rollout
-description: The flags that gate router ownership per lender and observer mode.
-icon: flag
+title: Rollout and backfill
+description: The EXPAND → backfill → CONTRACT deploy order behind the lender-anchored audit_runs, and the agent-platform backfill.
+icon: layer-group
 ---
 
-The agent platform ships behind flags so each path can be flipped per lender, observed for parity, and rolled back instantly. There are two kinds of flag: one **env var** that turns on observer-mode ledger writes globally, and four **per-lender** flags in `lender_feature_flags` that hand selection ownership to the router on a path-by-path basis. All default OFF and all are fail-closed.
-
-## Observer mode versus router ownership
-
-<Columns cols={2}>
-  <Card title="Observer mode" icon="eye">
-    Env var `AGENT_RUNS_LEDGER_ENABLED`. The router does not select. The legacy fan-out runs all agents; the observer only backfills `agent_runs` rows. This is the live default.
-  </Card>
-  <Card title="Router ownership" icon="route">
-    Per-lender `lender_feature_flags`. When ON for a path, the router computes the entitled closure, writes the ledger plus the `agent_config` bridge, and the executor honors the selection. Default OFF.
-  </Card>
-</Columns>
-
-<Warning>
-Do not conflate the two. `AGENT_RUNS_LEDGER_ENABLED` is an **env var** (process-wide). The four router-ownership flags are **rows in `lender_feature_flags`** (per lender). They are read by completely different code paths.
-</Warning>
-
-## The observer flag (env var)
-
-`AGENT_RUNS_LEDGER_FLAG = "AGENT_RUNS_LEDGER_ENABLED"`, read in `AgentRunLedgerObserver` with strict equality `=== "true"` (not truthy). `enabled()` returns that boolean. When OFF, every observer method short-circuits to a no-op — byte-identical to today, zero ledger writes. When ON, the observer backfills `agent_runs` rows over the existing "run all" fan-out. See [Agent runs ledger and reconciler](/agents/runs-ledger).
-
-## The per-lender router flags
-
-`isAgentRouterFlagEnabled(db, lenderId, featureKey)` (`langgraph/agents/agent-router-flags.ts`) is the single fail-closed reader for every router-ownership flip. It returns `true` only when a row exists for `(lenderId, featureKey)` in `lender_feature_flags` and `enabled === true`. It returns `false` on a null or empty lender, an absent row, or any DB error (the try/catch swallows). A transient flag-lookup blip therefore degrades to the un-flipped path, never crashes the audit.
-
-```ts
-export async function isAgentRouterFlagEnabled(
-  db: DrizzleDB,
-  lenderId: string | null | undefined,
-  featureKey: string,
-): Promise<boolean> {
-  if (!lenderId) return false;
-  try {
-    const rows = await db
-      .select({ enabled: lenderFeatureFlags.enabled })
-      .from(lenderFeatureFlags)
-      .where(and(
-        eq(lenderFeatureFlags.lenderId, lenderId),
-        eq(lenderFeatureFlags.featureKey, featureKey),
-      ))
-      .limit(1);
-    return rows.length > 0 && rows[0].enabled === true;
-  } catch {
-    return false; // fail-closed
-  }
-}
-```
-
-Two flag keys are declared in `agent-router-flags.ts`:
-
-- `AGENT_ROUTER_EPC_FLAG_KEY = "agent_router_epc_enabled"` — gates router ownership of the EPC (Encompass) selection path.
-- `AGENT_ROUTER_LOS_FLAG_KEY = "agent_router_los_enabled"` — gates router ownership and ledger instrumentation of the LOS document-upload dispatcher.
-
-Two more keys live with their consumers (same `lender_feature_flags` table, same reader pattern), not in `agent-router-flags.ts`:
-
-- `PARTNER_VIA_ROUTER = "PARTNER_VIA_ROUTER"` — `partner-api/controllers/partner-audits.controller.ts`. Live, with a consumer.
-- `APPRAISAL_VIA_ROUTER = "APPRAISAL_VIA_ROUTER"` — `modules/portal-appraisal/portal-appraisal.service.ts`, which has its own inline `isAppraisalViaRouterEnabled` reader. Live, with a consumer.
-
-## Flag inventory
-
-| Flag key | Table / type | Path it gates | Consumer file |
-|---|---|---|---|
-| `AGENT_RUNS_LEDGER_ENABLED` | env var | Observer-mode ledger writes | `agent-run-ledger-observer.service.ts` |
-| `agent_router_epc_enabled` | `lender_feature_flags` | EPC router ownership | `integration-events/services/integration-orchestration.service.ts` |
-| `agent_router_los_enabled` | `lender_feature_flags` | LOS router ownership + ledger | `los/services/document-processing.service.ts` |
-| `PARTNER_VIA_ROUTER` | `lender_feature_flags` | Partner API audit create via router | `partner-api/controllers/partner-audits.controller.ts` |
-| `APPRAISAL_VIA_ROUTER` | `lender_feature_flags` | Portal appraisal create via router | `modules/portal-appraisal/portal-appraisal.service.ts` |
-
-The `lender_feature_flags` table is also documented under [Feature flags and entitlements](/lender-config/feature-flags-and-entitlements).
-
-## Per-path behavior when ON
-
-<Tabs>
-  <Tab title="EPC">
-    `routeEpcSelection(...)` in `integration-orchestration.service.ts`. OFF returns `undefined` (executor runs all). ON calls `agentRouter.instrumentExistingRun(correlationId, {...triggerSource:'epc', correlationId, s3Prefix})` — the container was already minted by the dedup wrapper — and returns the non-skipped selected agents. Any failure logs `[EPC_ROUTER]` and returns `undefined`, degrading to "run all", never "run none". An empty selection also degrades to "run all".
-  </Tab>
-  <Tab title="LOS">
-    `instrumentLosLedger(...)` in `document-processing.service.ts`. Looks up `loans.lender_id`; OFF returns `false`. ON calls `agentRouter.instrumentExistingRun(auditRunId, {triggerSource:'los', requestedAgents: LOS_LEDGER_AGENTS}, {expandClosure:false})` — a flat ledger with no phase-0 closure. `settleLosLedger(...)` flips each row after the suite settles, then `tryCompleteAuditRun`. Best-effort.
-  </Tab>
-  <Tab title="Partner">
-    `partner-audits.controller.ts`. ON calls `agentRouter.route({ triggerSource:'partner', requestedAgents: dto.agents, s3Prefix:'partner/<lender>/<loan>' })`. If `plannedAgentRuns.length === 0`, it deletes the audit run best-effort (FK cascade drops the ledger rows) and returns 403 with the `denied` list. Otherwise it responds with the resolved plan as `agents` plus a `denied` field. OFF is the direct path (`createAuditRunForPartner`, raw allow-list, no closure, no ledger, no `denied`).
-  </Tab>
-  <Tab title="Portal appraisal">
-    `portal-appraisal.service.ts` + `appraisal.processor.ts`. On upload, ON calls `agentRouter.route({ triggerSource:'portal', requestedAgents:[APPRAISAL_AGENT_TYPE] })`, minting the container and the `appraisalEvaluation` ledger row; if denied, it tears down the container and returns 403. The `auditRunId` is stamped onto the new `appraisal_runs` row. On re-claim, `reopen(auditRunId, APPRAISAL_AGENT)`; on finalize, `flip(..., "complete", { externalRunId, langsmithUrl })` then `tryCompleteAuditRun`.
-  </Tab>
-</Tabs>
-
-## Rollout doctrine
+The agent platform shipped as the **only** execution path. There is no observer mode and no per-lender router feature flag — every channel drives the orchestrator directly. The rollout risk is not a runtime toggle; it is the schema migration that makes `audit_runs` lender-anchored, which has to land on a database full of loan-anchored rows. That is handled by an EXPAND → backfill → CONTRACT deploy order.
 
 <Note>
-Every router flip is reversible by setting the row's `enabled` back to `false`. EPC is the highest-risk flip (revenue path) and is flipped per lender only after observer parity is green, validated with `diffPlanVsActual`. Observer mode plus all router flips are best-effort and fail-closed: a ledger or flag blip degrades to today's "run all" / un-instrumented behavior and never aborts the audit.
+Earlier drafts of this page described an `AGENT_RUNS_LEDGER_ENABLED` env var and four per-lender flags (`agent_router_epc_enabled`, `agent_router_los_enabled`, `PARTNER_VIA_ROUTER`, `APPRAISAL_VIA_ROUTER`). Those flags, the observer-mode ledger writer, and the parity harness were removed when the orchestrator became the default path. The catalog and pipeline are still gated at boot by the [drift guard](/agents/catalog-and-dependencies), not by flags.
 </Note>
 
-See [Agent router and entitlements](/agents/router-and-entitlements) for `diffPlanVsActual` and the planner, and the [platform overview](/agents/platform-overview) for the two-phase rollout framing.
+## The deploy order
+
+`audit_runs.lender_id` and `trigger_source` are load-bearing (NOT NULL) at the end state, but a database with existing rows has them NULL until they are populated. A single SET NOT NULL would fail. The migration is therefore split, and the deploy applies all three steps in one `cdk deploy`:
+
+<Steps>
+  <Step title="EXPAND — 0202_audit_runs_lender_anchor.sql">
+    Adds `lender_id`, `loan_program_id`, and `trigger_source` as **nullable** columns with their FKs and CHECKs, relaxes `loan_id`/`run_number` to nullable, swaps the unique index to the partial `audit_runs_loan_run_key`, and best-effort backfills `lender_id` from the loan's tenant and `trigger_source` from existing signals. Behaviorally inert — existing writers keep working.
+  </Step>
+  <Step title="Schema — 0203_agent_platform_schema.sql">
+    Additively creates `agents`, `agent_runs`, `lender_agent_entitlements`, and `audit_infra_steps`, links `appraisal_runs.audit_run_id`, and seeds the catalog. See [Agent platform schema](/data-model/agent-platform-schema).
+  </Step>
+  <Step title="Backfill — scripts/backfill-agent-platform.ts">
+    Populates `lender_id` on every legacy row (the EXPAND backfill covers only loan-bound rows) and seeds the platform tables. Run **inline** by the DbMigrate Lambda immediately before the CONTRACT migration.
+  </Step>
+  <Step title="CONTRACT — 0204_audit_runs_tighten_not_null.sql">
+    A gate that `RAISE EXCEPTION`s if any `audit_runs.lender_id` is still NULL, then tightens `lender_id` and `trigger_source` to NOT NULL via the `NOT VALID → VALIDATE → SET NOT NULL → DROP CONSTRAINT` pattern. On a fresh database with zero rows the gate trivially passes.
+  </Step>
+</Steps>
+
+<Warning>
+The order is load-bearing: the CONTRACT gate only passes once the backfill has populated `lender_id` on every row. The deploy must run EXPAND + schema → backfill → CONTRACT.
+</Warning>
+
+### Inline, retry-safe backfill
+
+`infra/lambda/db-migrate/index.ts` runs `runBackfill()` in-line, keyed off the migration tag suffix `_audit_runs_tighten_not_null` (`isBackfillGateMigration`), so it stays correct if migrations are renumbered. Because the gate migration stays pending until it succeeds, every deploy attempt re-runs the idempotent backfill before re-attempting the gate. The DbMigrate Lambda timeout was raised 5 → 15 minutes and memory 256 → 512 MB for the prod-scale backfill, and an `infra/tsconfig` `@/*` alias lets the backfill's schema barrel resolve.
+
+## What the backfill does
+
+`scripts/backfill-agent-platform.ts` is idempotent (inserts use `onConflictDoNothing`; updates are guarded by already-terminal / canonical-set predicates) and runs these parts in order:
+
+<Steps>
+  <Step title="Containerize orphaned standalone runs">
+    Mint a parent `audit_run` and link for historical standalone appraisal runs so they flow through the unified model.
+  </Step>
+  <Step title="Fill lender_id">
+    A fallback chain ending in a sentinel tenant (`Legacy / Unattributed Tenant (backfill)`), so the CONTRACT gate holds with zero residual NULLs instead of aborting the deploy. Sentinel-pointed rows are durable data the backfill never auto-reassigns — a warning log flags them for manual reconciliation.
+  </Step>
+  <Step title="Seed entitlements">
+    Seed `lender_agent_entitlements` from each lender's run history plus legacy flags.
+  </Step>
+  <Step title="Seed the ledger">
+    Reconstruct `agent_runs` from the per-agent output tables, plus `failed` rows from the `audit_errors` ledger for agents that failed without leaving an output row.
+  </Step>
+  <Step title="Align legacy identifiers">
+    Canonicalize historical agent identifiers in `octy_issues` JSONB and `audit_errors.agent_name` (e.g. `PII-Validation` → `piiValidation`).
+  </Step>
+  <Step title="Terminalize orphans">
+    Flip historical orphan `agent_runs` (non-terminal under a terminal parent) to `failed`, clearing the never-flipped backlog before the orphan reaper becomes authoritative.
+  </Step>
+</Steps>
+
+## Entitlement rollout
+
+The backfill seeds **explicit** `lender_agent_entitlements` rows for every historical lender, covering the agents active at backfill time. This matters for how new agents reach the installed base:
+
+- A lender with **no** rows runs the platform default — every active agent (default-ON). See [Agent router and entitlements](/agents/router-and-entitlements).
+- Once a lender has explicit rows it is an **allowlist**. Activating a new agent later (`active` false → true) does **not** auto-grant it to backfilled lenders; only un-seeded lenders pick it up via default-ON.
+- Granting a newly-activated agent to the installed base requires a follow-up entitlement migration that inserts the new `agent_type` for existing lenders.
+
+## Loanless bug reports
+
+A side effect of the loan-optional primitive: migration `0205_octy_issues_loan_id_nullable.sql` drops NOT NULL on `octy_issues.loan_id` so bug reports can be filed against loanless audit runs (standalone portal appraisal/income). A report's anchor is `audit_run_id` (still NOT NULL); `loan_id` is now optional.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Agent platform schema" icon="boxes" href="/data-model/agent-platform-schema">
+    The tables the schema and backfill migrations create, including the lender-anchored `audit_runs` columns.
+  </Card>
+  <Card title="Migrations" icon="database" href="/data-model/migrations">
+    The full migration history and conventions.
+  </Card>
+</Columns>

@@ -83,6 +83,8 @@ Clears lender-config caches. Returns HTTP 200 `{ cleared: true }`. It clears bot
 
 Controller: `portal-lenders/workos-webhook.controller.ts` at `api/v1/workos/webhooks`. Not auth-guarded; it verifies the `workos-signature` header via `ApiAuthService.constructWebhookEvent` (missing signature → 401) and returns `{ received: true }`.
 
+The controller was refactored to a single `dispatch()` switch with structured logging (#2277): it logs `workos_webhook_received` on entry and `workos_webhook_handler_failed` if a handler throws. `createLenderFromWorkosOrg` logs `workos_org_created_name_conflict` when a same-named lender is already bound to a different WorkOS org (see [the three-branch provisioning logic](/portal/api-lenders-users-programs)).
+
 The webhook is the just-in-time provisioning path: WorkOS organization and user lifecycle events create and update lenders and users without an explicit portal action.
 
 | Event | Handler | Effect |
@@ -94,6 +96,18 @@ The webhook is the just-in-time provisioning path: WorkOS organization and user 
 | `organization_membership.created` / `.deleted` | membership handlers | Add/remove tenant membership |
 
 See [lenders, users, and programs](/portal/api-lenders-users-programs) for the full webhook table and the user-management endpoints it complements.
+
+## Audit-results projections and summary counts
+
+The `portal-audits` projection service (`services/audit-data-projection.service.ts`) feeds the audit-results sections, and several count/summary fixes landed here:
+
+- **Consistent rows are now included.** `getDataConsistency` and `getDocumentHealth` call the mapper with `includeNonIssues=true`, so clean (non-issue) rows reach the projection. Without it, `mapPiiValidationData` filtered `WHERE has_issue=true`, dropped every consistent row, and a clean loan rendered "0 of 0 consistent" instead of "X of Y consistent" (#2494, LOA-1619). The `issueCount` re-filters on `hasIssue`, so it stays correct.
+- **Summary chips count only issues.** The PII / document-validation summary chips count issue rows only, not the now-included consistent rows (#2493).
+- **No more synthetic `doc_expiration` rows.** `document_completeness` findings are no longer double-written as synthetic `doc_expiration` rows (#2494).
+
+<Note>
+The dashboard's `totalIssues` summary (`portal-audits-list.controller.ts`) sums `pii_validation_results`, `doc_expiration_results` (where `issue_kind <> 'valid'`), and non-transient `audit_errors` across all non-shadow runs. The double-write removal is a **write-side, go-forward fix**: audits run before it keep their inflated `doc_expiration` counts, so legacy runs may still over-report. `totalIssues` is also cumulative across re-audits by design (it matches the "Issues Found" tile), not an outstanding-per-loan count.
+</Note>
 
 ## Related pages
 

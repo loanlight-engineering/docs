@@ -45,7 +45,9 @@ Because impersonation swaps the active lender but keeps the admin's real identit
 - `getEffectiveIsInternal(session)` — the admin's REAL internal status, kept so admin tooling stays reachable while impersonating.
 - `getEffectiveContext(session)` → `{ lenderId, isInternal, isImpersonating, bypassFeatureFlags }`.
 
-`bypassFeatureFlags = isInternal && !session.isImpersonating`. This is fail-closed: any sign of impersonation suppresses the internal feature-flag bypass (LOA-998), so an impersonating admin sees the tenant's real flags, not the internal override.
+`bypassFeatureFlags = isInternal && !session.isImpersonating` (LOA-998, #1691). This is fail-closed: any sign of impersonation suppresses the internal feature-flag bypass, so an impersonating admin sees the tenant's real flags, not the internal override.
+
+The `chat` flag was the lone feature that internal staff bypassed, so this value is what gates chat while impersonating. `bypassFeatureFlags` is now consumed by `chrome-shell.tsx` (the chat FAB, via `isChatEnabled(flags, bypassFeatureFlags)`), `api/chat/*`, and `api/documents`. See [route and feature map](/portal/feature-map) for `isChatEnabled`.
 
 `get-session.ts` wraps these in React `cache()` (`getSession`, `getSessionResult`).
 

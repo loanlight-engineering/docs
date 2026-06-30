@@ -1,14 +1,12 @@
 ---
 title: Agent router and entitlements
-description: How the router plans an entitlement-filtered required-closure and writes the blueprint.
+description: How the router plans an entitlement-filtered required-closure into an execution plan, and how per-lender entitlements are managed.
 icon: route
 ---
 
-`AgentRouterService` (`langgraph/agents/agent-router.service.ts`) turns a routing request into a plan: the set of agents to run, the phases they run in, and one projected ledger row each. It has a pure planner (`buildPlan` / `buildFlatPlan`) and transactional persistence (`route`, `instrumentExistingRun`), plus a parity harness (`diffPlanVsActual`). It injects the Drizzle db, `AgentRegistryService`, and `AuditRunFactory`.
+`AgentRouterService` (`langgraph/agents/agent-router.service.ts`) turns a routing request into a plan: the set of agents to run, the phases they run in, and one projected ledger row each. It has a pure planner (`buildPlan` / `buildFlatPlan`) and two transactional persistence entry points (`route`, `recordAgentRunsForExistingAudit`). It injects the Drizzle db, `AgentRegistryService`, and `AuditRunFactory`.
 
-<Warning>
-The router is gated by per-lender feature flags that default OFF. When OFF, the legacy fan-out runs all agents and the router only observes. Even when ON, the router produces a plan and writes the ledger plus an `audit_runs.agent_config` bridge — it does not execute phases. The existing `AuditAgentsExecutor` still drives execution. See [Feature flags and rollout](/agents/feature-flags-and-rollout) and the [platform overview](/agents/platform-overview).
-</Warning>
+The router is the **only** path into the platform — there is no legacy fan-out and no feature flag to bypass it. Every channel resolves its plan through the router and hands the resulting `ExecutionPlan` to the [orchestrator](/agents/runs-ledger).
 
 ## Inputs and outputs
 
@@ -21,7 +19,7 @@ The router is gated by per-lender feature flags that default OFF. When OFF, the 
   The agents requested. Empty or absent means "run all enabled agents" for the lender.
 </ParamField>
 <ParamField path="loanId" type="string">
-  The loan. Absent means a loanless run (every `audit_stage` agent is data-gate skipped).
+  The loan. Absent means a loanless run (every phased agent is data-gate skipped).
 </ParamField>
 <ParamField path="loanProgramId" type="string" />
 <ParamField path="triggerSource" type="AuditTriggerSource" required>
@@ -29,22 +27,28 @@ The router is gated by per-lender feature flags that default OFF. When OFF, the 
 </ParamField>
 <ParamField path="requestorId" type="string" required />
 <ParamField path="correlationId" type="string">
-  Required for `epc`. Keys the dedup wrapper.
+  Required for `epc` — the dedup key forwarded to the factory.
 </ParamField>
 <ParamField path="s3Prefix" type="string">
   The credit data-gate input. `creditEvaluation` is skipped without it.
 </ParamField>
+<ParamField path="mismoXmlHash" type="string">
+  EPC only — forwarded to `createAuditRun` for MISMO-hash dedup.
+</ParamField>
+<ParamField path="shadowOptions" type="object">
+  EPC only — `{ isShadow?, shadowOfCorrelationId? }`, forwarded for shadow-audit linkage.
+</ParamField>
 
-The planner emits an `AgentPlan`: `{ plan, denied, blueprint, plannedAgentRuns }`.
+The planner emits an `AgentPlan`: `{ plan, denied, executionPlan, plannedAgentRuns }`.
 
 <ResponseField name="plan" type="string[]">
-  Every agent in the closure (including data-gate-skipped ones — skips annotate, they do not remove).
+  The resolved required-closure (data-gate-skipped agents stay in the plan — skips annotate, they do not remove).
 </ResponseField>
 <ResponseField name="denied" type="string[]">
-  Requested agents that the lender is not entitled to.
+  Requested agents the lender is not entitled to (for 403 messaging).
 </ResponseField>
-<ResponseField name="blueprint" type="PipelineBlueprint">
-  `{ phases: BlueprintPhase[] (ascending), needsIndexing: boolean, standalone: string[] }`. Agents within a `BlueprintPhase` run in parallel.
+<ResponseField name="executionPlan" type="ExecutionPlan">
+  `{ phases: ExecutionPhase[], standalone: string[] }`. `phases` is ascending by phase number; agents within an `ExecutionPhase` (`{ phase, agents }`) run in parallel. `standalone` agents run in their own lane with no barrier.
 </ResponseField>
 <ResponseField name="plannedAgentRuns" type="PlannedAgentRun[]">
   One projected ledger row per agent: `{ agentType, phase, status: "pending" | "skipped", skipReason? }`.
@@ -52,22 +56,26 @@ The planner emits an `AgentPlan`: `{ plan, denied, blueprint, plannedAgentRuns }
 
 ## The pure planner
 
-`buildPlan(input, enabledAgents)` is zero-I/O and runs in four steps.
+`buildPlan(input, enabledAgents)` is zero-I/O — safe for plan prediction.
 
 <Steps>
   <Step title="Entitlement filter (filterEntitled)">
-    `requested = requestedAgents` (or `enabledAgents` if empty). `working = unique(requested ∩ enabled)`. `denied = unique(requested − enabled)`. The lender's enabled set comes from `lender_agent_entitlements`.
+    `requested = requestedAgents` (or `enabledAgents` if empty). `working = unique(requested ∩ enabled)`. `denied = unique(requested − enabled)`.
   </Step>
   <Step title="Required-closure expansion">
-    `closure = registry.requiredClosure(working)`. Standalone working agents are re-added directly (they have no edges). `plan = unique([...closure, ...standaloneWorking])`.
+    `closure = registry.requiredClosure(working)`. `requiredClosure` ignores standalone agents (they have no edges), so explicitly-requested standalone agents are re-added directly: `plan = unique([...closure, ...standaloneWorking])`.
   </Step>
   <Step title="Data-gate skips (computeDataGateSkips)">
     Fail-closed annotation: agents that cannot run given the inputs are marked `skipped` but stay in the plan.
   </Step>
-  <Step title="Blueprint assembly + projection (finalizePlan)">
-    Bucket phased agents by `audit_phase`, project `plannedAgentRuns`.
+  <Step title="Execution plan + projection (finalizePlan)">
+    Bucket phased agents by phase into `ExecutionPlan.phases`, route phase-null agents to `standalone`, and project one `plannedAgentRuns` row per agent.
   </Step>
 </Steps>
+
+<Note>
+Standalone agents are **opt-in**. They join the plan only when explicitly named in `requestedAgents`, never via the default-ON "run all enabled" fallback. This preserves the legacy behavior where EPC/partner (which pass no `requestedAgents`) ran only the phased suite and never the worker-owned `appraisalEvaluation`. The portal appraisal path requests it explicitly.
+</Note>
 
 ### Data gates
 
@@ -75,23 +83,24 @@ The planner emits an `AgentPlan`: `{ plan, denied, blueprint, plannedAgentRuns }
 
 | Condition | Effect |
 |---|---|
-| Loanless run (`!input.loanId`) | Every `audit_stage` agent is `skipped` with reason `"loanless run: <agent> requires a loan pipeline and has no standalone variant"`. Standalone agents are not skipped. |
+| Loanless run (`!input.loanId`) | Every **phased** agent (`auditPhase !== null`) is `skipped` with reason `"loanless run: <agent> requires a loan pipeline and has no standalone variant"`. Standalone agents are not skipped. |
 | `creditEvaluation` without `loanId` or `s3Prefix` | `skipped` with reason `"creditEvaluation requires a classified non-dry-run report and S3 document context"`. The runtime credit gate remains as defense-in-depth. |
 
 The credit agent constant is `CREDIT_AGENT = "creditEvaluation"`.
 
-### Blueprint assembly
+### Execution plan assembly
 
-`assembleBlueprint` buckets phased agents by `audit_phase`; phase-NULL agents go to `standalone[]`. `phases` is sorted ascending. `needsIndexing = plan.some(a => requiresLlamaIndexing)` — skipped rows still count, because they remain in the plan. When `needsIndexing` is false (for example an appraisal-only run) the phase-0 LlamaCloud indexing is skipped entirely.
-
-Worked example for a full audit-stage plan:
+`buildExecutionPlan` buckets phased agents by phase; phase-null agents go to `standalone[]`. `phases` is sorted ascending. A full audit-stage plan looks like:
 
 ```text
 phases:
   { phase: 0, agents: [preAuditClassification, urlaExtraction] }
   { phase: 1, agents: [creditEvaluation, piiValidation, propertyData] }
   { phase: 2, agents: [documentHealth, redFlags] }
+standalone: []
 ```
+
+The orchestrator decides whether a phase-0 LlamaCloud index step is needed by OR-ing `requiresIndexing` over the planned agents — see [Runs ledger and orchestrator](/agents/runs-ledger).
 
 ## buildFlatPlan — no closure expansion
 
@@ -99,12 +108,29 @@ phases:
 
 ## Entitlements
 
-`lender_agent_entitlements` (`database/schema/lender-agent-entitlements.ts`) is the per-lender enable/disable per agent. UNIQUE on `(lender_id, agent_type)`, FK `lender_id` to `lenders` ON DELETE CASCADE.
+`loadEnabledAgents(lenderId)` reads all `lender_agent_entitlements` rows for the lender:
 
-`loadEnabledAgents(lenderId)` selects `agent_type` from `lender_agent_entitlements` where `lender_id = ? AND enabled = true`. It never reads the dependency edges — closure expansion handles dependencies.
+- **No rows** → the lender is entitled to every **active** agent. This default-ON behavior preserves "run all" for an un-seeded lender.
+- **Rows present** → exactly the `enabled = true` ones (an allowlist).
 
 <Note>
-The absence of an entitlement row means "not enabled for routing". The router only reads rows where `enabled = true`. A lender with no entitlement rows for the audit-stage agents has an empty enabled set, so an empty `requestedAgents` (run all enabled) resolves to nothing planned. This is fail-closed by design.
+Dependencies still run even when their own entitlement row is `enabled=false`: entitlement gates the **requested surface**, not the dependency graph. A lender entitled only to `redFlags` still runs `preAuditClassification`, `urlaExtraction`, and `propertyData` via the required closure — they just are not separately requestable.
+</Note>
+
+### Managing entitlements (Octy)
+
+`AgentEntitlementService` (`agent-platform/agent-entitlement.service.ts`) reads and writes the per-lender entitlement **intents** and resolves the effective runnable set against the live `AGENT_PIPELINE` DAG. Intent is stored; dependencies are never stored — they are recomputed on every read, so a code-side edge change is honored with zero backfill. It is exposed to Octy's lender entitlement-management UI through `AgentPlatformController` (`agent-platform/agent-platform.controller.ts`), guarded by the shared-secret `x-internal-api-key` (`OCTY_INTERNAL_API_KEY`):
+
+| Endpoint | Returns |
+|---|---|
+| `GET /internal/agent-platform/graph` | The active agent DAG (`nodes` + `edges`) for the management graph view. |
+| `GET /internal/agent-platform/lenders/:lenderId/entitlements` | A `LenderEntitlementView`. |
+| `PUT /internal/agent-platform/lenders/:lenderId/entitlements` | Replaces the lender's wanted set (body `{ agentTypes: string[] }`). |
+
+`LenderEntitlementView` carries `managed` (false when the lender has no rows — running the default), `entitled` (the explicitly-wanted set), `effective` (entitled + their transitive dependencies), and `nodeStates` (per active agent: `entitled`, `auto` — pulled in as a dependency, or `available`).
+
+<Note>
+`setLenderEntitlements` uses **full materialization**: it writes one row per active agent — `enabled=true` for the checked agents, `enabled=false` for the rest — and prunes rows for now-inactive agents. This matches `loadEnabledAgents` (which filters on `enabled`) and removes the "uncheck everything ⇒ zero rows ⇒ default all-on" footgun.
 </Note>
 
 ## Persistence entry points
@@ -112,32 +138,29 @@ The absence of an entitlement row means "not enabled for routing". The router on
 The planner is pure; these methods persist a plan.
 
 <Tabs>
-  <Tab title="route(input)">
-    Plan, create the container, and write the ledger. Used when no container exists yet (partner, portal/appraisal).
+  <Tab title="route(input, { expandClosure })">
+    Plan, allocate the container via `AuditRunFactory`, and write the ledger. Used by EPC, partner, and portal appraisal.
 
     1. `loadEnabledAgents(lenderId)`.
-    2. `buildPlan(...)`.
-    3. `auditRunFactory.create(...)` mints the `audit_runs` row (EPC delegates to the correlationId-keyed dedup wrapper; everything else `createAuditRunDirect`). `agentConfig: plan` is passed.
+    2. `buildPlan` (default) or `buildFlatPlan` (`expandClosure: false`).
+    3. `auditRunFactory.create(...)` allocates the `audit_runs` row. EPC delegates to the correlationId-keyed dedup wrapper (`createAuditRun`, forwarding `mismoXmlHash` + `shadowOptions`); every other source uses `createAuditRunDirect`. The plan array is passed as `agentConfig`.
     4. One `db.transaction`: insert `agent_runs` rows (`onConflictDoNothing` on `(auditRunId, agentType)`) and `UPDATE audit_runs SET agent_config = plan`.
 
-    Returns `RouteResult`: `{ auditRunId, blueprint, plannedAgentRuns, denied }`.
+    Returns `RouteResult`: `{ auditRunId, executionPlan, plannedAgentRuns, denied, created?, runNumber?, existingStatus? }`. On an EPC dedup hit (`created === false`) the ledger was already seeded on the first delivery, so it returns early with empty `plannedAgentRuns` and the caller short-circuits the SQS redelivery.
   </Tab>
-  <Tab title="instrumentExistingRun(...)">
-    Write the ledger and bridge onto an already-created container, without minting a new one. Used by EPC (`expandClosure: true`, the dedup wrapper already minted the row) and LOS (`expandClosure: false`, `createSharedAuditRun` already minted it). Same transactional insert plus `agent_config` update, idempotent via `onConflictDoNothing`.
+  <Tab title="recordAgentRunsForExistingAudit(auditRunId, input, { expandClosure })">
+    Write the ledger and `agent_config` bridge onto an **already-created** container, without minting a new one. Used by LOS, whose `createSharedAuditRun` already minted the row (`trigger_source='los'`). Same transactional insert plus `agent_config` update, idempotent via `onConflictDoNothing`. LOS passes `expandClosure: false` so the flat suite runs with no phase-0 closure.
 
     <Warning>
-    EPC and LOS MUST use `instrumentExistingRun`. Calling `route()` on a path whose container already exists would mint a second container.
+    LOS must use `recordAgentRunsForExistingAudit`, not `route`. Calling `route()` on a path whose container already exists would mint a second `audit_runs` row via the factory.
     </Warning>
-  </Tab>
-  <Tab title="diffPlanVsActual(...)">
-    The plan-versus-actual parity harness. A dry `buildPlan` gives `predicted` (excluding skipped); the `agent_runs` rows give `actual` (excluding skipped). Returns `predictedOnly`, `actualOnly`, and `parity` (both empty). This proves the closure model before the router owns selection.
   </Tab>
 </Tabs>
 
 ## The agent_config compatibility bridge
 
-When the router owns a path, it writes the resolved plan array to `audit_runs.agent_config`. This is a **bridge** so the existing executor can honor the router's selection. It is not the source of truth — the durable model is the blueprint plus the `agent_runs` ledger. See [Agent runs ledger and reconciler](/agents/runs-ledger).
+`route` and `recordAgentRunsForExistingAudit` both write the resolved plan array to `audit_runs.agent_config`. The reconciler reads it as the **expected agent set** in its plan-aware completion guard — it will not complete a run until every expected agent has a (terminal) ledger row, so a phase-0 terminal flip cannot complete a run whose phase-1/2 rows have not been seeded yet. See [Runs ledger and orchestrator](/agents/runs-ledger).
 
-## Fail-closed behavior
+## Partner 403 on empty plan
 
-Every router-ownership path is best-effort and fail-closed. A flag-lookup blip, an empty selection, or any router error degrades to today's "run all" behavior rather than running none, and never aborts the audit. The per-path behavior is documented in [Feature flags and rollout](/agents/feature-flags-and-rollout).
+The partner controller (`partner-api/controllers/partner-audits.controller.ts`) calls `route({ triggerSource: 'partner', requestedAgents: dto.agents, s3Prefix: 'partner/<lender>/<loan>' })`. If `plannedAgentRuns.length === 0` (nothing entitled to run), it deletes the freshly-minted container best-effort (FK cascade drops its ledger rows) and returns `403` with the `denied` list. Otherwise it responds with the resolved plan as `agents` and hands `executionPlan` straight to background execution — no re-routing.

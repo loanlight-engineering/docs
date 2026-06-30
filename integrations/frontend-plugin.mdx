@@ -17,7 +17,7 @@ The legacy `packages/web-app/` frontend was **deleted** in commit `5b65c1b` (LOA
 - Deployed as a **static export to S3 + CloudFront** (build → `dist`; the `infra/` CDK uploads it). It is a pure client — there are no Next API routes (`route.ts`).
 - State via `zustand` (`store/useEllimae.ts`, `store/useAudit.ts`).
 - Datadog browser RUM/logs + PostHog for analytics, `pdfjs-dist` for in-app PDF viewing, Playwright for E2E.
-- Consumes `@loanlight-engineering/shared-types` and `@loanlight-engineering/shared-ui`.
+- Consumes `@loanlight-engineering/shared-types` (`^1.13.0`) and `@loanlight-engineering/shared-ui` (`^0.8.0`).
 
 ## Routes
 
@@ -43,9 +43,19 @@ The frontend calls **both** backends directly.
 Via `encompass.service.ts` / `epc-api-service.ts`. Bootstraps with `POST /integrations/origin`, then polls or streams `GET /integrations/audit-details/:id[/stream]` (`audit-progress.service.ts` handles the SSE), lists and streams the result PDF via `/integrations/documents/...` (`document.service.ts`), and opens the rich pop-out results view via `/integrations/audits/:auditId/external-url` (`external-results.service.ts`). See the [HTTP API](/integrations/http-api).
 </Tab>
 <Tab title="loanlight-api directly">
-Via `audit-api.service.ts`, against `NEXT_PUBLIC_LL_WEB_AUS_API_HOST`. It calls `GET /api/v1/audit_runs/{id}/results?includeNonIssues=true`, `/property_data`, `/urla_completeness`, and `POST /bug-reports`. Requests send `X-Requestor-ID` plus a bearer token.
+Via `audit-api.service.ts`, against `NEXT_PUBLIC_LL_WEB_AUS_API_HOST`. It calls `GET /api/v1/audit_runs/{id}/results?includeNonIssues=true`, `/property_data`, `/urla_completeness`, `getCreditData` → `GET /api/v1/audit_runs/{id}/credit`, and `POST /bug-reports`. Requests send `X-Requestor-ID` plus a bearer token.
 </Tab>
 </Tabs>
+
+## Credit and liabilities
+
+The `/audit/credit-liabilities` route renders the shared `CreditLiabilitiesView` from `@loanlight-engineering/shared-ui/audit`, fed by `AuditApiService.getCreditData` (`GET /api/v1/audit_runs/{id}/credit`). Both the sidebar nav item and the Overview card are gated on the PostHog feature flag `credit-liabilities` (`useFeatureFlagEnabled("credit-liabilities")`), and the nav item is only shown when the credit response is a non-empty array.
+
+The sidebar (`MergedAuditSidebar`) lists, in order: **Overview**, **Data Consistency**, **Document Health**, **Properties Check** (flagged on `properties-check`), **Credit & Liabilities** (flagged on `credit-liabilities`). Credit & Liabilities moved after Properties Check. The 1003-check is a route but not a sidebar item.
+
+<Note>
+The credit issue count on the sidebar badge and the Overview credit card is **FAIL-only** (`countCreditFindings` counts `outcome === "FAIL"`; `WARNING`, `NEEDS_INFO`, `PASS`, and `SKIPPED` are excluded). This matches the portal's credit issue count. The detail `CreditLiabilitiesView` still lists FAIL and WARNING in its own findings.
+</Note>
 
 ## Component conventions
 

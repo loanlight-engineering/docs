@@ -12,9 +12,9 @@ separate liabilities agent.
 <Note>
 The legacy Octy system prompt lists `creditEvaluation` as a "stub, not yet implemented." That
 is wrong. The agent is fully built: an 11-node graph plus the `lib/credit-pipeline` library
-(extraction, a Zod facts schema, 16 rules CRED_001–CRED_016, summaries, risk projection), the
-`portal-credit` NestJS module with 16 HTTP routes, and a BullMQ worker with heartbeat and
-orphan recovery. The only genuine stub is [Liabilities-Assessment](/agents/liabilities-assessment).
+(extraction, a Zod facts schema, 23 rules CRED_001–CRED_023, summaries, risk projection), the
+`portal-credit` NestJS module, and a BullMQ worker with heartbeat and orphan recovery. The only
+genuine stub is [Liabilities-Assessment](/agents/liabilities-assessment).
 </Note>
 
 ## How it runs
@@ -153,8 +153,12 @@ and the persist branch keyed on `isAuditDriven`.
 
 The extracted facts conform to `CreditFactsSchema`
 (`lib/credit-pipeline/schemas/credit-facts.schema.ts`, `schema_version: "CreditFacts.v0"`). Top
-level: `report`, `borrowers` (≥1), `bureaus` (1–3), and optional `tradelines[]`, `inquiries[]`,
-`public_records[]`, `collections[]`, `alerts[]`, and `summaries`.
+level: `report`, `borrowers` (≥1), `bureaus` (1–3), and optional `disputes[]`, `tradelines[]`,
+`inquiries[]`, `public_records[]`, `collections[]`, `alerts[]`, and `summaries`. The report-level
+`disputes[]` array (`ReportDisputeSchema`: `status` in `active | resolved`, `creditor`,
+`raw_remark`) backs rule CRED_023, and `report.is_first_time_homebuyer` backs CRED_022.
+`PublicRecordSchema.resolved_date` (the discharge/dismissal/satisfied date, extracted by the
+Reducto generator) drives the credit-event seasoning in CRED_018.
 
 Selected enums:
 
@@ -177,8 +181,8 @@ and unsecured balances), `delinquencies`, `utilization`, `counts`, `score`
 
 ## Credit rules
 
-The 16 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
-(`rule-registry.ts`, looked up by `getCreditRuleByCode`):
+The 23 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
+(`rule-registry.ts`, looked up by `getCreditRuleByCode`) across 11 categories:
 
 | Code | Name | Category |
 |---|---|---|
@@ -188,16 +192,30 @@ The 16 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REG
 | CRED_004 | Late Payments (12mo) | Payment History |
 | CRED_005 | Late Payments (24mo) | Payment History |
 | CRED_006 | Active Delinquency | Payment History |
+| CRED_017 | Housing Payment History | Payment History |
 | CRED_007 | Bankruptcy | Public Records |
 | CRED_008 | Foreclosure / Short Sale | Public Records |
 | CRED_009 | Tax Lien / Judgment | Public Records |
+| CRED_018 | Credit-event Seasoning | Public Records |
 | CRED_010 | Disputed Accounts | Disputed Accounts |
+| CRED_023 | Active Disputes | Disputed Accounts |
 | CRED_011 | Recent Inquiries | Credit Inquiries |
 | CRED_012 | Credit Score Minimum | Credit Scores |
 | CRED_013 | Score Discrepancy | Credit Scores |
+| CRED_020 | All-Borrower Min FICO | Credit Scores |
 | CRED_014 | DTI Ratio | DTI & Liabilities |
-| CRED_015 | Collection Accounts | Collections |
 | CRED_016 | Work Number Income Qualify Addendum Present | DTI & Liabilities |
+| CRED_015 | Collection Accounts | Collections |
+| CRED_021 | Aggregate Collections + Charge-Offs | Collections |
+| CRED_019 | Minimum Tradelines | Tradelines |
+| CRED_022 | First-Time Homebuyer Program Eligibility | Program Eligibility |
+
+<Note>
+The active-dispute detection rule is **CRED_023** (Active Disputes), seeded by migration
+`0198_seed_cred_023_active_dispute_template` into the shared `appraisal_rule_templates` catalog
+(`module = 'credit'`) and backfilled into every active credit rule set. CRED_017 is **Housing
+Payment History**, not active disputes.
+</Note>
 
 ### Rule evaluation
 
@@ -215,22 +233,35 @@ Loads `credit_rules` for that set ordered by `(code, loanProgramId, id)`, then a
 code.
 </Step>
 <Step title="Evaluate each rule">
-A disabled rule yields `SKIPPED`; missing required fields yield `NEEDS_INFO`; an
-`evaluateFnKey === "custom"` rule yields `SKIPPED` ("evaluated in a later release"); otherwise
-the evaluator dispatches `CREDIT_RULE_FN_MAP[evaluateFnKey]` with merged and validated
-thresholds. A `FAIL` is downgraded to `WARNING` when `rule.severity === "WARNING"`.
+A disabled rule yields `SKIPPED`. For built-in rules a context-applicability gate runs first: a
+rule whose registry definition has a `skipForContext` that fires (e.g. CRED_001 on an
+`occupancyType === "INVESTMENT"` loan — LOA-1652) yields `SKIPPED` **before** the required-fields
+precheck, so an inapplicable rule never leaks a `NEEDS_INFO`. Otherwise missing required fields
+yield `NEEDS_INFO`, then the evaluator dispatches `CREDIT_RULE_FN_MAP[evaluateFnKey]` with merged
+and validated thresholds.
+
+Custom rules (`evaluateFnKey === "custom"`) evaluate only when the `credit_custom_eval` feature
+flag is enabled for the lender (`isCreditCustomEvalEnabled`): a compound rule (`rule.condition`
+present) runs through the shared appraisal `evaluateCompoundRule` walker with the credit
+`getRuleFieldValue` resolver and `CREDIT_RULE_FIELD_REGISTRY` injected, and a simple custom rule
+runs `evaluateCreditCustomRule`. With the flag off, a custom rule yields `SKIPPED`.
 </Step>
 </Steps>
+
+A breach verdict (`FAIL` or `WARNING`) is normalized to the rule's configured DB `severity` —
+this is **bidirectional**: a rule that intrinsically emits `WARNING` (e.g. CRED_021) surfaces as
+`FAIL` when the lender configures `severity: "FAIL"`, and vice versa. Non-breach verdicts (`PASS`,
+`NEEDS_INFO`, `SKIPPED`, `PENDING`) pass through unchanged.
 
 Outcomes are `PASS`, `FAIL`, `WARNING`, `NEEDS_INFO`, or `SKIPPED`. The evaluator returns
 `{ results, ruleSetId, ruleSetVersion }`, returns empty results without `db` and `lenderId`, and
 never throws.
 
-The rule operators on `credit_rules.operator` use the 14-value union pinned by
-`credit_rules_operator_check` — credit does **not** include `abs_less_than` /
-`abs_less_than_or_equal` (those two are appraisal-only, where the constraint lists 16). Each rule may use
-exactly one rule type: a `condition` JSONB, an `operator` + `fieldPath`, or none
-(`chk_credit_rule_type_exclusive`).
+The rule operators on `credit_rules.operator` use the 16-value union pinned by
+`credit_rules_operator_check`. Migration `0190_credit_operator_abs_parity` added `abs_less_than`
+and `abs_less_than_or_equal` to bring credit to operator parity with appraisal, so credit and
+appraisal now share the same 16 operators. Each rule may use exactly one rule type: a `condition`
+JSONB, an `operator` + `fieldPath`, or none (`chk_credit_rule_type_exclusive`).
 
 ## Data model
 
@@ -288,8 +319,20 @@ All under `api/v1/portal/credit` (`PortalCreditController`):
 | GET | `/:id/key-field-reviews` | Key-field reviews |
 | PATCH | `/:id/key-field-reviews/:fieldId` | Resolve a key-field review |
 
-Custom credit-rule authoring (natural-language parsing, staged bundles, the credit field
-registry) lives in a separate `portal-credit-rules` module (`PortalCreditRulesController`).
+Custom credit-rule authoring lives in a separate `portal-credit-rules` module
+(`PortalCreditRulesController`): natural-language parsing (`credit-nl-parse.service.ts`), a
+dry-run preview (`credit-preview.service.ts`), the credit field registry, a compound-condition
+validator (`credit-condition-validator.ts`), and per-lender staged bundles
+(`staged-bundles/`, e.g. `firstcolony-credit`, `luxury-wse-credit`). A long pasted rule that the
+parser splits into two is persisted in `credit_rule_split_drafts` (migration
+`0189_credit_rule_split_drafts`, a credit-specific table — do not reuse the appraisal
+`rule_split_drafts`).
+
+Program-scoped behavior is expressed through these bundles plus `applyProgramOverlay`. The
+`luxury-wse-credit` bundle, for example, runs CRED_011 (Recent Inquiries) in **report-only** mode
+lender-wide — the `report_only` threshold flips the rule to surface the 12-month hard-inquiry
+count for review with no limit — and disables CRED_011 entirely on the DSCR investor-cash-flow
+programs (`PCF`, `SCF`) via `isEnabled: false` program overlays.
 
 ## Reliability and recovery
 

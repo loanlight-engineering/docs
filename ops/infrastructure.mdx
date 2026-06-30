@@ -155,7 +155,11 @@ Each repo deploys through its own workflows under `.github/workflows/`:
 - **loanlight-api** — `cd.yml` (prod; sets `DEPLOYED_ENVIRONMENT: prod`,
   `GIT_COMMIT_SHA: ${{ github.sha }}`, and docker build-args including
   `ENV_FILE=.env.prod`), `cd-int.yml`, `cd-app-int.yml`, `cd-app-prod.yml`,
-  `ci-api.yml`, `ci-app.yml`, `health-check.yml`, `partner-api-docs.yml`.
+  `ci-api.yml`, `ci-app.yml`, `health-check.yml`, `partner-api-docs.yml`,
+  `dependency-audit.yml` (PR gate via `dependency-review`, gated on
+  `vars.ENABLE_DEPENDENCY_REVIEW`, plus a weekly report-only `osv-scanner` scan
+  on Mondays 07:00 UTC), and `nightly-e2e.yml` (nightly 08:00 UTC + manual
+  `workflow_dispatch`, always targeting int).
 - **octy** — `deploy-octy-int.yml`, `deploy-octy-prod.yml`.
 - **integrations** — `deploy-encompass-int/prod.yml`,
   `deploy-web-app-v2-int/prod.yml`, `deploy-frontend-demo.yml`,

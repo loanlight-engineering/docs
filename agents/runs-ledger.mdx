@@ -1,117 +1,143 @@
 ---
-title: Agent runs ledger and reconciler
-description: The per-(audit_run, agent) agent_runs ledger and the reconciler.
+title: Runs ledger and orchestrator
+description: The agent_runs and audit_infra_steps ledgers, the reconciler, and the channel-blind orchestrator that runs the plan.
 icon: list-checks
 ---
 
-The `agent_runs` ledger records one row per (audit run, agent). It is additive: rows are minted `pending`, advanced as agents settle, and the run is completed once no non-terminal row remains. `AgentRunReconciler` owns the row lifecycle and drives container completion.
+The execution side of the platform is three pieces: the `agent_runs` and `audit_infra_steps` **ledgers**, the `AgentRunReconciler` that owns their lifecycle and drives container completion, and the `AgentOrchestrator` that runs the [router](/agents/router-and-entitlements)'s execution plan. The orchestrator is **channel-blind** — it takes an `ExecutionPlan` and an `ExecutionContext` and dispatches agents by identity, never branching on the trigger source. Each channel adapter builds the context and owns its own plan edges (entitlement resolution, phase stripping, completion).
 
-## `agent_runs` — the ledger table
+## The ledger tables
 
-File: `database/schema/agent-runs.ts`. Full schema in [Agent platform schema](/data-model/agent-platform-schema).
+`agent_runs` records one row per `(audit run, agent)`. `audit_infra_steps` records non-agent infra steps that gate a phase (today only LlamaCloud indexing). Both schemas are in [Agent platform schema](/data-model/agent-platform-schema); the load-bearing columns:
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | `uuid` PK | |
-| `audit_run_id` | `uuid` NOT NULL | FK `audit_runs(id)` ON DELETE CASCADE. |
-| `agent_type` | `varchar(64)` NOT NULL | FK `agents(agent_type)` ON DELETE NO ACTION. |
-| `status` | `varchar(16)` NOT NULL (`pending`) | CHECK `agent_runs_status_check`. |
-| `skip_reason` | `text` | Populated only for `skipped` rows. |
-| `external_run_id` | `uuid` | Representative external detail-row pointer for fan-out agents (e.g. appraisal `runId`). |
-| `langsmith_url` | `text` | Resolvable trace URL (appraisal back-fills this). |
-| `started_at` | `timestamptz` | Set when flipping to `processing`. |
-| `completed_at` | `timestamptz` | Set on any terminal flip; cleared on `reopen`. |
-| `errors` | `jsonb` | Per-agent error rollup (mirrors `audit_errors` at agent granularity). |
-| `created_at` | `timestamptz` NOT NULL | |
-
-Constraints:
-
-- UNIQUE `agent_runs_audit_run_id_agent_type_unique` on `(audit_run_id, agent_type)` — one row per agent per audit run. This is the idempotency anchor for `ensure` / `onConflictDoNothing`.
-- INDEX `idx_agent_runs_agent_type_status` on `(agent_type, status)`.
-
-### Status vocabulary
-
-`AGENT_RUN_STATUS = ["pending", "processing", "complete", "failed", "skipped"]` (type `AgentRunStatus`).
-
-- Terminal: `complete`, `failed`, `skipped`.
-- Non-terminal: `pending`, `processing`.
+- `agent_runs.status`: `pending`, `processing`, `complete`, `failed`, `skipped`. Terminal: `complete`, `failed`, `skipped`.
+- `agent_runs.output` (jsonb): the cross-phase handoff payload a producer agent persists on completion, rehydrated into the next phase.
+- `audit_infra_steps.status`: `pending`, `processing`, `complete`, `failed` (no `skipped`).
 
 <Warning>
-The ledger uses `complete`, not `completed`. The CHECK constraint pins this. The container `audit_runs.status` is the same way.
+The success value is `complete`, not `completed`. The CHECK constraints on `agent_runs.status` and `audit_runs.status` pin this. The appraisal pipeline separately uses `completed` for `appraisal_runs.status` — a different table.
 </Warning>
 
-## `AgentRunReconciler`
+## Status ownership
 
-File: `langgraph/agents/agent-run-reconciler.ts`. Injects the Drizzle db and `AuditService`. Constants: `TERMINAL_STATUSES = ["complete","failed","skipped"]`, `NON_TERMINAL_STATUSES = ["pending","processing"]`. `FlipOptions = { externalRunId?, langsmithUrl?, errors? }`.
+The split of who writes which status is the core invariant:
+
+- The **router** seeds `pending` rows (and `skipped` for data-gated agents) when it records the plan.
+- The **orchestrator** writes `skipped` for an agent whose channel-declared dependency was unmet, and never anything else.
+- Each **agent** owns its own `processing → complete/failed` transitions inside the dispatcher.
+- A **queue_worker** agent's row stays `pending` after enqueue — the background worker owns the rest.
+
+## AgentRunReconciler
+
+File: `langgraph/agents/agent-run-reconciler.ts`. Injects the Drizzle db and `AuditService`. Constants: `TERMINAL_STATUSES = ["complete","failed","skipped"]`, `NON_TERMINAL_STATUSES = ["pending","processing"]`, `WORKER_OWNED_AGENT_TYPES = ["appraisalEvaluation"]`. `FlipOptions = { errors?, output? }`.
 
 <AccordionGroup>
-  <Accordion title="flip(auditRunId, agentType, status, options?)">
-    Advance a single row. Builds the SET: `status`; `started_at = now` if `processing`; `completed_at = now` if terminal; plus optional `external_run_id` / `langsmith_url` / `errors`. The UPDATE is **guarded** to only touch rows whose current status is non-terminal (`inArray(status, [pending, processing])`).
-
-    Consequences: re-flipping a terminal row is a no-op; a late `complete` cannot stomp a terminal `failed`. Moving a terminal row back to `processing` is `reopen`'s job only.
+  <Accordion title="setAgentRunStatus(auditRunId, agentType, status, options?)">
+    Advance a single row. Sets `started_at = now` on `processing`, `completed_at = now` on a terminal status, plus optional `errors` / `output`. The UPDATE is **guarded** to only advance a non-terminal row (`inArray(status, [pending, processing])`), so re-setting a terminal row is a no-op and a late `complete` cannot stomp a terminal `failed`. Moving terminal → processing is `reopenAgentRun`'s job only.
   </Accordion>
-  <Accordion title="ensure(auditRunId, agentType)">
-    `INSERT ... VALUES(status:'pending') ON CONFLICT (audit_run_id, agent_type) DO NOTHING`. Idempotent — lets observer mode be the first to observe an agent and still have a row to flip later. Never resets an existing row.
+  <Accordion title="ensureAgentRun(auditRunId, agentType)">
+    `INSERT ... VALUES(status:'pending') ON CONFLICT (audit_run_id, agent_type) DO NOTHING`. Idempotent; never resets an existing row.
   </Accordion>
-  <Accordion title="reopen(auditRunId, agentType)">
-    Rerun-after-fail. In a transaction: flip the agent row `complete | failed → processing` (clears `completed_at`), guarded `inArray(status, [complete, failed])` so a `skipped` row is intentionally left untouched; and flip the container `audit_runs` row `complete | failed → processing` (clears `completed_at`). Emits the container vocabulary value `processing`.
+  <Accordion title="reopenAgentRun(auditRunId, agentType)">
+    Rerun-after-fail. In a transaction, flips the agent row `complete | failed → processing` (clears `completed_at`, guarded so a `skipped` row is left untouched) and flips the container `audit_runs` row `complete | failed → processing`. Used by the portal appraisal re-claim path. (Caveat in code: it reopens the shared container, correct only for a single-agent container.)
   </Accordion>
   <Accordion title="tryCompleteAuditRun(auditRunId): boolean">
-    Drives the container terminal once no non-terminal ledger row remains. Reads all `agent_runs` statuses for the audit.
+    Drives the container terminal once the run's work is done. Reads all `agent_runs` statuses, then applies three guards before calling `auditService.completeAuditRun`:
 
-    - **Vacuous guard:** returns `false` if there are zero rows — never completes an empty ledger, because the first insert may not have committed.
-    - Returns `false` if any row is non-terminal.
-    - Otherwise calls `auditService.completeAuditRun(auditRunId)` and returns `true`.
+    - **Vacuous guard:** returns `false` on zero rows — never completes an empty ledger.
+    - **Non-terminal guard:** returns `false` if any `agent_runs` row is non-terminal.
+    - **Plan-aware guard:** reads the expected agent set from `audit_runs.agent_config` and returns `false` until **every** expected agent has a row — so a phase-0 terminal flip cannot complete a run whose phase-1/2 rows are not seeded yet. Inert when `agent_config` is absent.
+    - **Infra-step guard:** returns `false` unless every `audit_infra_steps` row is terminal too.
 
     An all-failed run still becomes `complete` (failed is terminal). Idempotent.
   </Accordion>
+  <Accordion title="isPhaseTerminal / isInfraStepTerminal">
+    The barrier reads. `isPhaseTerminal(auditRunId, agentTypes, { infraCapability? })` is true only when every named agent's row is terminal — a missing row counts as not terminal — and (when an `infraCapability` is given) when its infra step is terminal. `isInfraStepTerminal` returns true when the row is absent (no infra step → does not gate) or `complete`/`failed`.
+  </Accordion>
+  <Accordion title="getAgentRunOutput / setAgentRunOutput / getAgentRunStatus">
+    `setAgentRunOutput` persists a producer's handoff to `agent_runs.output` (guarded to non-terminal rows). `getAgentRunOutput` reads it back for rehydration. `getAgentRunStatus` reads one row's status (null when absent) for the dependency-aware skip.
+  </Accordion>
 </AccordionGroup>
 
-`AuditService.completeAuditRun` sets `status='complete'` and `completed_at`, guarded `inArray(status, [pending, processing])`, and swallows errors (logs a warning). It emits the CHECK-pinned `complete`, never `completed`.
+`AuditService.completeAuditRun` sets `status='complete'` and `completed_at`, guarded `inArray(status, [pending, processing])`, and emits the CHECK-pinned `complete`.
 
-## Who writes the ledger
+## The orchestrator
 
-The ledger is written from three places (PRD §4.6):
+File: `langgraph/orchestrator/agent-orchestrator.service.ts`. `AgentOrchestrator.run(auditRunId, plan, ctx, hooks?)` executes the plan. Each phase's agents fire concurrently (`Promise.allSettled`) by identity through the dispatcher, then a ledger-observed barrier gates advancement; the standalone lane runs without a barrier.
 
 <Steps>
-  <Step title="The router — mints rows up front">
-    `route` / `instrumentExistingRun` insert `pending` (and `skipped`) rows in a transaction with `onConflictDoNothing`.
+  <Step title="Pre-flight (assertResolvable)">
+    Every planned agent must resolve to a catalog record, or `run()` throws **before** any dispatch — so config drift is a loud failure routed through the channel's error cascade, not a silently-tolerated per-agent settle.
   </Step>
-  <Step title="The pre-audit barrier — terminalizes phase-0 rows">
-    `PreAuditStageService` uses `ledgerObserver.recordTerminal` to flip `preAuditClassification` and `urlaExtraction` to `complete` or `failed`. Phase-0 foundation rows must reach a terminal state or a later `tryCompleteAuditRun` deadlocks.
+  <Step title="Indexing gate decision">
+    `needsIndexing = !ctx.skipIndexing && <any planned agent has requiresIndexing>`. EPC owns indexing at audit time (`skipIndexing=false`); LOS and partner index upstream (`skipIndexing=true`), so the gate no-ops for them even though the agents they run carry `requiresIndexing`.
   </Step>
-  <Step title="The executor and dispatchers — terminalize phase-1/2 and standalone rows">
-    `AuditAgentsExecutor` calls `ledgerObserver.recordSettled` per agent in its `Promise.allSettled` loop. The LOS dispatcher and the appraisal processor flip their own rows and then call `tryCompleteAuditRun`.
+  <Step title="Per phase">
+    For phase 0 with indexing, `indexing.beginInfraStep(auditRunId)` materializes the `llama_index` row **before** any agent can reach `tryCompleteAuditRun`. The phase's agents and `indexing.runIndexStep(...)` run concurrently (indexing uploads raw docs, independent of classification). After the agents settle, the orchestrator awaits the index promise and propagates the resolved `pipelineId` onto `ctx` for later phases.
+  </Step>
+  <Step title="Fatal-failure surfacing">
+    Every per-agent failure is tolerated except a URLA-extraction **deadline**: if a settled result is an `isUrlaExtractionDeadlineError`, `run()` rethrows it so the channel's outer catch fails the audit rather than completing it with degraded downstream findings.
+  </Step>
+  <Step title="Barrier + classify readiness">
+    `awaitPhaseTerminal` polls `isPhaseTerminal` (exponential backoff 250ms → 5s, ceiling 4h) until every phase agent_run row — and, on phase 0, the `llama_index` infra step — is terminal. On phase 0 it then runs `indexing.awaitClassifyReadiness(...)` (the bounded classify-readiness gate).
+  </Step>
+  <Step title="afterPhase hook + rehydrate">
+    The optional `afterPhase(phase, ctx)` hook fires at the boundary (EPC uses it to freeze the LOA-936 snapshot with the resolved pipeline). Then this phase's agents' `output` rows are rehydrated and merged into `upstreamOutput` for the next phase.
+  </Step>
+  <Step title="Standalone lane">
+    After the phases, standalone agents are dispatched with no barrier — a queue worker completes them and drives `tryCompleteAuditRun` on its own.
   </Step>
 </Steps>
 
-## Observer-mode backfill
+A wedged phase that exceeds the 4h ceiling throws `PhaseBarrierTimeoutError` out of `run()` into the channel's error cascade. The ceiling deliberately exceeds the agent-run orphan-reaper window (3h) so a genuinely-stuck row is reaped to `failed` (terminal for the barrier) before the ceiling fires.
 
-`AgentRunLedgerObserver` (`langgraph/agents/agent-run-ledger-observer.service.ts`) is the env-flag-gated, best-effort wrapper over the reconciler used in observer mode. It injects only `AgentRunReconciler`.
+### Dependency-aware skip
 
-- `ensurePending(auditRunId, agentTypes[])` — `reconciler.ensure(...)` per agent (mint pending rows before fan-out).
-- `recordTerminal(auditRunId, agentType, status, options?)` — `ensure` then `flip` (idempotent terminalize).
-- `recordSettled(auditRunId, agentType, PromiseSettledResult)` — maps a settled result: `fulfilled → complete`; `rejected → failed` with an `errors` rollup. `rollupErrors` turns an `AggregateError` (the credit fan-out of per-document failures) into `{ message, errors: [...] }` and everything else into `{ message }`.
+Before dispatching a phase agent, the orchestrator checks `dependenciesUnmet`: an agent the channel lists in `ctx.skipWhenDepsUnmet` whose in-plan `dependsOn` predecessor did not reach `complete` is flipped `skipped` instead of dispatched. An agent absent from that list **runs degraded** on an unmet dependency (undefined inputs — the EPC/partner legacy for `documentHealth`/`redFlags`). LOS sets `skipWhenDepsUnmet: ["redFlags"]` so `redFlags` is skipped when `propertyData` failed, while `documentHealth` still runs. A dependency absent from the plan (no row) does not gate.
 
-Two hard contracts: it is flag-gated (no writes when OFF — byte-identical to today, zero ledger writes) and best-effort (a ledger blip must never throw into the audit pipeline; errors are caught and logged with `[LEDGER]`). The flag is the env var `AGENT_RUNS_LEDGER_ENABLED`, read with strict `=== "true"`. See [Feature flags and rollout](/agents/feature-flags-and-rollout).
+## AgentDispatcher
 
-## Where the ledger is written per path
+File: `langgraph/orchestrator/agent-dispatcher.ts`. Routes one agent on its **runtime**:
 
-| Path | Instrumentation | Terminalization |
-|---|---|---|
-| EPC | `instrumentExistingRun` (closure) when `agent_router_epc_enabled` | Pre-audit barrier (phase 0) + executor `recordSettled` (phase 1/2). |
-| LOS | `instrumentExistingRun` (flat, `expandClosure:false`) when `agent_router_los_enabled` | `settleLosLedger` flips each row then `tryCompleteAuditRun`. |
-| Partner | `route` when `PARTNER_VIA_ROUTER` | Executor `recordSettled`. |
-| Portal appraisal | `route` when `APPRAISAL_VIA_ROUTER` | Processor `flip(..., "complete", { externalRunId, langsmithUrl })` then `tryCompleteAuditRun`; `reopen` on re-claim. |
+- `queue_worker` → resolves the agent's adapter from `QueueAgentRegistry` and **enqueues** the background job. The row stays `pending`; the worker owns `processing → terminal` and drives completion. A missing adapter or an enqueue throw is recorded as a per-agent failure so the audit can still complete.
+- `inproc_graph` → a `switch(agentType)` onto the existing `LangGraphService.create<Agent>…WithSharedAuditRun` methods, wrapped in `owned()`.
 
-For the LOS suite, `LOS_LEDGER_AGENTS = ["piiValidation", "documentHealth", "propertyData", "redFlags"]`, and `redFlags` is flipped `complete` only if `propertyData` succeeded, else `skipped` (it only runs on a successful `propertyData`).
+`owned()` is the per-agent status lifecycle: flip the row `processing`, run the work, flip `complete`; on a throw flip `failed`, record the `errors` blob, and route the error to `AuditErrorSinkService` (which fans a credit `AggregateError` out to one `audit_errors` row per failed document). It **never rethrows** — except a URLA-extraction deadline, which it rethrows after recording so the orchestrator can fail the audit.
 
-## Invariants
+Producer agents persist their cross-phase handoff via `persistHandoff` → `reconciler.setAgentRunOutput`. Only the fields downstream phases consume are extracted: `urlaExtraction` persists `transformedPiiFields`, `addressOverrides`, `loanPurpose`, the URLA view, borrower names, and credit identity; `propertyData` persists `consolidatedSubject`/`consolidatedBorrower` and the `trustIndicator` that `documentHealth` reads as `title_held_in_trust`.
 
-<Warning>
-LOS must use `expandClosure: false`. Closure expansion would mint phase-0 foundation rows that never flip, deadlocking `tryCompleteAuditRun`.
-</Warning>
+### Collaborators
 
-<Note>
-`tryCompleteAuditRun` has a vacuous-empty guard: it never completes a container with zero ledger rows, protecting against the first ledger insert not having committed yet.
-</Note>
+The dispatcher injects two helpers directly (no DI-token seams): `CreditDocumentLoaderService` (a self-contained S3 client that materializes credit document bytes only inside the credit fan-out — the bytes never ride the context or LangSmith) and `AuditErrorSinkService` (per-agent error recording). Worker-owned adapters self-register into `QueueAgentRegistry` from their feature module (portal appraisal), so `langgraph` never imports the feature module.
+
+## Indexing as an infra step
+
+File: `integration-events/services/indexing.service.ts`. `IndexingService` runs LlamaCloud indexing as a tracked phase-0 infra step (`LLAMA_INDEX_CAPABILITY = "llama_index"`), writing `audit_infra_steps` directly.
+
+- `beginInfraStep(auditRunId)` — idempotent insert + flip to `processing` (re-pends a non-complete row; no-ops a `complete` one, so EPC SQS redelivery re-enters cleanly).
+- `runIndexStep(auditRunId, ctx)` — `getOrCreatePipeline` + association + `uploadAndWaitForDocuments` (the poller-readiness wait) with the single `PIPELINE_NOT_FOUND` retry. On success flips the row `complete` and returns the resolved `pipelineId`; on any throw flips it `failed` (ledger-only) and rethrows into the channel's error cascade.
+- `awaitClassifyReadiness(auditRunId, ctx)` — the bounded classify-readiness gate. On deadline it runs the inline `saveAuditError → failAuditRun → WORKFLOW.ERROR` cascade (each its own try/catch) and `markCascadeHandled` so the channel outer catch does not double-cascade.
+
+## Orphan reapers
+
+Two net-new reapers (boot reap + unref'd `setInterval`, 5-minute cadence) keep the ledger from deadlocking on a dead worker/process. Both join on the parent `audit_runs` status, so they only unwedge runs that are themselves non-terminal — a no-op in steady state and storm-proof against a `pending` backlog under already-completed parents.
+
+| Reaper | File | Window | Reaps |
+|---|---|---|---|
+| `AgentRunOrphanReaperService` | `orchestrator/agent-run-orphan-reaper.service.ts` | 3h | Stuck non-terminal `agent_runs` rows → `failed` (skips `WORKER_OWNED_AGENT_TYPES`). |
+| `AuditInfraStepOrphanReaperService` | `orchestrator/audit-infra-step-orphan-reaper.service.ts` | 70min | Stuck non-terminal `audit_infra_steps` rows → `failed`. |
+
+The work itself is in `reconciler.reapStuckAgentRuns(windowMs)` and `reconciler.reapStuckInfraSteps(windowMs)`; both drive each affected run toward completion after reaping. Each window must exceed the slowest legitimate work it covers (credit fan-out for agents; the 57-minute index ceiling for infra steps) so a live-but-slow operation is never false-failed.
+
+## How channels wire it
+
+Every channel resolves a plan, builds the context, and calls `orchestrator.run`. After `run()` returns (every phase barrier already awaited), the channel calls `completeAuditRun` for the final completion.
+
+| Channel | Plan source | Context flags | Notes |
+|---|---|---|---|
+| EPC | `route` (`expandClosure` default) | `skipIndexing=false`, `indexingInputs` set | Owns phase 0 (classify/URLA + `llama_index`); `afterPhase(0)` freezes the snapshot. |
+| Partner | `route` | `skipIndexing=true` | `deriveOrchestratorPlan({ stripPhase0: true })` strips `preAuditClassification` (classified upstream); `urlaExtraction` still runs. |
+| LOS | `recordAgentRunsForExistingAudit` (`expandClosure:false`) | `skipIndexing=true`, `skipWhenDepsUnmet:["redFlags"]` | Flat fixed suite, no phase-0 closure. |
+| Portal appraisal | `route` (`requestedAgents:["appraisalEvaluation"]`) | standalone lane | Worker-owned; the `AppraisalQueueAdapter` enqueues the extraction job. |
+
+When a channel strips agents from execution that the router already seeded (partner's `preAuditClassification`, or EPC under `SKIP_LLAMA_INGESTION`), `markStrippedAgentsSkipped` terminalizes those rows `skipped` so no phase-0 row lingers `pending` and pollutes ledger projections.

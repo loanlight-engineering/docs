@@ -13,7 +13,7 @@ The audit run is the central unit of work in LoanLight. One row in `audit_runs` 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | On the EPC path, equals the `correlationId`. On the partner path, a fresh uuid. |
-| `lender_id` | uuid, NOT NULL → `lenders.id` | The tenant anchor. Tightened to NOT NULL in migration 0179. |
+| `lender_id` | uuid, NOT NULL → `lenders.id` | The tenant anchor. Added (nullable) in the expand migration 0202, then tightened to NOT NULL in the contract migration 0204. |
 | `loan_id` | uuid, nullable → `loans.id` | Null for loanless runs (for example a standalone appraisal). |
 | `loan_program_id` | uuid, nullable | |
 | `run_number` | integer, nullable | Per-loan sequence. Null only when `loan_id` is null (CHECK `audit_runs_run_number_requires_loan`). |
@@ -22,14 +22,14 @@ The audit run is the central unit of work in LoanLight. One row in `audit_runs` 
 | `requestor_id` | text, NOT NULL | The Encompass client ID (EPC) or partner identity. |
 | `mismo_xml_hash` | text | Dedup/cache key for URLA-extraction reuse. |
 | `expected_closing_date` | text | Resolved and persisted during agent execution. |
-| `agent_config` | jsonb | The selected agents (partner allow-list or router bridge). A compatibility bridge only. |
+| `agent_config` | jsonb | The router-resolved expected agent set, persisted at route time. Bridges the resolved plan to the dispatcher and is the source of truth for `tryCompleteAuditRun`'s plan-aware completion guard (every expected agent must have a terminal `agent_runs` row before the run completes). |
 | `is_shadow` | boolean, NOT NULL, default false | Shadow (parity) runs. |
 | `shadow_of_correlation_id` | uuid | Links a shadow run to the real run it mirrors. |
 
 A partial unique index enforces `(loan_id, run_number)` where `loan_id` is not null. See [core tables](/data-model/core-tables) for the full schema.
 
 <Note>
-`audit_runs` is lender-anchored and loan-optional. Older descriptions that say "every audit run belongs to a loan" are wrong: `lender_id` and `trigger_source` are NOT NULL, but `loan_id`, `run_number`, and `loan_program_id` are nullable (migrations 0176/0179).
+`audit_runs` is lender-anchored and loan-optional. Older descriptions that say "every audit run belongs to a loan" are wrong: `lender_id` and `trigger_source` are NOT NULL, but `loan_id`, `run_number`, and `loan_program_id` are nullable. The expand migration 0202 added the new columns (all nullable); the contract migration 0204 tightened `lender_id` and `trigger_source` to NOT NULL after every allocator backfilled them.
 </Note>
 
 ## Status lifecycle
@@ -40,9 +40,10 @@ pending → processing → complete | failed
 
 The code inserts runs as `processing`. Transitions are guarded so races cannot corrupt terminal state:
 
-- **`completeAuditRun(id)`** sets `status="complete"` only where `status IN ('pending','processing')`. This prevents a late success from overwriting a `failed` terminal state (the timeout-then-late-resolve race).
+- **`tryCompleteAuditRun(id)`** (the reconciler) drives the run to `complete` once every expected `agent_runs` row and `audit_infra_steps` row is terminal. It is idempotent and watch-based, so async standalone agents that finish on a separate queue still complete the run.
+- **`completeAuditRun(id)`** is the guarded terminal write `tryCompleteAuditRun` calls: it sets `status="complete"` only where `status IN ('pending','processing')`. This prevents a late success from overwriting a `failed` terminal state (the timeout-then-late-resolve race).
 - **`failAuditRun(id, step, msg)`** sets `status="failed"` where `status IN ('pending','processing')` (idempotent).
-- **`markAuditAsInterrupted(id)`** unconditionally sets `failed` (server-restart cleanup).
+- **`markAuditAsInterrupted(id)`** unconditionally sets `failed`. It is no longer called by a startup cleanup — time-windowed orphan reapers recover genuinely-stuck runs instead, so a deploy restart no longer kills in-flight audits.
 
 Stale `processing` runs older than 55 minutes are auto-reset for retry (below the 60-minute SQS visibility timeout). See [lifecycle and dedup](/pipeline/lifecycle-and-dedup).
 
@@ -76,8 +77,9 @@ Per-agent failures do not fail the run. They are recorded in `audit_errors` (FK 
 
 ## Creation entry points
 
-- **`createAuditRun(...)`** — EPC; `trigger_source="epc"`; `id` equals the `correlationId`.
-- **`createAuditRunForPartner(...)`** — Partner; `trigger_source="partner"`; `id` is a fresh uuid.
-- **`createAuditRunDirect(...)`** / **`AuditRunFactory.create(...)`** — generic.
+Runs are minted by `AgentRouterService.route(...)`, which delegates to `AuditRunFactory.create(...)`:
+
+- **EPC** delegates to the `correlationId`-keyed dedup wrapper `createAuditRun(...)`; `trigger_source="epc"`; `id` equals the `correlationId`.
+- **Partner / LOS** use `createAuditRunDirect(...)`; `trigger_source="partner"` or `"los"`; `id` is a fresh uuid. (The legacy `createAuditRunForPartner` is no longer the partner entry point.)
 
 See [triggers](/pipeline/triggers) and [lifecycle and dedup](/pipeline/lifecycle-and-dedup).

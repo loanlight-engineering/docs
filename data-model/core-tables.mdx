@@ -36,7 +36,7 @@ The central loan record (`loans.ts`). PK `id` uuid, `lender_id` → `lenders.id`
 <ParamField path="processing_status" type="text">Default `ready`. CHECK `loans_processing_status_check`: `processing | ready_for_audit | ready | error`.</ParamField>
 <ParamField path="loan_type" type="text">Plain text (not the `loan_type` pgEnum). `loan_program_name` is also stored.</ParamField>
 
-The table also carries many MISMO/Encompass loan attributes: `ltv`, `combined_ltv`, `hcltv_htltv`, `closing_date`, `estimated_closing_date`, `milestone_stage`, `nonqm_doc_type`, `ob_doc_type`, `property_appraised_value_amount`, `transaction_id`, foreign-address booleans (borrower / coborrower / employment / REO), and `borrower_country_of_citizenship` / `coborrower_country_of_citizenship`.
+The table also carries many MISMO/Encompass loan attributes: `ltv`, `combined_ltv`, `hcltv_htltv`, `closing_date`, `estimated_closing_date`, `milestone_stage`, `nonqm_doc_type`, `ob_doc_type`, `property_appraised_value_amount`, `transaction_id`, foreign-address booleans (borrower / coborrower / employment / REO), and `borrower_country_of_citizenship` / `coborrower_country_of_citizenship`. Migration `0211` added `income_type` and `note_rate` (both text) — display-only loan-detail fields rendered into the AUS report PDF.
 
 Indexes: `idx_loans_lender_id`, `idx_loans_loan_number`, `idx_loans_processing_status`, `idx_loans_loan_type`. Partial uniques: `(loan_number, lender_id)` where lender not null, `(loan_number)` where lender null, and `encompass_loan_id` where not null.
 
@@ -61,9 +61,9 @@ The legacy document tables (`documents`, `document_attachments`, in `documents.t
 
 The audit pipeline run ledger (`audit-runs.ts`), and the parent for nearly every per-agent [result table](/data-model/result-tables). PK `id` uuid.
 
-<ParamField path="lender_id" type="uuid NOT NULL → lenders (restrict)">Tightened to `NOT NULL` in migration `0179`. The run is lender-anchored.</ParamField>
-<ParamField path="loan_id" type="uuid → loans (set null)">Optional. Loanless runs are valid since migration `0176`.</ParamField>
-<ParamField path="loan_program_id" type="uuid → loan_programs (set null)">Optional.</ParamField>
+<ParamField path="lender_id" type="uuid NOT NULL → lenders (restrict)">Added in migration `0202` (EXPAND) and tightened to `NOT NULL` in migration `0204` (CONTRACT). The run is lender-anchored.</ParamField>
+<ParamField path="loan_id" type="uuid → loans (set null)">Optional. Migration `0202` dropped its `NOT NULL` and repointed the FK to `ON DELETE SET NULL`, so loanless runs are valid.</ParamField>
+<ParamField path="loan_program_id" type="uuid → loan_programs (set null)">Optional. Added in migration `0202`.</ParamField>
 <ParamField path="run_number" type="integer">`NULL` only when `loan_id` is `NULL` (CHECK `audit_runs_run_number_requires_loan`).</ParamField>
 <ParamField path="trigger_source" type="varchar(32) NOT NULL">CHECK allowlist: `epc | los | partner | portal | admin_rerun | shadow`.</ParamField>
 <ParamField path="status" type="varchar(20) NOT NULL">Default `pending`. CHECK: `pending | processing | complete | failed`.</ParamField>
