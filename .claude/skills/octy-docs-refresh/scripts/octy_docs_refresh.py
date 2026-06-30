@@ -462,6 +462,18 @@ def mdx_change_summary(repo: Path, commit: str) -> tuple[dict, list[dict]]:
     return counts, pages
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Do NOT follow redirects. A 3xx from this endpoint means an auth gate /
+    middleware bounced us to a login page — surface it as the 3xx it is instead
+    of silently following it to a 200 + HTML body that looks like success."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def post_to_octy(payload: dict, api_url: str, api_key: str) -> tuple[int, str]:
     # OZ_TO_OCTY_DOCS_REFRESH_API_URL is the FULL endpoint URL (not a base), e.g.
     # https://octy.loanlight.com/api/oz/docs-refresh — used verbatim.
@@ -477,7 +489,7 @@ def post_to_octy(payload: dict, api_url: str, api_key: str) -> tuple[int, str]:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _OPENER.open(req, timeout=30) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
@@ -566,9 +578,27 @@ def cmd_notify(args: argparse.Namespace) -> int:
         )
 
     code, text = post_to_octy(payload, api_url, api_key)
+    # A 2xx is necessary but NOT sufficient: an auth gate / misrouted endpoint can
+    # answer 200 with an HTML login page, which would otherwise read as success
+    # while the row never lands in Octy's DB. Require a real JSON `{ ok: true }`.
     if 200 <= code < 300:
-        eprint(f"[octy-docs-refresh] notified Octy ({code}). {text[:300]}")
-        return 0
+        try:
+            parsed = json.loads(text)
+            ok = isinstance(parsed, dict) and parsed.get("ok") is True
+        except json.JSONDecodeError:
+            ok = False
+        if ok:
+            eprint(f"[octy-docs-refresh] notified Octy ({code}). {text[:300]}")
+            return 0
+        eprint(
+            f"[octy-docs-refresh] notify FAILED: endpoint returned {code} but the "
+            f"body is not a JSON success (got: {text[:300]!r}). This usually means "
+            "the request was redirected to a login page — verify "
+            "OZ_TO_OCTY_DOCS_REFRESH_API_URL points at /api/oz/docs-refresh and that "
+            "the route is exempt from auth middleware. The docs are already committed "
+            "& pushed — this only affects the Octy dashboard / Slack record."
+        )
+        return 1
     eprint(
         f"[octy-docs-refresh] notify FAILED ({code}): {text[:500]}\n"
         "The docs are already committed & pushed — this only affects the Octy "
