@@ -73,6 +73,7 @@ See [Partner API results and access URLs](/partner-api/results-and-access-urls).
 - `GET /api/v1/audit_runs/:id/credit`
 - `GET /api/v1/audit_runs/:id/urla_completeness`
 - `GET /api/v1/audit_runs/:id/classifications`
+- `GET /api/v1/audit_runs/:id/appraisal` — `PortalAppraisalPayload` or `{ data: null }` (never 404); thin projection from `appraisal_runs` via `AppraisalAuditProjectionService`. Added in LOA-1675 to surface the EPC-triggered appraisal run on the audit sidebar. Manual-override overlay is applied (LOA-1685).
 - `GET /api/v1/audit_runs/by-loan/:encompassLoanId/latest-completed`
 
 See [Portal audit results API](/portal/api-audit-results).

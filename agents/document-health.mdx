@@ -113,6 +113,18 @@ productType)`. If no rule exists, the result is `issueKind: "valid"` ("has no ex
 Otherwise it extracts the document date (full-file retrieval by default; chunked retrieval for
 large docs or on a context-length error), then computes expiration:
 
+<Note>
+**Multi-account bank-statement grouping (LOA-1196):** For bank-statement documents, the node first
+consumes `document_classifications.extracted_metadata.account_last_4` (the pre-audit classification
+stage persists this per-segment). When multiple account last-4s are present on a single statement
+(e.g. combined/relationship statements), the node fans out and emits one
+`DocumentExpirationResult` per account — same file, same date, distinct `accountNumber`. This is
+the primary grouping source; the legacy LLM date/account extraction is a fallback for rows that
+lack metadata or where the pre-audit stage did not run. The fan-out applies to all lenders
+unconditionally; completed audits are not retroactively recomputed (re-audit to update grouping).
+Two accounts sharing the same last-4 merge into a single group (documented same-last-4 invariant).
+</Note>
+
 - `expirationDate = extractedDate + expiration_days`; the baseline is `estimatedClosingDate ?? today`.
 - `isExpired = isExpiredToday || willExpireOnOrBeforeTargetDate`; `isExpiringSoon` is within
   `warning_days` after the baseline. `business_days` mode skips weekends.

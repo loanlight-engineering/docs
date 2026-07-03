@@ -28,6 +28,21 @@ max 2). The processor (`@Processor("appraisal-extraction")`) claims the run with
 `LangGraphService.createAppraisalEvaluationGraph`, persists the graph-returned `enrichmentData`,
 then runs the rules and findings (see below).
 
+### EPC audit path (LOA-1675)
+
+The agent also runs on the EPC audit path, triggered post-completion by
+`triggerAppraisalEvaluation` in `integration-orchestration.service.ts`. After `WORKFLOW.COMPLETE`
+fires, the orchestrator enumerates classified appraisal documents (`appraisal_standard`,
+`desk_review`) from the S3 manifest, copies the appraisal PDF into the portal bucket, mints an
+`appraisal_runs` row stamped with `loan_id`, `lender_id`, and `audit_run_id`, and dispatches
+the job by identity. The EPC audit completes synchronously; the appraisal job runs as a
+detached best-effort task (up to ~89 min) and does not gate `WORKFLOW.COMPLETE`.
+
+Read the EPC-linked run via `GET /api/v1/audit_runs/:id/appraisal` — returns `PortalAppraisalPayload`
+or `{ data: null }` (never 404). The `AppraisalAuditProjectionService` applies the manual-override
+overlay (LOA-1685) to the projection. See [Integration orchestration pipeline](/integrations/orchestration-pipeline)
+and [Reading audit results](/pipeline/results).
+
 `LangGraphService.createAppraisalEvaluationGraph` takes an options object, returns the
 extraction result plus the graph-owned `enrichmentData`, and races the graph against
 `APPRAISAL_GRAPH_DEADLINE_MS`. The builder `buildAppraisalEvaluationGraph` closes over
@@ -178,7 +193,8 @@ against the geocoded actual distance; it exists in the in-code registry but prod
 the DB-backed rules, so migration `0192_seed_comp_007_rule_template` seeds it into
 `appraisal_rule_templates` and backfills it into existing rule sets. Migration
 `0193_seed_missing_appraisal_rule_templates` likewise reconciles other in-code rules that were
-never seeded.
+never seeded. Migration `0213_comp_007_tolerance_10pct` (LOA-1200) tightened the proximity
+tolerance from 25% to 10%.
 
 The `appraisal_rules.operator` CHECK (`appraisal_rules_operator_check`) is the **16-value** union
 (adding `abs_less_than` and `abs_less_than_or_equal` to the base 14). Credit reached the same
@@ -207,6 +223,15 @@ rule-definition or Zod change) so the two rules actually evaluate. The XML bridg
 `…improvements[0].units[0].detail.is_adu → improvements.has_accessory_unit`, so DH_025 evaluates
 from MISMO too, but DH_026 stays `NEEDS_INFO` on XML-only ADU appraisals — MISMO carries an ADU
 count, not the cost-grid area, so only the PDF path fills `adu_sqft`.
+
+Property-type characteristic flags were renamed from their original "required-state" naming
+(e.g. “Not a row home”, “No unusual floor plan”) to characteristic-first naming that describes
+the property trait rather than a prohibition (LOA-1680). `DH_029` (`CUST_DEE00029`, the row-home
+rule) was also downgraded from `FAIL` to `WARNING` — row homes and townhouses are eligible
+property types; the rule flags for underwriter review, not disqualification. `DH_019`
+(`CUST_DEE00019`) and related rules (`CUST_DEE00025`, `00030`, `00031`, `00049`) were renamed
+similarly. Genuine disqualifiers (condotel, lava zone, multiple dwellings, condition defects,
+recent conversion) retain `FAIL` severity and are unchanged.
 
 <Note>
 The fields were renamed between spec and as-built: LOA-1368/1374 spec'd `improvements.has_adu` and
@@ -245,7 +270,8 @@ revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status
 `commentSummary`/`commentKeywords`, `extractionCost`, `extractionStep`, `errorCategory`,
 `isScanned`), `complianceResults`, `enrichmentData`, `findings`, `parentSnapshotData`,
 `photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`,
-`selectedAgencySources[]`, and `rentalData` (Mashvisor STR/LTR enrichment, migration
+`selectedAgencySources[]`, `loanNumber` (migration `0215_appraisal_runs_loan_number`, persisted
+from the EPC audit path by LOA-1681), and `rentalData` (Mashvisor STR/LTR enrichment, migration
 `0179_add_appraisal_runs_rental_data`).
 </ResponseField>
 

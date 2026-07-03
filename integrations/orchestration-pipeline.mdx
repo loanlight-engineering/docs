@@ -29,7 +29,7 @@ step emits a progress event with an incrementing integer that drives the Encompa
 | `UPLOADING_DOCUMENTS` / `UPLOADING_TO_AI` | 25 | Upload PDFs to the pipeline. |
 | `WAITING_FOR_PIPELINE` | 50 | Documents ready, barrier reached. |
 | `EXECUTING_AGENTS` | — | Phase 2/3 agents. |
-| `COMPLETING_AUDIT` | — | `completeAuditRun`, then best-effort `updateLoanStatus(loanId, "ready")`, then `WORKFLOW.COMPLETE`. |
+| `COMPLETING_AUDIT` | — | `completeAuditRun`, then best-effort `updateLoanStatus(loanId, "ready")`, then `WORKFLOW.COMPLETE`. After `WORKFLOW.COMPLETE`, `triggerAppraisalEvaluation` fires as a detached best-effort job — see below. |
 
 `s3PrefixToUse = s3Prefix?.trim() || correlationId`.
 
@@ -83,6 +83,19 @@ settles during phase 0 before the LlamaCloud index step is awaited — so firing
 means a LlamaCloud/index failure (which throws before the success hook runs) no longer drops the
 client's document push. The emit stays fire-and-forget and never throws.
 </Note>
+
+## Post-completion: appraisal evaluation (LOA-1675)
+
+After `WORKFLOW.COMPLETE` fires, `processAuditRequest` attempts to trigger the appraisal agent on the EPC audit as a detached, best-effort job (`triggerAppraisalEvaluation`). It:
+
+1. Checks the lender entitlement for `appraisalEvaluation` via `AgentRouterService.isAgentEnabled`.
+2. Enumerates classified appraisal documents with `enumerateAppraisalDocumentRefs` — only `appraisal_standard` and `desk_review` classification types; `appraisal_1007` and `air_cert` are excluded (they are not the report).
+3. Copies the classified appraisal PDF into the portal bucket so the existing appraisal worker resolves it unchanged (no per-run bucket threading).
+4. Mints an `appraisal_runs` row stamped with `loan_id`, `lender_id`, and `audit_run_id`, calls `ensureAgentRun`, and dispatches the job by identity.
+
+The EPC audit force-completes synchronously (Encompass spinner clears); the appraisal job takes up to ~89 min and must not gate that. The portal renders "appraisal pending" from `appraisal_runs.status` until the job finishes. `completeAuditRun` / `failAuditRun` are guarded to `inArray(['pending', 'processing'])`, so a later appraisal terminal state is a no-op on the already-`complete` audit. This step is skipped under `SKIP_LANGGRAPH_AGENTS` / `SKIP_LLAMA_INGESTION`.
+
+The audit-scoped results endpoint is `GET /api/v1/audit_runs/:id/appraisal` (returns `PortalAppraisalPayload` or `{ data: null }`, never 404). See [Reading audit results](/pipeline/results).
 
 ## Phase 2/3 — audit agents
 

@@ -87,7 +87,18 @@ conventions.
     It also defines API infra lambdas under `packages/api/infra/lambda/`: the API
     Gateway authorizer shims (`auth/index.ts`, `auth/encompass.ts`,
     `auth/partner.ts`) and the DB lifecycle lambdas (`db-migration`, `db-init`,
-    `db-migrate`, `credit-audit-null-monitor`).
+    `db-migrate`, `credit-audit-null-monitor`). The `db-migrate` Lambda was extended
+    (LOA-1495) with `read-migrations.ts` (reads the current applied-migrations ledger)
+    and `reconcile.ts` (ledger reconciliation for post-squash deploys — inserts baseline
+    hashes without running schema DDL).
+
+    **Disaster recovery:** `packages/api/infra/DR_RUNBOOK_AURORA_RESTORE.md` is the
+    canonical Aurora PostgreSQL Serverless v2 restore runbook for `LLApi` (replaces the
+    legacy Notion/Supabase runbook, LOA-1710). Two helper scripts accompany it:
+    `infra/scripts/dr-resolve.sh` (read-only; renders exact restore CLI commands for the
+    target environment) and `infra/scripts/dr-drill-int.sh` (int-only game-day drill—
+    restore → writer promotion → wait, dry-run by default, `--cleanup` teardown). Both
+    accept `--profile` / `AWS_PROFILE`. Destructive prod steps remain manual.
   </Tab>
   <Tab title="octy (Octy)">
     `octy/infra/bin/app.ts` deploys `EcrStack → NetworkStack → ApplicationStack`.

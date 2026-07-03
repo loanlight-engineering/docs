@@ -174,7 +174,7 @@ B-track durable delivery-queue scaffold (LOA-946/948/949). UNIQUE `(transaction_
 | attempt and lock columns | |
 
 <Note>
-This table is scaffolding, not yet in the live delivery path. See [Messaging](/integrations/messaging).
+This table and the associated `epc-delivery` package are dead scaffolding — they are not part of the live delivery path. The `document_push` flag-based routing (LOA-948) replaced this design. Cleanup is tracked in LOA-1678. See [Audit lifecycle](/integrations/audit-lifecycle).
 </Note>
 
 ### lender
@@ -185,10 +185,10 @@ Per-lender delivery behaviour (added in 012).
 |---|---|
 | `id` | PK |
 | `name` | |
-| `audit_delivery_mode` | `single` / `split` / `pipeline`, default `single` |
+| `audit_delivery_mode` | `single` / `split` / `pipeline`, default `single`. **Retired** — the `document_push` flag on the `lender_feature` table is now the sole switch for routed delivery (LOA-948). This column remains in the schema pending cleanup (LOA-1678). |
 | `workos_org_id` | text, nullable; added in 014. The lender's WorkOS org id, sent as the `X-Requestor-ID` on the trusted internal audit-PDF data fetch. Unprovisioned lenders fall back to `provider_client_id`. |
 
-The `audit_delivery_mode` drives the single vs split delivery decision in [Audit lifecycle](/integrations/audit-lifecycle). Shadow audits resolve a lender by name via this table — see [Shadow audits](/integrations/shadow-audits). `workos_org_id` is also how the [routing-config admin API](/integrations/routing-config-admin) maps an `:orgId` path param to a `lender.id`.
+Shadow audits resolve a lender by name via this table — see [Shadow audits](/integrations/shadow-audits). `workos_org_id` is also how the [routing-config admin API](/integrations/routing-config-admin) maps an `:orgId` path param to a `lender.id`.
 
 ### audit_delivery_log
 

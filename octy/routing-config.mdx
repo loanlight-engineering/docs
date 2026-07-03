@@ -6,9 +6,9 @@ icon: route
 
 Routing Config at `/routing-config` is Octy's editor for the **EPC document-routing rule sets** — the configuration the integrations service uses to route Encompass documents. It is a thin, versioned config console over the integrations service's routing-config admin API; Octy stores none of this data itself. The page lives in `src/app/(app)/routing-config/` (`page.tsx` → `RoutingConfigPage.tsx`) and the typed API client in `src/lib/integrations-routing-client.ts`.
 
-<Warning>
-The integrations routing-config endpoint is **not live yet**. The Octy client and UI are built against the frozen LOA-1188 contract and unit-tested with mocked fetch. Treat this page as ready-but-waiting on the integrations service until that backend ships.
-</Warning>
+<Note>
+The integrations routing-config admin API is live. Octy can read and author routing rule sets against the integrations service. Per-lender document-push routing (AUS report + property PDFs) is activated by the `document_push` lender feature flag — see [Audit lifecycle](/integrations/audit-lifecycle).
+</Note>
 
 ## Layout
 
@@ -65,6 +65,18 @@ The client is a close cousin of the loanlight-api client, but points at a **sepa
 | `INTEGRATIONS_INTERNAL_API_KEY` | Shared secret sent as `x-internal-api-key`. In deployed envs both services read the same `LLIntegrations/INTERNAL_API_KEY` Secrets Manager secret. |
 
 Every call also carries the acting WorkOS user for the integrations audit trail — `x-acting-user-id` (WorkOS user id) and `x-acting-user-email` — and uses a 120-second timeout. Non-2xx responses surface as `ApiClientError`; `actions/shared.ts` maps the contract's **401 / 400 / 404 / 409** statuses to UI messages, and keeps 401s generic so the internal key is never echoed back to the browser.
+
+## Document-router outcomes on classification cards (LOA-1714)
+
+Octy surfaces document-router routing outcomes directly on classification cards in the **Loan Lookup** modal (the `LoanClassificationsPane` / `DocumentExplorer` views). When a classification has a routing outcome, a **Show routing** toggle appears on the `ClassificationCard` and expands a `ClassificationRoutingSection` showing:
+
+- the outcome details (container name, document type, push state),
+- the S3 split-storage path that produced the outcome, and
+- a link to the relevant Routing Config page.
+
+Outcomes are fetched once per loan by `RoutingOutcomesProvider` via the `document-push.getOutcomes` server action, using the classification's `split_storage_path` as the join key to the integrations routing outcome table. Fetch errors yield an empty result — the classification card renders normally without the routing section.
+
+The `integrations-routing-client.ts` and `integrations-routing-types.ts` modules were extended to carry routing-outcome types and the new `getDocumentRoutingOutcomes` / `getRoutingOutcomesByClassificationId` actions.
 
 ## Related pages
 

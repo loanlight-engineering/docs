@@ -56,22 +56,20 @@ The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResour
 </Step>
 </Steps>
 
-## Single vs split delivery
+## Delivery modes
 
-`AusUpdateService` decides delivery shape from the client's lender `audit_delivery_mode` (`single` default, `split`, or `pipeline`; see [Integrations database schema](/integrations/database-schema)).
+`AusUpdateService` decides delivery shape from the lender's **`document_push` feature flag** (`DOCUMENT_PUSH_FEATURE_KEY` on the `lender_feature` table). `resolveDocumentPushGate` resolves the lender for the transaction and reads the flag. A DB error throws (fail-loud — an opted-in lender is never silently downgraded to the combined path); an unmapped client is simply not enabled.
 
 <Tabs>
-<Tab title="Single (default)">
-One AUS Report PDF is generated and attached in a single PATCH. This is the default path for every lender unless their `lender.audit_delivery_mode` says otherwise.
+<Tab title="Combined (default — flag OFF)">
+One AUS Report PDF is generated via `deliverComplete` and attached in a single PATCH. No property PDFs, no document-push routing. This is the default for every lender until the `document_push` flag is enabled.
 </Tab>
-<Tab title="Split (LOA-970)">
-When `audit_delivery_mode = 'split'` and the state is `Complete`, `deliverSplit` generates one main AUS PDF plus one PDF **per property**. All are stored in S3 under `audit-deliveries/{transactionStateId}/` and uploaded in a single PATCH. Property PDFs are bound to per-property `resourceContainers` typed `loanlight_property_report_{i}` with the address as the description. One `audit_delivery_log` row is written per delivered doc, only after the PATCH confirms. The path fails loud on a dropped upload.
+<Tab title="Routed (flag ON — LOA-948)">
+When `document_push` is enabled and the audit state is `Complete`, `deliverSplit` generates one main AUS PDF plus one PDF **per property**. Both the AUS report and each property PDF are routed through the table-driven `document_push_routing_config` via `buildRoute` — the same routing table used for classified document delivery. Each property lands in its own eFolder container named from its address (identical addresses collapse per the EPC-1379 duplicate rule). All files are stored in S3 under `audit-deliveries/{transactionStateId}/` and delivered in a single PATCH. One `audit_delivery_log` row is written per doc after the PATCH confirms. The path fails loud on a missing routing config or a dropped upload.
+
+The `audit_delivery_mode='split'` column and its trigger (LOA-970) are retired in favor of this flag-based routing. Cleanup of the dead durable-pipeline scaffolding (`epc-delivery` package, `epc_delivery_records` table, migrations 010/011, `audit_delivery_mode`) is tracked in LOA-1678.
 </Tab>
 </Tabs>
-
-<Note>
-The `epc-delivery.fifo` queue and `epc_delivery_records` table are B-track scaffolding (LOA-946/948/949/989) and are **not** yet driving deliveries. Current delivery is the synchronous single/split path inside `AusUpdateService`. See [Messaging](/integrations/messaging).
-</Note>
 
 ## Failure handling
 

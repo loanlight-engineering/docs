@@ -38,7 +38,7 @@ Run `db:migrate` against the target environment.
 </Step>
 </Steps>
 
-The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0211_loa_1625_income_type_note_rate` at time of writing).
+The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0218_transaction_category_overrides_backfill` at time of writing).
 
 <Warning>
 **The migration runner owns the outer transaction.** Do not add raw `BEGIN;` / `COMMIT;` inside a migration `.sql` — it broke atomicity in `0143`.
@@ -79,6 +79,49 @@ Because `drizzle-kit generate` re-derives SQL from the schema, a schema file tha
 <Note>
 The timestamp invariant is why nearly every timestamp column is declared `timestamp(..., { withTimezone: true, mode: "string" })`. A `pg.types.setTypeParser` override returns raw ISO strings (no JS `Date` coercion) for timestamptz/timestamp OIDs.
 </Note>
+
+## Squashing migrations (quarterly) — LOA-1495
+
+The migration chain only grows. `pnpm migrate:squash <cutoff-idx>` collapses the settled
+prefix (entries `0..cutoff` in journal order) into a **baseline set** without touching the
+database schema:
+
+- One transactional `0000_baseline.sql` (all non-enum bodies, wrapped in `BEGIN;…COMMIT;`).
+- N isolated enum baselines — each `ALTER TYPE … ADD VALUE` is split into its own file because
+  PostgreSQL forbids `ADD VALUE` inside a transaction.
+
+After collapsing, the script rewrites the journal head, deletes the collapsed `.sql` files,
+preserves and renumbers the tail (keeping each entry’s original `version`/`breakpoints`/`when`
+— only `idx` is rewritten), and emits an **append-only reconciliation manifest**
+(`meta/_squash_manifest.json`). Re-running the same cutoff is a manifest-detected no-op.
+
+The full operator flow:
+
+```bash
+pnpm migrate:squash <cutoff-idx>   # collapse entries[0..idx] → baseline set
+pnpm validate:migrations            # exit 0; check 6 validates the manifest
+pnpm squash:equivalence-proof       # schema + pg_dump diffs are empty
+pnpm db:generate                    # expect "No schema changes"
+pnpm test && pnpm test:migration    # both green
+```
+
+The cutoff is a journal **idx** (not a filename tag). Run `migrate:squash` on a branch freshly
+cut from `main` so the captured pre-squash base commit stays a durable ancestor.
+
+**Production is a zero-schema-DDL no-op.** Deployed databases already applied the collapsed
+prefix. On the first CD deploy after merge, the `DbMigrate` Lambda reconciles the
+`drizzle.__drizzle_migrations` ledger — an idempotent `INSERT` of the baseline-set hashes.
+Superseded rows are retained (rollback safety). No application schema DDL runs. Every subsequent
+deploy sees the same hashes and skips. End-to-end: **author + verify locally → commit →
+merge → first INT deploy reconciles INT ledger → promote → first PROD deploy reconciles PROD
+ledger.**
+
+<Warning>
+Never hand-collapse migrations or hand-edit `meta/_journal.json`, the
+`drizzle.__drizzle_migrations` ledger, or `meta/_squash_manifest.json`. Run
+`pnpm migrate:squash` and let it do this deterministically. After pulling a squash onto a
+populated local DB, drop and rebuild, clearing the **`drizzle` schema** (not just `public`).
+</Warning>
 
 ## Two migration ledgers
 

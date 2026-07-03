@@ -42,6 +42,8 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `GET /api/v1/portal/bank-statements/:id/recurring-expenses` | read+ | Recurring-expense detection (#2517) |
 | `POST /api/v1/portal/bank-statements/:id/large-deposit-overrides` | client_admin, client_user | Force/suppress a deposit flag (`CreateLargeDepositOverrideDto`, HTTP 201, throttle 30/min) |
 | `DELETE /api/v1/portal/bank-statements/:id/large-deposit-overrides/:transactionId` | client_admin, client_user | Remove an override (throttle 30/min) |
+| `PATCH /api/v1/portal/bank-statements/:borrowerFileId/transactions/:transactionId/category` | client_admin, client_user | Override a single transaction's category (`PatchTransactionCategoryDto { category, reason }`, HTTP 200). Writes `transaction_category_overrides`; `transactions.category` is immutable (the override is a separate row). |
+| `PATCH /api/v1/portal/bank-statements/:borrowerFileId/transactions/category` | client_admin, client_user | Bulk-override categories for multiple transactions (`BulkPatchTransactionCategoryDto`, HTTP 200). |
 | `POST /api/v1/portal/bank-statements/:id/reprocess` | client_admin, client_user | Re-run analysis (HTTP 200, throttle 10/min) |
 | `GET /api/v1/portal/bank-statements/:id/export` | read+ | Export data (throttle 10/min) |
 
@@ -71,6 +73,15 @@ Optional borrower name.
 </ParamField>
 
 Processors: `bank-statement.processor.ts` (extraction pipeline), `ai-summary.processor.ts`, and `categorization.service.ts` (Ntropy enrichment in batches of 1000, with a daily credit-budget circuit breaker). `VALID_FINDING_TYPES` is imported from the processor.
+
+#### Income categorization (unified whitelist)
+
+Ntropy always uses the `consumer` account-holder taxonomy, regardless of `borrowerType`. Income inclusion applies a **single whitelist** (`DEFAULT_INCOME_CATEGORIES_CONSUMER` in `bank-statement.service.ts`) identically to both personal and business borrowers — there is no business blacklist and no `DEFAULT_EXCLUDED_CATEGORIES_BUSINESS`.
+
+Two additional rules run after Ntropy categorization:
+
+- **P2P self-transfer exclusion:** credits whose Ntropy counterparty (`merchant`) shares the account holder’s surname or is an exact full-name match are relabeled by `applyP2pSelfTransfer` (`lib/bank-statement/p2p-self-transfer.ts`). This runs after `applyDepositBuckets`. The resulting bucket is not in the income whitelist, so self-transferred credits are excluded from income for both borrower types.
+- **Per-transaction category override:** reviewers can reassign a transaction’s category via the new `transaction_category_overrides` table (migrations `0217`/`0218`). `transactions.category` is write-once (the Ntropy-derived value); an override is a separate row. The portal UI exposes this as a dropdown on each transaction row, with a required reason field.
 
 ## bank-statement-export
 
