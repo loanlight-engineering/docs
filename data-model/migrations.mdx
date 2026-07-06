@@ -38,7 +38,7 @@ Run `db:migrate` against the target environment.
 </Step>
 </Steps>
 
-The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0218_transaction_category_overrides_backfill` at time of writing).
+The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0220_archive_legacy_appraisal_stub_fields` at time of writing).
 
 <Warning>
 **The migration runner owns the outer transaction.** Do not add raw `BEGIN;` / `COMMIT;` inside a migration `.sql` — it broke atomicity in `0143`.

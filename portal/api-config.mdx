@@ -10,6 +10,34 @@ These modules manage per-lender configuration that shapes how audits run and how
 
 Controller: `portal-key-field-config/portal-key-field-config.controller.ts` at `api/v1/portal`. Agents are validated against `["appraisal", "credit", "income"]`. `assertAdmin(ctx)` requires `client_admin` or internal. Key-field sets define which extracted fields are surfaced for human review on a run.
 
+### key_field_catalog schema
+
+`key_field_catalog` is the shared lookup table backing the **Settings → Key Field Review → "Select Field"** picker. Each row is one selectable field for a given `agent` (`appraisal`, `credit`, or `income`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `text` PK | e.g. `appraisal.contract.purchase_price`. |
+| `agent` | `text NOT NULL` | `appraisal`, `credit`, or `income`. |
+| `label` | `text NOT NULL` | Human-readable label shown in the picker. |
+| `extraction_path` | `text` | Dot-path into the agent output. `NULL` for custom fields. |
+| `field_type` | `text NOT NULL` | `schema` (catalog default) or `custom` (lender-created). |
+| `question_text` | `text` | Optional reviewer question. |
+| `data_type` | `text NOT NULL` | `string`, `number`, `boolean`, or `enum`. |
+| `enum_values` | `jsonb` | Allowed values when `data_type = 'enum'`; `NULL` otherwise. |
+| `description` | `text` | Field description. |
+| `category` | `text` | Display grouping in the picker (e.g. `"Subject"`, `"Contract"`, `"Scores"`). `NULL` for user-created custom fields and for any catalog field that has not been categorized — both render under a trailing **Other** group. |
+| `sort_order` | `integer` | Position within `DEFAULT_KEY_FIELDS` (fixture index). `getCatalog` orders schema fields by this column ascending, with `NULL`s sorted last, so the picker follows the canonical form/report layout. |
+| `catalog_version` | `integer NOT NULL` | Bumped when the default set changes; triggers the upgrade banner. |
+| `is_default` | `boolean NOT NULL` | Whether this field ships in the default set. |
+| `is_archived` | `boolean NOT NULL` | Soft-delete flag. Archived fields are excluded from `getCatalog`. |
+| `purchase_only` | `boolean NOT NULL` | When `true`, the field is only shown in the reviewer when the run's `subject.assignment_type` is `"Purchase Transaction"`. Mirrors the `CONT_*` appraisal rule skip logic for `contract.*` fields. |
+
+**Catalog size (seeded in production since migration `0219`):** 198 fields — 132 appraisal, 43 credit, 23 income. The seed migration uses `ON CONFLICT (id) DO UPDATE` so it is idempotent; re-running it corrects any stale rows from the earlier partial seed (`0089`, which had only 8 appraisal and 6 credit stubs and zero income fields). Migration `0220` archives two stale `0089` appraisal stubs (`appraisal.property_type`, `appraisal.appraiser_insurance`) whose extraction paths no longer resolve.
+
+<Note>
+Custom fields created by a lender (`field_type = 'custom'`) carry `category = NULL` and therefore always appear in the **Other** group at the bottom of the picker — the group renders whenever at least one category-less row exists. Custom fields are lender-scoped: they live in `key_field_catalog` with `field_type = 'custom'` and are joined through the lender's set items table in `loadLenderCustomFields`.
+</Note>
+
 ### Session-scoped (effective lender)
 
 | Method / path | Purpose |
