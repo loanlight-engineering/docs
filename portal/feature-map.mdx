@@ -24,6 +24,7 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/income` | Income analyses list; "New Income Analysis" modal; stat cards. Uses the unioned `/api/income/run`. |
     | `/income/[familySlug]/[runId]` | Income run detail. |
     | `/income/bank-statements/[runId]` | Bank-statement run detail. |
+    | `/whats-new` | "What's New" release notes feed; gated on `flags.releaseNotes` (default-OFF, env `FEATURE_RELEASE_NOTES`). When the flag is off, renders a "not enabled" message. See [release notes](/portal/release-notes). |
     | `/dscr-agent` | DSCR calculator; gated on `flags.dscrAgent`. |
     | `/statement-analyzer` (+ `/[runId]`) | Qualifying-assets review; gated on `flags.statementAnalyzer`. Renders a "not enabled" message when off. See [statement analyzer](/portal/statement-analyzer). |
     | `/classification` | Document classification (upload zone + results table). |
@@ -57,6 +58,7 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/admin/yaml-viewer` | YAML config viewer/editor (CodeMirror) with version history/diff. |
     | `/admin/shadow-audit-diffs` (+ `/[id]`) | Shadow-audit diff list/detail + replay modal. |
     | `/admin/appraisal-runs` | Cross-lender appraisal runs admin. |
+    | `/admin/release-notes` | "What's New" authoring UI. Create, edit, and manage the release-notes lifecycle. Requires `super_admin` + `requireInternal`. See [release notes](/portal/release-notes). |
   </Tab>
   <Tab title="(detail) — audit viewer">
     Staff loan-audit detail viewer (`ChromeShell mode="fixed"`). `/loan-audits/[auditRunId]` with an `AuditSidebar`:
@@ -79,17 +81,17 @@ The `(auth)` group (`/login`, `/invite`, `/reset-password`) is unauthenticated a
 
 The `FeatureFlags` object (`src/lib/feature-flags.ts`) has these keys:
 
-`classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`.
+`classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`.
 
 `getFeatureFlags(lenderId)` GETs the backend `/lenders/${lenderId}/feature-flags`, which returns `{ featureKey, enabled }[]`; the result is transformed via `KEY_MAP` onto an env-default base. An empty array or any failure falls back to `getEnvDefaults()`.
 
 <Warning>
-Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (opt-in), mirroring the backend resolvers — an absent per-lender row does NOT light up the UI: `appraisal`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`.
+Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (opt-in), mirroring the backend resolvers — an absent per-lender row does NOT light up the UI: `appraisal`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`.
 </Warning>
 
 `feature-gates.ts` composes flags: `isChatEnabled(flags, canBypassFlags) = flags.chat === true || canBypassFlags`; `isAgencyRulesEnabled = appraisal && agencyRules`. The second parameter of `isChatEnabled` was renamed `isInternal` → `canBypassFlags` so chat respects impersonation — callers now pass `getEffectiveContext().bypassFeatureFlags` (`isInternal && !isImpersonating`), not raw `isInternal`. See [impersonation](/portal/impersonation).
 
-`TopNav` nav items are keyed by flag: Appraisal→`appraisal`, Credit→`creditReview`, Income→`bankStatements`, DSCR→`dscrAgent`, Statement Analyzer→`statementAnalyzer`.
+`TopNav` nav items are keyed by flag: Appraisal→`appraisal`, Credit→`creditReview`, Income→`bankStatements`, DSCR→`dscrAgent`, Statement Analyzer→`statementAnalyzer`, What's New→`releaseNotes`.
 
 ## List pagination
 

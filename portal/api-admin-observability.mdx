@@ -29,6 +29,23 @@ One of `missing_data`, `wrong_rule`, `reasoning_error`, `false_positive`.
 
 List feedback for a run. `audit_run_id` requires `ParseUUIDPipe`. Ordered `created_at, id`.
 
+## release-notes admin
+
+Controller: `release-notes/release-notes-admin.controller.ts` at `api/v1/portal/admin/release-notes`. Every route requires `super_admin` with internal lender — see [release notes](/portal/release-notes) for the full lifecycle model and data schema.
+
+| Method / path | Purpose |
+|---|---|
+| `POST /api/v1/portal/admin/release-notes` | Create a draft (`title`, `bodyMarkdown`, `versionTag?`, `releaseDate?`). HTTP 201. |
+| `GET /api/v1/portal/admin/release-notes` | List all notes. Query: `?page`, `?limit`, `?status` (`draft\|published\|archived`). |
+| `GET /api/v1/portal/admin/release-notes/:id` | Fetch one note (any status). |
+| `PATCH /api/v1/portal/admin/release-notes/:id` | Edit content. `slug` and `published_at` are immutable; archived notes: 403. |
+| `POST /api/v1/portal/admin/release-notes/:id/publish` | `draft → published`. |
+| `POST /api/v1/portal/admin/release-notes/:id/unpublish` | `published → draft`. |
+| `DELETE /api/v1/portal/admin/release-notes/:id` | Soft-archive (`status → archived`, `deleted_at` set). |
+| `POST /api/v1/portal/admin/release-notes/:id/restore` | `archived → prior status`. |
+
+Every mutation writes a `portal_audit_log` row in the same transaction (CUST-11 evidence channel). `VALID_ACTIONS` in `PortalAuditLogService` includes `release_note.created`, `release_note.updated`, `release_note.published`, `release_note.unpublished`, `release_note.archived`, and `release_note.restored`.
+
 ## portal-audit-log
 
 Controller: `portal-audit-log/portal-audit-log.controller.ts` at `api/v1/portal/audit-log`. Class-level `@Roles("super_admin")`.

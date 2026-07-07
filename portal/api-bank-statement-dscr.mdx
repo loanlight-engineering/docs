@@ -47,6 +47,18 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `POST /api/v1/portal/bank-statements/:id/reprocess` | client_admin, client_user | Re-run analysis (HTTP 200, throttle 10/min) |
 | `GET /api/v1/portal/bank-statements/:id/export` | read+ | Export data (throttle 10/min) |
 
+#### Large-deposit threshold basis
+
+The large-deposit flag threshold is computed against **qualified monthly income** (post-haircut/ownership, `calculateIncomeForFile`), not the pre-haircut average gross income. This unifies the ingestion and recompute paths: both now reference the same income figure the reviewer sees in the UI. The finding description reads "150% of qualified monthly income".
+
+#### Finding dismissal (`is_dismissed`)
+
+Reviewers can waive a `large_deposit` finding without removing it (admin-only). Dismissed findings remain in the ledger but are excluded from the Issues surface. The `PATCH .../findings/:findingId` endpoint (`UpdateFindingFeedbackDto`) accepts `{ dismissed: true, reason: "..." }` — the dismiss path skips `feedback_status` validation. A dismissal writes `is_dismissed = true`, `dismissed_reason`, `dismissed_at`, and `dismissed_by` onto the `findings` row. The `findings_dismissed_idx` partial index on `(borrower_file_id) WHERE is_dismissed = true` serves dismiss-state queries.
+
+<Note>
+Finding signatures (`lib/bank-statement/finding-signature.ts`) now exclude volatile evidence keys (`statementIndex`, `statementIndices`, `statementId`, `transaction_id`, etc.) when matching feedback across reprocess/recompute runs, so a reviewer decision survives a re-extraction where statement-position indexes shift.
+</Note>
+
 `large-deposit-overrides` carries `{ transaction_id, mode }` where `mode` is `force` (surface a deposit the detector missed) or `suppress` (hide an auto-flagged one); flagging is decoupled from income inclusion. `statements/add` keys must sit under the file's own `bank-statements/{id}/` prefix and the combined batch stays within the 50-file ceiling. These overrides are the same `large_deposit` records the [Statement Analyzer](/portal/statement-analyzer) projects read-only onto an asset run.
 
 #### POST /api/v1/portal/bank-statements/enqueue
@@ -78,10 +90,11 @@ Processors: `bank-statement.processor.ts` (extraction pipeline), `ai-summary.pro
 
 Ntropy always uses the `consumer` account-holder taxonomy, regardless of `borrowerType`. Income inclusion applies a **single whitelist** (`DEFAULT_INCOME_CATEGORIES_CONSUMER` in `bank-statement.service.ts`) identically to both personal and business borrowers — there is no business blacklist and no `DEFAULT_EXCLUDED_CATEGORIES_BUSINESS`.
 
-Two additional rules run after Ntropy categorization:
+Three additional rules run after Ntropy categorization, in this order:
 
-- **P2P self-transfer exclusion:** credits whose Ntropy counterparty (`merchant`) shares the account holder’s surname or is an exact full-name match are relabeled by `applyP2pSelfTransfer` (`lib/bank-statement/p2p-self-transfer.ts`). This runs after `applyDepositBuckets`. The resulting bucket is not in the income whitelist, so self-transferred credits are excluded from income for both borrower types.
-- **Per-transaction category override:** reviewers can reassign a transaction’s category via the new `transaction_category_overrides` table (migrations `0217`/`0218`). `transactions.category` is write-once (the Ntropy-derived value); an override is a separate row. The portal UI exposes this as a dropdown on each transaction row, with a required reason field.
+1. **Refund relabeling:** credits whose description matches a refund pattern are relabeled before deposit-bucketing, so a correctly-identified refund is never included as income. The `applyRefundCategories` function (`lib/bank-statement/refund-categories.ts`) matches against five categories: `refund`, `reversal`, `chargeback`, `rebate`, `reimbursement`. The prior Ntropy category is appended to `hierarchy` for traceability. This runs **first** so a matching row bypasses deposit-bucketing entirely. Applies to new uploads only — existing rows are not backfilled.
+2. **P2P self-transfer exclusion:** credits whose Ntropy counterparty (`merchant`) shares the account holder's surname or is an exact full-name match are relabeled to `p2p self-transfer` by `applyP2pSelfTransfer` (`lib/bank-statement/p2p-self-transfer.ts`). This runs **after** deposit-bucketing. The canonical output bucket is `peer to peer transfer`; the legacy label `p2p transfer` (found in older persisted rows) is accepted as an alias at evaluation time — both exclude the credit from income. Applies to new uploads only.
+3. **Per-transaction category override:** reviewers can reassign a transaction's category via `transaction_category_overrides` (migrations `0217`/`0218`). `transactions.category` is write-once; an override is a separate row. The portal UI exposes this as a dropdown per transaction row with a required reason field.
 
 ## bank-statement-export
 

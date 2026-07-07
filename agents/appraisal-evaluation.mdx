@@ -181,11 +181,13 @@ and the field maps.
 ### Appraisal rules
 
 The rule definitions live in `lib/appraisal-pipeline/rules/definitions` (registry
-`rule-registry.ts`) and span 66 rules across these prefixes: `SUBJ_` (15), `SITE_` (8),
-`EXH_` (6), `NEIGH_` (6), `COMP_` (6), `CONT_` (5), `IMP_` (5), `APPR_` (3), `CONDO_` (3),
+`rule-registry.ts`) and span **67 rules** across these prefixes: `SUBJ_` (15), `SITE_` (8),
+`EXH_` (6), `NEIGH_` (6), `COMP_` (6), `CONT_` (5), `IMP_` (6), `APPR_` (3), `CONDO_` (3),
 `REC_` (3), `INCOME_` (2), `RENT_` (2), `GEN_` (1), `UNIT_` (1). The rules are agency-aware
 (`AgencySource`: `fannie_mae`, `freddie_mac`), support compound conditions (`compound-walker`,
 `condition-schema`), and use `feature-gates`.
+
+**`IMP_006` — Unique / atypical property (LOA-1713)** is the newest global built-in. It flags when the appraiser characterizes the **property itself** as unique or atypical (e.g. a note saying "a unique property with limited comparables") by reading `improvements.has_unique_property_mention` (boolean tri-state). Outcomes: `true` → WARNING, `false` → PASS, `null` → NEEDS_INFO. The field is extracted from the narrative (comments, addendum, improvements, neighborhood, sales-comparison, reconciliation sections); boilerplate like "a unique opportunity" does not set it. Migration `0216` seeds the template row and **backfills it into all existing active rule sets** (same pattern as `0193`). This rule is complementary to Deephaven's `DH_019` (floor-plan-specific); both are kept because they measure different things.
 
 The `COMP_` family is `COMP_001`–`COMP_005` plus `COMP_007` (there is no `COMP_006`). `COMP_007`
 (**Stated vs Actual Proximity**, LOA-1200 / PR #2315) verifies each comp's stated proximity
@@ -202,16 +204,20 @@ The `appraisal_rules.operator` CHECK (`appraisal_rules_operator_check`) is the *
 The appraisal union is drift-pinned by `operator-check-drift.spec.ts`; the Drizzle schema must
 mirror the latest migration SQL.
 
-### Deephaven Phase 1.5 rule bundle
+### Lender-specific rule bundles
 
 Lender-specific overlays are authored as staged bundles in the `portal-appraisal-rules` module
-(`staged-bundles/`). The **Deephaven Phase 1.5** bundle (`deephaven-phase-1.5.bundle.ts`,
+(`staged-bundles/`). Applied via `/admin/staged-rules` → dry-run preview → promote.
+
+#### Deephaven Phase 1.5 bundle
+
+The **Deephaven Phase 1.5** bundle
 LOA-1367..1378) adds the single Deephaven lender's compound rules `DH_012`–`DH_052` (property
 condition, site/hazard + ADU, property-type classification, condo project, sales comparison, and
 occupancy/solar/income/deferred-maintenance groups) on top of new Phase 1.5 extraction signals in
 the adapter and `appraisal-data` schema. These DH rules are compound rules evaluated by the shared
 `compound-walker`; they are written only into the Deephaven lender's active rule set and are not
-part of the 66-rule core registry.
+part of the 67-rule core registry.
 
 The accessory-dwelling-unit (ADU) rules in Group B are `DH_025` (**No accessory dwelling unit** —
 a flat predicate that warns when `improvements.has_accessory_unit` is `true`) and `DH_026`
@@ -238,6 +244,40 @@ The fields were renamed between spec and as-built: LOA-1368/1374 spec'd `improve
 `adu_size_sqft`, but the rule-read paths are `improvements.has_accessory_unit` and
 `cost_approach.adu_sqft`. Grepping `has_adu` finds nothing.
 </Note>
+
+#### First Colony (Sharp Advantage) bundle updates (LOA-1713)
+
+Two additions to the First Colony (`sharp_advantage`) bundle:
+
+- **`FCAPP_010` — Atypical design style (WARNING, lender-wide):** flags any appraisal whose Design (Style) field isn't one of First Colony's accepted types — Traditional, Colonial, Contemporary, Ranch, Duplex, or Split Entry. Keyed on `improvements.design_style` using a generated case-insensitive regex (`FC_DESIGN_STYLE_PATTERN`) to handle casing, all-caps, and compound values (e.g. "2 Story/Colonial"). Variants normalized: Split Level / Split Foyer / Bi-Level → Split Entry; Raised Ranch → Ranch.
+- **`IMP_006` backfill:** the new global rule is automatically included in First Colony's active rule set via migration `0216` (same as all active sets).
+
+Apply via `/admin/staged-rules` → First Colony → dry-run → promote.
+
+#### Priority Financial appraisal rules bundle (LOA-1683)
+
+Priority Financial sells correspondent to Newfi and underwrites appraisals to the **Newfi Appraisal Review Field Guide** standard. The `priority` bundle is registered under `staged-bundles/` and contains 11 rules across two phases:
+
+**Phase 1 — active (PRI_001–PRI_008):**
+
+| Code | Rule | Severity |
+|---|---|---|
+| PRI_001 | Gross adjustment ≤ 15% of comp sale price | WARNING |
+| PRI_002 | Net adjustment ≤ 25% of comp sale price | WARNING |
+| PRI_003 | Comp sold ≤ 90 days of effective date | WARNING |
+| PRI_004 | No averaging in reconciliation | FAIL |
+| PRI_005 | Subject offered for sale within 12 months | WARNING |
+| PRI_006 | Vacant property not allowed | FAIL |
+| PRI_007 | Appraised value within adjusted comp range | WARNING |
+| PRI_008 | No single line-item adjustment > 10% of sale price | WARNING |
+
+**Phase 1.5 — staged, held out of active bundle (PRI_009–PRI_011):** keyed on computed fields (`subject_psf_exceeds_all_comps`, `all_comps_smaller_than_subject`, `max_comp_price_deviation_pct`) that do not yet exist in the extraction schema. Ready to wire in after the adapter work; excluded from Phase 1 to avoid NEEDS_INFO noise.
+
+All rules are lender-wide (`loan_program_id NULL`). Built-ins are inherited at default (opt-out posture). Apply via `/admin/staged-rules` → Priority Financial → dry-run → promote.
+
+#### Luxury WSE Credit bundle update (LOA-1652)
+
+The `luxury-wse-credit` bundle now **disables `CRED_011`** (hard-inquiry count check) lender-wide, including DSCR programs. This replaces the earlier `report_only` approach from #2542 (never applied in prod). Rationale: `CRED_011` with no threshold adds no signal for Luxury — virtually every borrower has at least one inquiry, so a threshold-less WARNING would mark every loan Medium risk without identifying a real underwriting concern. Re-apply the bundle via `/admin/staged-credit-rules` on deploy.
 
 ## Review summary export
 

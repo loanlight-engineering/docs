@@ -149,8 +149,14 @@ Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-
 <ParamField path="statement_id" type="uuid → bank_statements (set null)">Links a finding to the statement it came from; indexed (migration `0201`).</ParamField>
 <ParamField path="finding_type" type="text NOT NULL">15-value CHECK `finding_type_check`. Migration `0209` added `nsf_overdraft` and `income_trend` (and re-asserted `validation_balance_mismatch` / `validation_duplicate`). See [enums reference](/data-model/enums-reference#finding-type-unions-bank-statement-pipeline).</ParamField>
 <ParamField path="severity" type="text NOT NULL">CHECK `severity_check`: `info | warning | critical | error`.</ParamField>
+<ParamField path="is_dismissed" type="boolean NOT NULL">Default `false`. Migration `0222`. When `true`, the finding is waived by an admin reviewer and excluded from the Issues surface.</ParamField>
+<ParamField path="dismissed_reason" type="text">Required when dismissing; free text ≤500 chars.</ParamField>
+<ParamField path="dismissed_at" type="timestamptz">Stamped when `is_dismissed` is set.</ParamField>
+<ParamField path="dismissed_by" type="text">Identity of the dismissing reviewer.</ParamField>
 
 Other columns: `description` (NOT NULL), `evidence` jsonb, `feedback_status` (default `pending`), `feedback_value`, and timestamps.
+
+Indexes: `findings_dismissed_idx` partial index on `(borrower_file_id) WHERE is_dismissed = true` (migration `0222`).
 
 <Warning>
 This `findings` table is the **bank-statement** family ledger (FK to `borrower_files`). It is unrelated to the audit-pipeline [result tables](/data-model/result-tables), which FK to `audit_runs`.

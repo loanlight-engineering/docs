@@ -216,6 +216,7 @@
               "portal/auth-and-roles",
               "portal/impersonation",
               "portal/feature-map",
+              "portal/release-notes",
               "portal/statement-analyzer",
               "portal/file-uploads",
               "portal/partner-results-viewer"
