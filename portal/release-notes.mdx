@@ -1,0 +1,118 @@
+---
+title: '"What''s New" release notes'
+description: The in-portal release notes feed and its admin authoring surface.
+icon: newspaper
+---
+
+The "What's New" feature (LOA-1533, CUST-11) gives customers a versioned release notes feed inside the portal. Notes are authored by internal super-admins and published to all customers simultaneously — there is no per-lender targeting in V1. Every create, edit, and lifecycle transition is recorded in the `portal_audit_log` as the evidenceable channel for TrustCloud control CUST-11.
+
+## Data model
+
+### release_notes table
+
+`database/schema/release-notes.ts`. Platform-global product content: **no `lender_id` column** and no tenant scope — every published note is visible to every lender.
+
+<ParamField path="id" type="uuid PK">Auto-generated.</ParamField>
+<ParamField path="title" type="varchar(200) NOT NULL" />
+<ParamField path="slug" type="varchar(220) NOT NULL UNIQUE">Derived from `title` on create. Unique-suffixed on collision. **Immutable after first publish** — a title edit after publish does not re-slug.</ParamField>
+<ParamField path="body_markdown" type="text NOT NULL">Raw Markdown, the source of truth. Rendered client-side with sanitization (`react-markdown` + `DOMPurify`). Max 100 KB (enforced by DB CHECK).</ParamField>
+<ParamField path="version_tag" type="varchar(50)">Optional display version (e.g. `v2.4`).</ParamField>
+<ParamField path="release_date" type="date">Admin-set calendar date the change shipped. Distinct from `published_at` (auto-stamped when the note goes live). Feed sort key is `coalesce(release_date, published_at::date) DESC`.</ParamField>
+<ParamField path="status" type="release_note_status">Enum: `draft | published | archived`. Default `draft`.</ParamField>
+<ParamField path="audience" type="release_note_audience">Enum: `all_customers | internal`. Default `all_customers`. `internal` rows are reserved for a forward-compatible audience-targeting fast-follow and are **never** leaked to the client feed.</ParamField>
+<ParamField path="published_at" type="timestamptz">Auto-stamped when the note transitions to `published`; cleared on `unpublish`; **preserved** through `archive` so `restore` can infer the prior status.</ParamField>
+<ParamField path="created_by / updated_by" type="uuid → portal_users">FK to `portal_users`. `created_by` is NOT NULL; `updated_by` is set null on user delete.</ParamField>
+
+Indexes:
+- `release_notes_feed_idx` on `(status, published_at DESC, id DESC)` — serves the published feed filter + tiebreakers. Primary sort key is `coalesce(release_date, published_at::date)`, which requires a post-index sort at current volume (expression index is the upgrade path).
+
+Compliance note: rows are **never hard-deleted** (retention requirement). `archive` sets `deleted_at`; `restore` clears it.
+
+## Lifecycle state machine
+
+```
+          create                publish
+  ─ ─ ─ ▶  draft  ──────────▶  published
+              ▲   ◀──────────     │
+              │     unpublish     │ archive
+              │                   ▼
+              └────────────── archived
+                    restore
+```
+
+Transitions and their HTTP error codes:
+- `draft → published` (publish): stamps `published_at`.
+- `published → draft` (unpublish): clears `published_at`.
+- `draft | published → archived` (archive): sets `deleted_at`, **preserves** `published_at`.
+- `archived → draft | published` (restore): clears `deleted_at`, infers prior status from `published_at`.
+- Same-state transitions: **409 Conflict**.
+- Any mutation of `archived`: **403 Forbidden** (except `restore`).
+
+Every transition, plus `create` and `update`, writes a `portal_audit_log` row in the same transaction (CUST-11 evidence). An audited mutation can never exist without its audit record — they commit together or both roll back.
+
+## Client read API
+
+Controller: `release-notes/release-notes.controller.ts` at `api/v1/portal/release-notes`. Guarded by `PortalAuthGuard`. Roles: `client_user`, `read_only` (and above via rank).
+
+Filtering is always server-side: only `status='published' AND deleted_at IS NULL AND audience='all_customers'` rows are ever returned. Drafts, archived notes, and `internal`-audience notes can never leak.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/release-notes` | Paginated published feed (`?page`, `?limit`). Ordered by `coalesce(release_date, published_at::date) DESC, published_at DESC, id DESC`. |
+| `GET /api/v1/portal/release-notes/latest-timestamp` | `{ latest: string \| null }` — the greatest `published_at` across the visible feed. Powers the nav badge. Must be defined **before** the `:id` route handler to avoid `ParseUUIDPipe` rejecting the literal path. |
+| `GET /api/v1/portal/release-notes/:id` | Single published note by UUID. 404 if absent or not published. |
+
+## Admin API
+
+Controller: `release-notes/release-notes-admin.controller.ts` at `api/v1/portal/admin/release-notes`. Guarded by `PortalAuthGuard`. Every route requires `@Roles("super_admin")` with internal lender — a forged tenant super-admin token trips `lender_mismatch` and returns 403.
+
+| Method / path | Purpose |
+|---|---|
+| `POST /api/v1/portal/admin/release-notes` | Create a draft (`CreateReleaseNoteDto`: `title`, `bodyMarkdown`, `versionTag?`, `releaseDate?`). HTTP 201. Writes `release_note.created` audit row. |
+| `GET /api/v1/portal/admin/release-notes` | Admin list (all statuses). Query: `?page`, `?limit`, `?status` (draft\|published\|archived). |
+| `GET /api/v1/portal/admin/release-notes/:id` | Admin fetch by UUID (any status). |
+| `PATCH /api/v1/portal/admin/release-notes/:id` | Edit content (`UpdateReleaseNoteDto`: `title?`, `bodyMarkdown?`, `versionTag?`, `releaseDate?`). `slug` and `published_at` are immutable — never in the patch. Archived notes: 403. Writes `release_note.updated` audit row whose metadata records which fields changed. |
+| `POST /api/v1/portal/admin/release-notes/:id/publish` | `draft → published`. HTTP 200. |
+| `POST /api/v1/portal/admin/release-notes/:id/unpublish` | `published → draft`. HTTP 200. |
+| `DELETE /api/v1/portal/admin/release-notes/:id` | `draft\|published → archived` (soft delete; HTTP 200). |
+| `POST /api/v1/portal/admin/release-notes/:id/restore` | `archived → prior status`. HTTP 200. |
+
+Concurrent-write safety: every mutation uses `SELECT … FOR UPDATE` row-locking inside a transaction, so two simultaneous mutations serialize rather than race into a contradictory state.
+
+## Portal routes and feature flag
+
+The "What's New" surface is gated on the `releaseNotes` feature flag (env `FEATURE_RELEASE_NOTES`, default-OFF). When the flag is off the `/whats-new` page renders a "not enabled" message.
+
+| Route | Purpose |
+|---|---|
+| `/whats-new` | Client-facing published feed (`WhatsNewPage`). Gated on `flags.releaseNotes`. |
+| `/admin/release-notes` | Super-admin authoring UI (`ReleaseNotesAdminEditor`). Internal-only; requires `super_admin` + internal lender. |
+
+### Nav badge (unread count)
+
+`TopNav` shows a badge on the "What's New" nav item when there are unread notes. The badge is driven by `GET /api/release-notes/latest-timestamp` (the BFF proxy, which forwards to the backend `latest-timestamp` endpoint). The portal compares the returned `latest` timestamp against a `localStorage` watermark to compute "unread".
+
+### BFF proxies
+
+| Route handler | Backend |
+|---|---|
+| `GET /api/release-notes` | `GET /api/v1/portal/release-notes` |
+| `GET /api/release-notes/latest-timestamp` | `GET /api/v1/portal/release-notes/latest-timestamp` |
+| Admin routes under `/api/admin/release-notes` | `GET|POST /api/v1/portal/admin/release-notes`; `GET|PATCH|DELETE /api/v1/portal/admin/release-notes/:id`; `POST /:id/publish`, `/:id/unpublish`, `/:id/restore` |
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Route and feature map" icon="map" href="/portal/feature-map">
+    The `releaseNotes` flag and portal routes.
+  </Card>
+  <Card title="Portal API: internal admin and observability" icon="gauge" href="/portal/api-admin-observability">
+    The full admin API including the release notes authoring surface.
+  </Card>
+  <Card title="Authentication and authorization" icon="shield-check" href="/portal/api-auth">
+    PortalAuthGuard and the super_admin role.
+  </Card>
+  <Card title="Audit log" icon="scroll" href="/portal/api-admin-observability#portal-audit-log">
+    The portal_audit_log entries written for every release-note mutation.
+  </Card>
+</Columns>
