@@ -14,31 +14,32 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **15 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 019 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **15 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 020 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
-| `001_baseline_schema` | `loan`, `client`, `transaction_record`, `transaction_state`, `epc_event`, `transaction_update` |
-| `002_add_processed_at_to_events` | `epc_event.processed_at` |
-| `003_create_audit_details` | `audit_details` |
-| `004_drop_is_processed_successfully` | drops a `transaction_update` column |
-| `005_add_error_details_to_audit_details` | error columns on `audit_details` |
-| `006_add_progress_to_audit_details` | progress columns on `audit_details` |
-| `007_create_transaction_documents` | `transaction_document` |
-| `008_transaction_is_shadow` | `transaction_record.is_shadow`, widen `loan.encompass_loan_number` to 64 |
-| `009_create_document_push_records` | `document_push_record` |
-| `010_create_epc_delivery_records` | `epc_delivery_records` |
-| `011_add_delivery_cancelled_after` | `transaction_state.delivery_cancelled_after` |
-| `012_create_lender_and_client_lender_id` | `lender`, `client.lender_id` |
-| `013_create_audit_delivery_log` | `audit_delivery_log` |
-| `014_add_workos_org_id_to_lender` | `lender.workos_org_id` |
-| `014_drop_client_token` | drops `client.client_token` |
-| `015_create_document_push_routing_config` | `document_push_routing_config`; `document_push_record.routing_config_version` + `routing_config_lender_version` |
-| `016_fix_credit_report_routing` | DML: fixes the active global routing rule for credit reports |
-| `017_seed_phase1_routing_doctypes` | DML: seeds the remaining EPC routing doc types into the active global config |
-| `018_create_materialized_split_record` | `materialized_split_record` |
-| `019_create_lender_feature` | `lender_feature` |
-| `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
+|| `001_baseline_schema` | `loan`, `client`, `transaction_record`, `transaction_state`, `epc_event`, `transaction_update` |
+|| `002_add_processed_at_to_events` | `epc_event.processed_at` |
+|| `003_create_audit_details` | `audit_details` |
+|| `004_drop_is_processed_successfully` | drops a `transaction_update` column |
+|| `005_add_error_details_to_audit_details` | error columns on `audit_details` |
+|| `006_add_progress_to_audit_details` | progress columns on `audit_details` |
+|| `007_create_transaction_documents` | `transaction_document` |
+|| `008_transaction_is_shadow` | `transaction_record.is_shadow`, widen `loan.encompass_loan_number` to 64 |
+|| `009_create_document_push_records` | `document_push_record` |
+|| `010_create_epc_delivery_records` | `epc_delivery_records` |
+|| `011_add_delivery_cancelled_after` | `transaction_state.delivery_cancelled_after` |
+|| `012_create_lender_and_client_lender_id` | `lender`, `client.lender_id` |
+|| `013_create_audit_delivery_log` | `audit_delivery_log` |
+|| `014_add_workos_org_id_to_lender` | `lender.workos_org_id` |
+|| `014_drop_client_token` | drops `client.client_token` |
+|| `015_create_document_push_routing_config` | `document_push_routing_config`; `document_push_record.routing_config_version` + `routing_config_lender_version` |
+|| `016_fix_credit_report_routing` | DML: fixes the active global routing rule for credit reports |
+|| `017_seed_phase1_routing_doctypes` | DML: seeds the remaining EPC routing doc types into the active global config |
+|| `018_create_materialized_split_record` | `materialized_split_record` |
+|| `019_create_lender_feature` | `lender_feature` |
+|| `020_add_routing_outcome_to_document_push_record` | `document_push_record.outcome` + `document_push_record.missing_fields` (LOA-1715) |
+|| `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
 The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The nine tables added by migrations 003–019 (`audit_details`, `transaction_document`, `document_push_record`, `epc_delivery_records`, `lender`, `audit_delivery_log`, `document_push_routing_config`, `materialized_split_record`, `lender_feature`) are missing from it. Trust the schema, not the README.
@@ -158,8 +159,10 @@ Backs the document-push pipeline (see [Messaging](/integrations/messaging)). UNI
 | `document_id`, `s3_key`, `classification_type` | |
 | `document_name`, `mime_type` | `mime_type` defaults `application/pdf` |
 | `state` | `CHECK` in `pending`, `resource_created`, `uploaded`, `attached`, `completed`, `failed` (default `pending`). `attached` is the terminal success state. |
-| `routing_config_version`, `routing_config_lender_version` | added in 015; stamp the governing global / per-lender routing-config version on each push (`routing_config_lender_version` is NULL when no lender override applied) |
-| `epc_resource_id`, container columns, error columns | |
+|| `routing_config_version`, `routing_config_lender_version` | added in 015; stamp the governing global / per-lender routing-config version on each push (`routing_config_lender_version` is NULL when no lender override applied) |
+|| `outcome` | added in 020 (LOA-1715); routing resolver decision: `mapped` \| `unmapped` \| `missing_fields_fallback` \| `degraded` \| `no_config`. NULL on records predating the column. |
+|| `missing_fields` | added in 020 (LOA-1715); `text[]` of required template fields that were absent (populated when `outcome` is `missing_fields_fallback` or `degraded`). |
+|| `epc_resource_id`, container columns, error columns | |
 
 ### epc_delivery_records
 

@@ -96,6 +96,25 @@ Written by the [Property-Red-Flags agent](/agents/property-red-flags). **`red_fl
 **Read-order trap-door:** queries against `red_flag_results` must use `orderBy [asc(rule_id), asc(created_at), asc(id)]` (pinned by `result-readers.spec.ts`).
 </Warning>
 
+## Eligibility results
+
+Added by migration `0227_create_eligibility_results.sql` (LOA-1570). One row per `EligibilityFinding` emitted by the loan-eligibility evaluator (`src/lib/loan-eligibility/eligibility-evaluator.ts`). Mirrors `red_flag_results`: child of `audit_runs` (ON DELETE CASCADE).
+
+### eligibility_results
+
+PK `id`, `audit_run_id` (NOT NULL), `code` (NOT NULL).
+
+<ParamField path="code" type="text NOT NULL">Per-run finding identity. Backs the idempotency unique index `(audit_run_id, code)`. Also the stable lead of the mandatory order tiebreaker `[code, created_at, id]` (mirrors the `red_flag_results` dual-tiebreaker order chain).</ParamField>
+<ParamField path="outcome" type="text NOT NULL">The `RuleOutcome` value from the eligibility evaluator.</ParamField>
+<ParamField path="program" type="text">The `LoanProgram` this finding is scoped to. Nullable when the finding is not program-specific.</ParamField>
+<ParamField path="message" type="text NOT NULL">Human-readable finding description.</ParamField>
+<ParamField path="failing_axis" type="text">The matrix axis that caused the failure (e.g. `ltv`, `fico`).</ParamField>
+<ParamField path="selected_row_id" type="text">The matrix row that was matched.</ParamField>
+<ParamField path="rule_id" type="text">Optional order-95 overlay rule code.</ParamField>
+<ParamField path="severity" type="text">Writer-populated at persistence time; mirrors `red_flag_results.severity`.</ParamField>
+
+Indexes: unique on `(audit_run_id, code)`, composite on `(audit_run_id, code, created_at, id)` for deterministic ordering, and on `rule_id` for overlay lookups.
+
 ## audit_errors
 
 Per-agent failure ledger (`audit-runs.ts`). PK `id`, `audit_run_id` → `audit_runs` (cascade, NOT NULL).

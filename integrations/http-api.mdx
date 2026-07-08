@@ -7,7 +7,7 @@ icon: route
 The encompass service exposes a small set of HTTP endpoints. There is **no global route prefix** — every path is literal (`/integrations/...`, `/auth/encompass`).
 
 <Note>
-This page covers the gateway-fronted endpoints. The internal, server-to-server [routing-config admin API](/integrations/routing-config-admin) (`integrations/routing-config/...`) is **not** reachable through the public API Gateway — it is served on the integrations internal NLB and guarded by `InternalApiKeyGuard`.
+This page covers the gateway-fronted endpoints. Two internal, server-to-server APIs are **not** reachable through the public API Gateway — they are served on the integrations internal NLB and guarded by `InternalApiKeyGuard`: the [routing-config admin API](/integrations/routing-config-admin) (`integrations/routing-config/...`) and the document-push outcomes read endpoint (`integrations/document-push/outcomes`) described below.
 </Note>
 
 ## Auth model
@@ -43,11 +43,12 @@ See [Integrations infrastructure](/integrations/infrastructure) for the gateway 
 | `GET /integrations/documents/:transactionStateId/:filename` | `DocumentsController` | `ConditionalJwtAuthGuard` |
 | `GET /integrations/audits/:auditId/external-url` | `ResultsAccessController` | `ConditionalJwtAuthGuard` |
 | `GET /integrations/images` (+ subpaths) | `ImagesController` | none |
-| `GET /integrations/v1/health` | `HealthController` | none |
-| `GET /integrations/v1/health/full` | `HealthController` | none |
-| `GET /integrations/v1/health/sqs` | `HealthController` | none |
-| `GET /integrations/v1/health/events/audit-requested` | `HealthController` | none |
-| `POST /integrations/v1/health/audit-state` | `HealthController` | none |
+|| `GET /integrations/v1/health` | `HealthController` | none |
+|| `GET /integrations/v1/health/full` | `HealthController` | none |
+|| `GET /integrations/v1/health/sqs` | `HealthController` | none |
+|| `GET /integrations/v1/health/events/audit-requested` | `HealthController` | none |
+|| `POST /integrations/v1/health/audit-state` | `HealthController` | none |
+|| `GET /integrations/document-push/outcomes` | `DocumentPushReadController` | `InternalApiKeyGuard` (internal NLB only) |
 
 ## Webhooks
 
@@ -125,6 +126,46 @@ The resolved lender identity, set by the gateway authorizer (or local middleware
 <ResponseField name="expiresAt" type="string" />
 
 See [Results access](/integrations/results-access) for the upstream call and error mapping.
+
+## Document-push outcomes (internal)
+
+### GET /integrations/document-push/outcomes
+
+Internal-only read surface for document-router run outcomes (LOA-1715 / LOA-1671). Consumed by Octy via the private internal API (`x-internal-api-key`, LOA-1027/LOA-1188). **Not reachable through the public API Gateway** — served on the integrations internal NLB only.
+
+<ParamField query="loanId" type="string" required>
+The `transaction_state.id` / `correlationId` for the loan run to query. Returns a `400` with `error: "missing_loan_id"` when omitted.
+</ParamField>
+
+Response shape (`DocumentRoutingOutcomesResponse`):
+
+```json
+{
+  "loanId": "<correlationId>",
+  "outcomes": [
+    {
+      "s3Key": "<split_storage_path — join key to api document_classifications>",
+      "documentName": "...",
+      "classificationType": "bank_statement",
+      "containerName": "Bank Statement",
+      "containerType": "bankStatement",
+      "containerDescription": null,
+      "outcome": "mapped",
+      "missingFields": [],
+      "routingConfigVersion": 3,
+      "routingConfigLenderVersion": null,
+      "state": "attached",
+      "epcResourceId": "...",
+      "errorMessage": null,
+      "errorStep": null,
+      "createdAt": "2026-07-07T15:00:00.000Z",
+      "updatedAt": "2026-07-07T15:00:10.000Z"
+    }
+  ]
+}
+```
+
+`outcome` values: `mapped` | `unmapped` | `missing_fields_fallback` | `degraded` | `no_config` | `null` (null on records predating migration 020). `outcomes` returns the **latest** push outcome per document across the whole loan — it is not scoped to one specific run, because `document_push_record` links to `transaction_record` (not `transaction_state`) and is overwritten per re-push. Octy joins each outcome by `s3Key` to the classification it is rendering.
 
 ## Admin and health
 

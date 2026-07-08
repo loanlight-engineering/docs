@@ -49,9 +49,13 @@ Via `audit-api.service.ts`, against `NEXT_PUBLIC_LL_WEB_AUS_API_HOST`. It calls 
 
 ## Credit and liabilities
 
-The `/audit/credit-liabilities` route renders the shared `CreditLiabilitiesView` from `@loanlight-engineering/shared-ui/audit`, fed by `AuditApiService.getCreditData` (`GET /api/v1/audit_runs/{id}/credit`). Both the sidebar nav item and the Overview card are gated on the PostHog feature flag `credit-liabilities` (`useFeatureFlagEnabled("credit-liabilities")`), and the nav item is only shown when the credit response is a non-empty array.
+The `/audit/credit-liabilities` route renders the shared `CreditLiabilitiesView` from `@loanlight-engineering/shared-ui/audit`, fed by `AuditApiService.getCreditData` (`GET /api/v1/audit_runs/{id}/credit`). The sidebar nav item and the Overview card are shown when `creditData` is a non-empty array (LOA-1722: the `credit-liabilities` PostHog flag was removed; the section now gates purely on data presence).
 
-The sidebar (`MergedAuditSidebar`) lists, in order: **Overview**, **Data Consistency**, **Document Health**, **Properties Check** (flagged on `properties-check`), **Credit & Liabilities** (flagged on `credit-liabilities`). Credit & Liabilities moved after Properties Check. The 1003-check is a route but not a sidebar item.
+The sidebar (`MergedAuditSidebar`) lists, in order: **Overview**, **Data Consistency**, **Document Health**, **Properties Check** (flagged on `properties-check`), **Credit & Liabilities** (data-presence gate: `!!creditData?.length`), **Appraisal** (data-presence gate: `appraisalData != null`). Credit & Liabilities moved after Properties Check. The 1003-check is a route but not a sidebar item.
+
+<Note>
+LOA-1722 removed the `appraisal` and `credit-liabilities` PostHog feature flags. Both sections are now gated on whether an agent run exists for the loan — entitlement is enforced server-side at run creation, so an unentitled lender never gets a run and the section stays hidden without a client-side flag.
+</Note>
 
 <Note>
 The credit issue count on the sidebar badge and the Overview credit card is **FAIL-only** (`countCreditFindings` counts `outcome === "FAIL"`; `WARNING`, `NEEDS_INFO`, `PASS`, and `SKIPPED` are excluded). This matches the portal's credit issue count. The detail `CreditLiabilitiesView` still lists FAIL and WARNING in its own findings.

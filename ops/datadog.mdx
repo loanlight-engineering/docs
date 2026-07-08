@@ -124,6 +124,26 @@ therefore has no APM, as noted above.
 | Portal | `PortalFrontend` | `@datadog/browser-rum` + `browser-logs`, `sessionSampleRate:100`, `sessionReplaySampleRate:0`, `defaultPrivacyLevel:"mask"`, heavy `beforeSend` PII scrub. `packages/app/src/lib/datadog/datadog.service.ts` |
 | Integrations frontend | `frontend` | RUM + logs proxied through a shared-services Datadog proxy (`/datadog<path>`), partitioned cross-site cookie, `allowedTracingUrls` for the Encompass and AUS API hosts. |
 
+## Source maps (LOA-1060)
+
+Source maps let Datadog Error Tracking show unminified, source-resolved stack frames. Each surface uses a different approach:
+
+**loanlight-api backend (service `loanlight-api`)**
+Maps are kept in the production Docker image (the backend ECS service is not client-served) and Node is started with `NODE_OPTIONS=--enable-source-maps` so the runtime remaps stack traces to TypeScript source automatically. No `datadog-ci` upload is needed — `dd-trace` performs backend remapping at runtime.
+
+**Portal frontend (service `PortalFrontend`)**
+Next.js emits client-side source maps (`productionBrowserSourceMaps: true`). The `@datadog/webpack-plugin` uploads them to Datadog RUM during the CI build, keyed to `service: PortalFrontend` and `releaseVersion: NEXT_PUBLIC_GIT_COMMIT_SHA`. In production, `.map` files are stripped from the Docker image after upload so they are not downloadable from `/_next/static`; INT keeps the maps. `DATADOG_API_KEY` is a build-arg (server-side only, never `NEXT_PUBLIC_`) injected by the `cd-app-prod.yml` GitHub Actions workflow.
+
+<Note>
+Prior to LOA-1060, `NEXT_PUBLIC_GIT_COMMIT_SHA` was never set in the CI build, so `datadogRum.init({ version: process.env.NEXT_PUBLIC_GIT_COMMIT_SHA ?? "unknown" })` reported `version:"unknown"` on every RUM event and source map correlation was broken. The fix sets `NEXT_PUBLIC_GIT_COMMIT_SHA=github.sha` in both CD workflows.
+</Note>
+
+**loanlight-integrations backend (service `loanlight-integrations`)**
+The encompass `Dockerfile.prod` starts Node with `--enable-source-maps`. Maps are already emitted by `tsconfig sourceMap: true` (including the `audit-pdf` workspace package after LOA-1060 enabled `sourceMap: true` on its `tsconfig.json`) and are kept in the container — the encompass service is not publicly served. No upload step is needed for the backend; Datadog APM Error Tracking resolves frames at ingest.
+
+**loanlight-integrations frontend (service `frontend`)**
+Next.js emits source maps (`productionBrowserSourceMaps: true`) and the `deploy-web-app-v2-{int,prod}.yml` CI workflows run `datadog-ci sourcemaps upload` keyed on `--service=frontend --release-version=$GIT_COMMIT_SHA` after the build. Prod only: `.map` files are stripped from `dist/` after upload, before the CDK S3 sync, so the public CloudFront bundle ships no source maps. INT keeps them. The CLI is used instead of the webpack plugin because the integrations frontend uses Turbopack (Next 16), which does not support custom webpack plugins.
+
 ## LangGraph node spans
 
 Central instrumentation gives every agent node a Datadog span with zero per-agent
