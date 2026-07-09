@@ -149,6 +149,12 @@
               "ops/infrastructure",
               "ops/shared-packages"
             ]
+          },
+          {
+            "group": "Resilience",
+            "pages": [
+              "subsystems/resilience-layer"
+            ]
           }
         ]
       },

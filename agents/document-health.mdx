@@ -31,7 +31,8 @@ __start__ → prepare → plan-document-check → document-completeness
     └── (no pending docs) → verify-required-documents
   validate-document-expiration → verify-required-documents   (join)
   signature-verification        → verify-required-documents   (join)
-  verify-required-documents → aggregate → __end__
+  verify-required-documents → validate-closing-date-consistency
+  validate-closing-date-consistency → aggregate → __end__
 ```
 
 Parallelism uses the LangGraph `Send` primitive. The `results` and `signatureFindings` channels
@@ -131,8 +132,8 @@ Two accounts sharing the same last-4 merge into a single group (documented same-
 - A special case adopts a different `expiration_days` only if it is **more restrictive**.
 
 `issueKind` enum: `expired | expiring_soon | date_missing | date_invalid | valid |
-missing_document`. This enum must remain a subset of the DB check constraint
-`doc_expiration_results_issue_kind_check`.
+missing_document | closing_date_inconsistent`. This enum must remain a subset of the DB check
+constraint `doc_expiration_results_issue_kind_check`.
 
 <Warning>
 **Appraisals emit TWO results.** When `documentType === "appraisal"`, the node emits a primary
@@ -158,6 +159,17 @@ recheck (`presenceMini`, semantic search) to reduce false negatives. The node em
 results: present-required → `issueKind: "valid"`; missing → `issueKind: "missing_document"`. It
 returns `requiredDocumentTypes`, which is threaded into `aggregate` so
 `doc_expiration_results.is_required` can be set.
+</Step>
+
+<Step title="validate-closing-date-consistency — purchase contract cross-check">
+A single-run node (LOA-1609) that runs after `verify-required-documents` and before `aggregate`.
+It reads the contracted closing date extracted from the `purchase_contract` document (via
+`resolvePurchaseContractFacts`; see [purchase contract extraction](#purchase-contract-extraction))
+and compares it against `state.estimatedClosingDate` (the Encompass closing date of record). When
+enabled per lender and a mismatch or a passed closing date is detected, it emits a
+`closing_date_inconsistent` `DocumentExpirationResult` into the `results` channel so `aggregate`
+persists it. The node is a no-op when the lender has the check disabled, when no purchase contract
+is classified, or when no closing date was extracted.
 </Step>
 
 <Step title="aggregate — persistence">
@@ -290,6 +302,23 @@ Written for every non-`valid` expiration issue (`agent_name: "documentHealth"`,
 `error_type: "validation"`) and for signature `unsigned` / `partially_signed`
 (`issueKind: "signature_missing"`). Per-agent failures never fail the run.
 </ResponseField>
+
+## Purchase contract extraction
+
+LOA-1607 added a **purchase-contract extractor** as a fifth pre-audit extractor (`PurchaseContractSchema { purchasePrice, closingDate }`). It runs during the classify-split pre-audit stage and writes into `document_classifications.extracted_metadata` — the same JSONB registry used by W-2, paystub, and bank-statement extractors — so no new table or migration is required.
+
+`resolvePurchaseContractFacts(classifiedDocs)` is a pure, never-throwing read-model that promotes the raw per-segment blob into `{ purchasePrice, closingDate, confidence }`. For amended contracts with multiple segments it uses highest-confidence + last-writer-wins precedence; garbage inputs return `{}`.
+
+Two downstream consumers read from this resolver:
+
+- **`ValidateClosingDateConsistencyNode`** (LOA-1609) — compares `closingDate` against `state.estimatedClosingDate` (the Encompass closing date) and emits a `closing_date_inconsistent` finding when they diverge or the date has already passed.
+- **`RedFlagContext.purchasePrice`** — the resolved numeric purchase price is threaded through the propertyRedFlags graph channels so the `PURCHASE_PRICE_ABOVE_MARKET` rule (LOA-1608) can compare it against listing and AVM values.
+
+The `purchasePrice` field also populates `loanDetails.purchasePrice` in the audit-results DTO (the field existed but was always null before LOA-1607).
+
+<Note>
+`extract:` `supports()` is exact-token matched to `purchase_contract`, so no other document type runs the purchase-contract extractor. A loan with no classified `purchase_contract` produces an empty `resolvePurchaseContractFacts` result, and both downstream consumers treat it as a no-op.
+</Note>
 
 ## Lender configuration
 

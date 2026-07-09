@@ -192,9 +192,51 @@ All under `api/v1/portal/assets` (`AssetsController`), every route gated by
 | DELETE | `/:runId/accounts/:id` | Delete an account |
 | POST | `/:runId/accounts/bulk-assign-type` | Bulk-assign asset type |
 | POST | `/:runId/export` | Export qualifying assets (xlsx + pdf, zipped) |
+| GET | `/:runId/accounts/:id/owner-mismatch` | Check borrower owner-mismatch for a Plaid-sourced account |
 
 The export reuses the `bank-statement-export` PDF/Excel writers and the signed-URL service;
 exported numbers equal the run view (corrections applied, excluded accounts zeroed).
+
+## Plaid Link (Unified Intake)
+
+LOA-1580 added a **Unified Intake** path where a loan officer invites a borrower to connect their bank account directly via Plaid Link, producing Plaid-sourced `asset_accounts` alongside (or instead of) PDF-extracted ones.
+
+### Invite lifecycle
+
+The borrower invite state machine lives in the `statement_invites` table (`statement_invite_status` pgEnum):
+
+`created → sent → opened → linking → connected → ready`
+
+Terminal states: `failed | expired | cancelled | undelivered`.
+
+One active invite is allowed per `(loan_id, lower(borrower_email))` at a time. A prior terminal invite allows a fresh one to be created. The `connected` status is intentionally **not** terminal — it holds the slot open while the Plaid report is still pending; an expiry sweep excludes `connected` rows.
+
+### API routes (portal BFF + backend)
+
+New backend routes under `api/v1/statement-analyzer/loans/:loanId/invites`:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/statement-analyzer/loans/:loanId/invites` | List invites for a loan |
+| POST | `/statement-analyzer/loans/:loanId/invites` | Create an invite (sends email) |
+| GET | `/statement-analyzer/loans/:loanId/invites/:inviteId` | Get invite detail |
+| DELETE | `/statement-analyzer/loans/:loanId/invites/:inviteId` | Cancel an invite |
+
+New borrower-facing routes (no portal auth — public, token-protected):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/b/:token` | Borrower landing page (resolves invite via `token_hash`) |
+| POST | `/borrower/:token/link-token` | Exchange invite token for Plaid Link token |
+| POST | `/borrower/:token/exchange` | Exchange Plaid public token for access token (stored as KMS-encrypted ciphertext) |
+
+### Security
+
+`plaid_items.access_token_ciphertext` stores only the **KMS-encrypted** Plaid access token. No plaintext token is persisted. Account metadata is masked (`mask` = last-4, `account_type`); raw account numbers are never written.
+
+### Plaid-sourced accounts
+
+When the borrower completes the Plaid Link flow, the item is stored in `plaid_items` (FK to `statement_invites`, cascade delete) and Plaid asset accounts are ingested as `asset_accounts` rows with `source = 'plaid'` (migration `0228` added `plaid` to the `asset_source` enum alongside `extracted` and `manual`). Plaid accounts flow into the same review / qualify / export pipeline as PDF-extracted accounts.
 
 ## Data model
 

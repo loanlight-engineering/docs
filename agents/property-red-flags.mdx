@@ -97,6 +97,7 @@ config of `false` is disabled; `true` or an object is enabled. Thresholds come f
 | `RAPID_RESALE` | HIGH | two most recent sales within `months` (default 6) |
 | `LLC_TO_LLC_SALE` | HIGH | most recent sale buyer and seller both match an entity pattern |
 | `PRICE_DECLINE_FROM_PRIOR` | HIGH | current price < most recent prior sale amount |
+| `PURCHASE_PRICE_ABOVE_MARKET` | HIGH / CRITICAL | PURCHASE loan, contract purchase price > listing price and/or ATTOM AVM by threshold; one anchor exceeded → HIGH, both → CRITICAL; AVM anchor skipped when forecast std-dev (`fsd`) is missing or ≥ threshold, or confidence < `purchase_price_avm_min_confidence` (default 60); thresholds: `purchase_price_vs_listing_percent` (default 10) and `purchase_price_vs_avm_percent` (default 10) |
 </Tab>
 
 <Tab title="Primary residence (enabled: false)">
@@ -117,7 +118,6 @@ Gated on `occupancy === "INVESTMENT"`.
 | `VALUE_EXCEEDS_PRIMARY` | MEDIUM | subject value > borrower primary value |
 | `BORROWER_RENTING_PRIMARY` | MEDIUM / HIGH | A: current address housing expense is RENT. B: OWN but `ownerOccupied === false` and no REO entry at current address |
 | `RENT_VS_1003_MISMATCH` | MEDIUM | rent zestimate > 1003 rental income and percent diff > 10 |
-| `SUBJECT_LISTED_FOR_SALE_DSCR` | HIGH | DSCR program, INVESTMENT occupancy, subject listed for sale |
 </Tab>
 
 <Tab title="Second home (enabled: false)">

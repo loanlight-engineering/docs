@@ -48,6 +48,9 @@ LangSmith CLI access and the LangChain Docs MCP are shown as read-only checked. 
 <Step title="Pick a model">
 `ModelPicker` is a cascading provider menu. The default is `claude-4-8-opus-xhigh`. The chosen `modelId` is passed straight through to Warp's `config.model_id`.
 </Step>
+<Step title="Pick an affected area">
+The **Affected Area** dropdown is populated by `GET /api/v1/audit_runs/:id/bug-reports/agent-options` (LOA-1669). Options are derived per audit run as the union of the run's expected plan (`audit_runs.agent_config`) and the observed `agent_runs` for that audit. Adding a new area is a backend change with no package release or frontend redeploy required.
+</Step>
 <Step title="Pick a tentacle (skill)">
 A radio over `OZ_SKILLS`: Root Cause Analysis, RCA Fix & PR, or Ad Hoc. See [Oz skills](/octy/oz-skills) for what each does.
 </Step>

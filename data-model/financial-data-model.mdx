@@ -115,10 +115,14 @@ The original bank-statement income family is rooted at **`borrower_files`** and 
 <ParamField path="s3_keys" type="text[]">All source-PDF S3 keys for the set (migration `0188`).</ParamField>
 <ParamField path="pending_s3_keys" type="text[]">Subset of `s3_keys` the next (append-mode) processing job should extract; cleared at terminal state (migration `0199`).</ParamField>
 
-Other columns: `name`, `created_by`, the `processing_*` progress columns, `income_qualification` (default `12`), `ntropy_account_holder_id`, `large_deposit_threshold` decimal, `industry_type`, and timestamps.
+Other columns: `name`, `created_by`, the `processing_*` progress columns, `income_qualification` (default `12`), `large_deposit_threshold` decimal, `industry_type`, and timestamps. (`ntropy_account_holder_id` was dropped in migration `0236`.)
 
 <Note>
 `borrower_files.large_deposit_threshold_mode` is a **text + CHECK** column, distinct from the `large_deposit_threshold_mode` **pgEnum** on `asset_rule_sets`. The text version adds `pct_avg_qualifying_income`, which the asset enum lacks — see [enums reference](/data-model/enums-reference).
+</Note>
+
+<Note>
+**Resilience columns (LOA-1078):** migration `0240` extended `borrower_files.status` CHECK to include `'queued'` and added `recovery_attempts integer NOT NULL DEFAULT 0`. When the unified Reducto circuit breaker opens, bank-statement runs park at `status='queued'` and are drained automatically on recovery. Migration `0241` adds a partial-unique dedupe index `(id) WHERE status='queued'`. See [External service resilience](/subsystems/resilience-layer).
 </Note>
 
 ### bank_statements
@@ -137,10 +141,16 @@ Other columns: `bank_name`, `account_number_masked`, `account_holder`, `statemen
 `transactions.ts`. PK `id`, `statement_id` → `bank_statements` (cascade).
 
 <ParamField path="type" type="text NOT NULL">CHECK `type_check`: `credit | debit`.</ParamField>
-<ParamField path="category" type="text">Ntropy-derived category (free text, not a CHECK). Migration `0208` normalized the legacy value `missing account holder information` to `not enough information` in both `category` and the single-element `category_hierarchy`.</ParamField>
+<ParamField path="category" type="text">Transaction category (free text, not a CHECK). Previously populated by Ntropy; now populated by Plaid Enrich (LOA-1580). Migration `0208` normalized the legacy value `missing account holder information` to `not enough information` in both `category` and the single-element `category_hierarchy`.</ParamField>
 <ParamField path="synthetic_id" type="varchar(64)">Stable synthetic transaction identifier; partial index where not null (migration `0210`).</ParamField>
 
 Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-zero), `merchant_normalized`, `merchant_name`, `deposit_classification` (CHECK), `is_anomaly` / `anomaly_reason`, `evidence` jsonb, `category_hierarchy` jsonb, `categorized_at`, `created_at`.
+
+**Plaid Enrich columns (migration `0235`):** `category_detailed` text, `category_confidence` text, `merchant_logo_url` text, `merchant_website` text, `merchant_entity_id` text, `payment_channel` text, `counterparties` jsonb, `location` jsonb. These are populated by the Plaid Enrich API (replaces the deprecated Ntropy enrichment path).
+
+<Note>
+Migration `0236` dropped `borrower_files.ntropy_account_holder_id` — the column was used by the now-removed Ntropy integration and is no longer written.
+</Note>
 
 ### findings
 
@@ -170,7 +180,7 @@ Auto large-deposit findings are `DELETE`+`INSERT`-recomputed on every recompute,
 
 ## The asset subsystem
 
-The **asset / Statement Analyzer** subsystem (migrations `0180`–`0187`, `0207`) extracts and qualifies borrower asset accounts from bank statements. Unlike the credit/income/appraisal ledgers it does **not** attach to `audit_runs`; an `asset_runs` row binds to a loan or, for standalone runs, to a `borrower_files` set.
+The **asset / Statement Analyzer** subsystem (migrations `0180`–`0187`, `0207`, `0228`–`0238`) extracts and qualifies borrower asset accounts from bank statements. Unlike the credit/income/appraisal ledgers it does **not** attach to `audit_runs`; an `asset_runs` row binds to a loan or, for standalone runs, to a `borrower_files` set.
 
 ### asset_runs
 
@@ -187,7 +197,7 @@ Unique `(loan_id, run_number)` (`asset_runs_loan_run_key`); for loanless runs, a
 
 `asset-accounts.ts`. One row per extracted or manual borrower asset account. PK `id`, `loan_id` → `loans` (cascade; nullable since migration `0207`), `borrower_file_id` → `borrower_files` (cascade, migration `0207`).
 
-<ParamField path="source" type="asset_source (pgEnum) NOT NULL">`extracted | manual`.</ParamField>
+<ParamField path="source" type="asset_source (pgEnum) NOT NULL">`extracted | manual | plaid`. Migration `0228` added `plaid` for accounts ingested via the Plaid Link (Unified Intake) flow (LOA-1580).</ParamField>
 <ParamField path="source_statement_id" type="uuid → bank_statements (set null)" />
 <ParamField path="matched_borrower_id" type="uuid → borrowers (set null)" />
 <ParamField path="asset_type_normalized" type="asset_type_normalized (pgEnum) NOT NULL">Default `unknown`. `crypto` added in migration `0187`.</ParamField>
@@ -216,3 +226,19 @@ Numeric columns: `current_balance`, `qualifying_balance`, `qualifying_percent` n
 ### asset_corrections
 
 `asset-corrections.ts`. Auditable UW-override rows for asset accounts (last-write-wins; older rows retained for audit). PK `id`, `asset_account_id` → `asset_accounts` (cascade), `field`, `old_value`, `new_value`, `changed_by` → `portal_users` (set null), `changed_at`, `reason`. Indexed on `(asset_account_id, field)`.
+
+### statement_invites
+
+`statement-invites.ts` (migration `0230`). Borrower-invite lifecycle for the Plaid Link (Unified Intake) path. PK `id`, `loan_id` → `loans` (cascade, NOT NULL), `borrower_email` text (NOT NULL), `borrower_name` text (NOT NULL), `token_hash` text (NOT NULL), `status` `statement_invite_status` pgEnum DEFAULT `created`, timestamps (`sent_at`, `opened_at`, `connected_at`, `ready_at`, `failure_reason`, `updated_at`).
+
+`statement_invite_status` values: `created | sent | opened | linking | connected | ready | failed | expired | cancelled | undelivered`.
+
+Partial unique index `statement_invites_one_active_uniq` on `(loan_id, lower(borrower_email))` WHERE status NOT IN terminal states. A hashed-token index `statement_invites_token_hash_idx` supports the borrower landing-page lookup.
+
+### plaid_items
+
+`plaid-items.ts` (migration `0231`). Persists a borrower's Plaid connection per statement invite. PK `id`, `statement_invite_id` → `statement_invites` (cascade), `access_token_ciphertext` text (NOT NULL — KMS-encrypted; no plaintext token stored), `item_id` text (NOT NULL, unique), `institution` jsonb, `mask` text (last-4, masked), `account_type` text, timestamps.
+
+<Warning>
+The Plaid access token is stored **only as KMS ciphertext** in `access_token_ciphertext`. Raw account numbers are never persisted — only the last-4 `mask`. A `plaid_items` row is deleted when its parent `statement_invites` row is deleted (cascade).
+</Warning>

@@ -29,7 +29,11 @@ The webhook handler enqueues to the `transaction-event-handling` SQS queue (`cre
 - **initialize-audit** — inserts `transaction_state` and upserts `audit_details` to `Processing`. `transactionStateId = transaction_state.id` becomes the `correlationId`.
 </Step>
 <Step title="Upload documents to S3">
-**fetch-and-upload-documents** — `filterDocuments` splits the EPC resource list into the MISMO XML (required), supported docs (PDF/JPEG/PNG/TIFF/TXT/DOCX/DOC), and unsupported. Each is downloaded (`downloadResource`, base64, 400 MB cap, 2-min timeout) and uploaded to S3 with content-hash dedup. The MISMO XML is mandatory — a missing XML throws. **finalize** writes the `{correlationId}/metadata.json` manifest plus a non-blocking transaction-history snapshot. See [S3 layout](/storage/s3-layout).
+**fetch-and-upload-documents** — `filterDocuments` splits the EPC resource list into the MISMO XML (required), supported docs (PDF/JPEG/PNG/TIFF/TXT/DOCX/DOC), and unsupported. Each is downloaded (`downloadResource`, base64, 400 MB cap, 2-min timeout) and uploaded to S3 with content-hash dedup. The MISMO XML is mandatory — a missing XML throws.
+
+Recognized MISMO formats (finite `getMismoFormatPriority`) compete for the one MISMO slot; any `application/xml` with an `Infinity` priority or no recognized format is routed to a **`passthroughXml`** bucket (LOA-1673). When the `appraisal_passthrough` lender feature (`APPRAISAL_PASSTHROUGH_FEATURE_KEY`) is enabled, that passthrough XML is downloaded and stored as a non-MISMO opaque document (`is_mismo=false`) and rides into `AuditDocumentInfo[]` automatically. Gate errors are non-fatal: the XML is omitted but the critical MISMO/PDF audit always proceeds. Default off — enable per-lender via a `lender_feature` DML insert.
+
+**finalize** writes the `{correlationId}/metadata.json` manifest plus a non-blocking transaction-history snapshot. See [S3 layout](/storage/s3-layout).
 </Step>
 <Step title="Publish Audit Requested">
 **publishAuditRequestedEvent** publishes the "Audit Requested" EventBridge event (Source `loanlight.encompass`) carrying `correlationId`, `requestorId` (the client `providerClientId`), `environment`, `s3Bucket`, `s3Prefix`, decoded `loanMetadata`, `requestingParty`, and `documents[]`. This is the handoff to loanlight-api / AUS. See [Messaging](/integrations/messaging).

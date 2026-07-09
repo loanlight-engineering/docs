@@ -1,0 +1,96 @@
+---
+title: External service resilience
+description: The unified circuit-breaker and queue-and-recover layer for external vendor calls.
+icon: shield
+---
+
+LOA-1078 introduced a **unified external-service resilience layer** (`src/common/resilience/`) that protects every Reducto caller from vendor outages. When the circuit opens, work is parked rather than hard-failed; it drains automatically when Reducto recovers.
+
+## What it protects
+
+Two LoanLight domains call Reducto for document extraction:
+
+- **Appraisal extraction** (`portal-appraisal` module) — the primary adopter; previously had a flag-gated, single-domain circuit.
+- **Bank-statement structuring** (`bank-statement-pipeline` module) — added in LOA-1078; previously had no circuit protection.
+
+Both share **one** Reducto circuit (the same Redis key `resilience:reducto:state`), so a Reducto outage parks work from both domains simultaneously and a single recovery event drains both.
+
+## Architecture
+
+```text
+src/common/resilience/
+  circuit-store.ts             — generic keyed CircuitStore (Lua CAS, Redis-backed)
+  reducto-circuit-store.ts     — ReductoCircuitStore extends CircuitStore (key: "resilience:reducto:state")
+  call-class.ts                — CallClass type + REDUCTO_CIRCUIT definition (breaker config)
+  reducto-runtime.ts           — shared executor: executeWithReductoResilience, classifyReductoError, etc.
+  queue-and-recover/
+    disposition.ts             — resolveCircuitDisposition / shouldHold / canProbe (unified truth table)
+    port.ts                    — QueueAndRecoverAdapter interface
+    registry.ts                — QueueAndRecoverRegistry (adapters self-register on onModuleInit)
+    orchestrator.ts            — QueueAndRecoverOrchestrator (one probe→drain-all timer, fleet rollup, break-glass)
+  ResilienceModule             — NestJS module; imported by PortalAppraisalModule + BankStatementModule
+```
+
+## Circuit breaker
+
+The Reducto circuit uses the **cockatiel** library with a `consecutive` policy:
+
+| Config | Value |
+|---|---|
+| `failureThreshold` | 2 consecutive vendor failures to open |
+| `halfOpenAfterMs` | 60 000 ms (1 minute) before probing |
+| `retryable` | based on `classifyReductoError` — transient vendor errors open the breaker; local errors (parse failures) do not |
+
+Circuit state is persisted in Redis at `resilience:reducto:state`. A single `QueueAndRecoverOrchestrator` owns the recovery-driver timer (one per process; `.unref()`'d) so there is no race between the two domains.
+
+## Queue and recover
+
+When the circuit is open (or `force_open` overridden), both adapters **park** incoming work rather than hard-failing it.
+
+### Appraisal adapter
+
+Parks `appraisal_runs` at `status = 'queued'` (migration `0239`). A partial-unique dedupe index `idx_appraisal_runs_queued_dedupe` prevents double-queueing the same run. On recovery, queued runs are drained oldest-first, bounded by `REDUCTO_DRAIN_CONCURRENCY`.
+
+### Bank-statement adapter
+
+Parks `borrower_files` at `status = 'queued'` (migration `0240`). Two columns added:
+
+- `recovery_attempts integer NOT NULL DEFAULT 0` — incremented on each drain attempt.
+- Partial-unique dedupe index `idx_borrower_files_queued_dedupe` (migration `0241`).
+
+Drain uses a **fresh** `jobId` each time (not the stable `process-${id}`) to prevent BullMQ from silently deduping against a retained completed job. A **dual-gate reaper** fails terminal on either `recovery_attempts >= MAX` or `processing_started_at < now() - GRACE`, whichever fires first — preventing a borrower from being stranded forever.
+
+The portal renders `status = 'queued'` as "Waiting on Reducto — will resume automatically" (amber, no stage bar) on both statement-analyzer pages.
+
+## Break-glass control
+
+```
+POST /api/v1/portal/resilience/break-glass
+```
+
+Super-admin endpoint. Backed by `QueueAndRecoverOrchestrator.applyBreakGlass`. Body: `{ action: "force_open" | "force_closed" | "clear" }`.
+
+| Action | Effect |
+|---|---|
+| `force_open` | Both adapters park all new work (no probe) |
+| `force_closed` | Bypass the circuit and call Reducto **raw** — ⚠ do not use during an outage |
+| `clear` | Remove the override and resume normal breaker behavior |
+
+<Warning>
+The old `POST .../appraisals/break-glass` endpoint is gone. Update any runbook or operator script that references the old path.
+</Warning>
+
+## Adding a third service
+
+See `packages/api/docs/resilience-add-third-service.md` in `loanlight-api` for the step-by-step checklist. The guard test `only-reducto-has-live-breaker.spec.ts` is a merge-blocking census — it fails the moment a live breaker is wired somewhere unexpected. Update the `BREAKER_ALLOWLIST` in that spec when a new caller is deliberately added.
+
+## Related
+
+<Columns cols={2}>
+<Card title="Financial data model" href="/data-model/financial-data-model" icon="database">
+  `borrower_files` and `appraisal_runs` queued-status columns.
+</Card>
+<Card title="Observability" href="/ops/observability" icon="telescope">
+  Datadog monitors for `queued_stalled` events.
+</Card>
+</Columns>

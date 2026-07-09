@@ -92,6 +92,29 @@ The UI lives in the `(app)` route group and is gated on `flags.statementAnalyzer
 
 The list uses the shared `<Pagination>` + `useListPagination` hook, and the **Statement Analyzer** entry in `TopNav` is keyed on the `statementAnalyzer` flag.
 
+## Plaid Link portal UX
+
+LOA-1580 added a Unified Intake tab on the run detail page. The new portal components are:
+
+- **`invite-borrower.tsx`** — form to send a borrower an invite email for the Plaid Link flow.
+- **`linked-accounts.tsx`** — shows the connected Plaid accounts and their status.
+- **`assets-tab.tsx`** — surfaces Plaid-sourced `asset_accounts` in the review table alongside PDF-extracted accounts.
+- **`audit-log-tab.tsx`** — shows the processing audit log for a statement run.
+
+### Borrower page (`/b/[token]`)
+
+A new public (no portal auth) Next.js route at `src/app/b/[token]/page.tsx` is the borrower-facing Plaid Link entry point. It resolves the invite via a hashed token, renders the Plaid Link widget, and calls the exchange endpoint (`POST /api/borrower/:token/exchange`) once the borrower completes the OAuth flow. The route is completely separate from the portal's authenticated routes.
+
+### BFF proxies for invite management
+
+| Route handler | Backend |
+|---|---|
+| `GET/POST /api/statement-analyzer/loans/[loanId]/invites` | list / create invite |
+| `GET/DELETE /api/statement-analyzer/loans/[loanId]/invites/[inviteId]` | detail / cancel invite |
+| `POST /api/borrower/[token]/link-token` | mint Plaid Link token |
+| `POST /api/borrower/[token]/exchange` | exchange Plaid public token |
+| `GET /api/bank-statements/[borrowerFileId]/audit-events` | statement audit events |
+
 ## Related pages
 
 <Columns cols={2}>

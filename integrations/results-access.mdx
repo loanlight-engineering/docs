@@ -112,6 +112,10 @@ best-effort by contract — it never fails the audit. The consumer also publishe
 `documents.materialized` return event so the AUS can record where each split landed. See
 [Messaging](/integrations/messaging).
 
+**LOA-1340 — fetch-then-push (thin-event migration):** The integrations consumer (`QueueConsumerService.handleDocumentPush`) no longer reads the `documents[]` array from the event payload. Instead, it **fetches** the authoritative classified-doc set from `GET /api/v1/audit_runs/{auditRunId}/classifications` (`AuditResultsFetcherService.fetchClassifications`) and materializes from that. The change removes the EventBridge 256 KB per-entry cliff. The `DocumentsClassifiedEventSchema.documents` field is now **optional** so the consumer tolerates both the legacy fat event (with `documents[]`) and the new thin event (without) — this is the deploy-ordering safety property.
+
+`fetchClassifications` returns a validated array via `classifications.schema.ts`; a fetch failure (network / 5xx / schema) **throws** so the SQS message redelivers (transient recovers, persistent → DLQ), while a genuinely empty response returns `[]` and the message is consumed with nothing to push.
+
 ## Encompass loan details on the results fetch
 
 `GET /api/v1/audit_runs/:id/results` accepts `includeEncompassLoanDetails=true`. The
