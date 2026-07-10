@@ -55,7 +55,7 @@ The output is `PreAuditClassificationOutput`:
   errors: PreAuditClassificationError[] }
 ```
 
-After classification settles, `DocumentsClassifiedEmitter.emitForLoan` fires the best-effort `documents.classified` event so integrations can carve and push doc types and filenames back to Encompass. [Document-Health](/agents/document-health) and the classify-split response API also read the rows.
+After classification settles, `DocumentsClassifiedEmitter.emitForLoan` fires the best-effort `loanlight.documents.classified` event. Since LOA-1340 (#2659) this is a **thin trigger** (`{loanId, auditRunId, encompassLoanId, clientId}` only); integrations pull the authoritative segment rows from the Classifications API rather than reading an embedded payload. The emitter skips the emit if the current run has no classified segments, preventing a trigger whose pull resolves to zero documents on a `skipped` re-audit. [Document-Health](/agents/document-health) and the classify-split response API also read the rows.
 
 <Warning>
 **Buffer-drop invariant (load-bearing).** Raw PDF buffers are not a graph state channel. `runPreAuditClassification` passes them via `buildGraph({ splitInput: { documents } })`, where the `SplitDocumentsNode` instance captures them in a per-invocation closure (`this.documents`). Node's `Buffer.toJSON()` inflates buffers roughly 280x in LangSmith trace payloads, so the buffers are deliberately kept out of every channel and out of traces. After `splitDocuments`, only the buffer-free `SplitStageResult` flows through state.

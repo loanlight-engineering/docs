@@ -95,9 +95,18 @@ Inert except for an inert `boostScannedLlamaExtractCandidates`. The `ocrmypdf` p
 removed (LOA-1101); Reducto OCRs scanned PDFs natively.
 </Accordion>
 <Accordion title="reductoExtract">
-Reducto deep extraction — the sole extractor since the legacy pdfjs path was removed (PR #2463).
+Reducto deep extraction — the standard extractor since the legacy pdfjs path was removed (PR #2463).
 Forwards `enrichmentData` and a cached `_reductoResult` on ATTOM replay, and preserves the
 canonical form type (`1025` vs `1004` schema).
+
+<Note>
+A **super-admin-gated Textract lane** exists as an alternative extraction path
+(`packages/api/src/lib/appraisal-pipeline/textract/`), introduced in LOA-1744 (#2701) for the
+LOA-1614 go/no-go cost/accuracy evaluation. All Textract-specific logic (comp-grid reconstruction,
+checkbox mapping, boolean/enum coercion via `coerceTextractTypes`) is gated to
+`extractionProvider === "textract"` in `normalizeAdapter`; the Reducto lane is byte-for-byte
+unchanged. The Textract lane is not intended for production use until the go/no-go decision.
+</Note>
 </Accordion>
 <Accordion title="resolveFields">
 Merges candidate sources (Reducto, XML, and corrections). XML priority 100 wins; seeds
@@ -131,6 +140,10 @@ throws (failure/timeout yields a null-data sentinel). The result rides graph sta
 Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-pass warnings.
 </Accordion>
 </AccordionGroup>
+
+### R10 appraisal-gated completion race (LOA-1751)
+
+When an EPC audit is appraisal-gated, the orchestration service (`integration-orchestration.service.ts`) used to rely solely on the appraisal processor's own `tryCompleteAuditRun` call to close the audit. That single attempt no-oped if appraisal finished before its barrier-awaited siblings, leaving the audit permanently stuck in `processing`. Since LOA-1751 (#2709), after `orchestrator.run` resolves the gated branch unconditionally retries `tryCompleteAuditRun` (1 initial + 2 retries at 100ms and 300ms), closing the gap without risking double-emission of `workflow:complete`. A follow-up durable reaper is tracked in LOA-1752.
 
 ### agenticRefine has been deleted
 

@@ -119,13 +119,22 @@ Env `HASDATA_KEY` (header `x-api-key`). `getPropertyDetails(zillowUrl, ...)` and
 `getRedfinPropertyDetails(url)`. Scrape timeout `HASDATA_SCRAPE_TIMEOUT_MS` (default 300000ms),
 retry budget `HASDATA_RETRY_BUDGET_MS` (default 600000ms), max 3 attempts. Errors:
 `HasDataError`, `HasDataUpstreamStatusError`, `HasDataRetryExhaustedError`.
+
+Since LOA-1745 (#2695), `scrapedAddressMatches` is **unit-aware**: when the expected subject address
+names a unit, the scrape result must resolve to the **same** unit (normalized so `#811` ≡ `APT 811`
+≡ `Unit 811` ≡ `811`). A different or missing unit is an `address_mismatch` scrape miss — fail
+closed, so ATTOM populates the property profile instead of silently substituting the wrong unit's
+data. Unit-less (single-family) subjects are unchanged. Additionally, a `FOR_RENT` listing no
+longer populates `currentListPrice` with its monthly rent; rent routes through `rentZestimate` only.
 </Accordion>
 
 <Accordion title="SerpApi / Zillow URL finder (ZillowUrlFinderService)">
 Env `SERPAPI_KEY`, `serpApiUrl = https://serpapi.com/search`.
 `findPropertyUrl(input, site = "zillow" | "redfin")` runs a Google search via SerpApi, filters to
 `site:zillow.com/homedetails` (or `site:redfin.com`), and matches street-number + city (+ unit) in
-result titles. Returns null on no exact match.
+result titles. Returns null on no exact match. Since LOA-1745 (#2695), when the subject address
+includes a unit, the unit is included in the SerpApi query so the specific unit's zpid is ranked
+above the building-level record.
 </Accordion>
 </AccordionGroup>
 

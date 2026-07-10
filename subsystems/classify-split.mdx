@@ -104,12 +104,23 @@ splits across two mode behaviors.
 
 - **Classifications API** — `GET /api/v1/audit_runs/:id/classifications` and
   `GET /api/v1/partner/audits/:auditId/classifications` (both via `buildClassificationsResponse`).
-- **`loanlight.documents.classified` event** — classification is DB-only and settles during phase 0,
-  so the EPC push event is fired in a `finally` after the orchestrator runs (LOA-1565, #2408). A
-  LlamaCloud/index failure makes `orchestrator.run` throw, but the emit still fires, so a failure never
-  drops the client's doc push. The emit is fire-and-forget (`fireDocumentsClassifiedPublic` → best-effort
-  `emitForLoan`). Integrations carve and push each document into Encompass, routing `unknown` to the
-  lender's manual-review folder.
+  Since LOA-1340 (#2659), each segment also exposes `originalS3Ref` (the source
+  `loan_documents.storage_path`) and `contentHash` (SHA-256 dedup key, LOA-1102) — the fields
+  integrations needs to carve and route classified splits.
+- **`loanlight.documents.classified` event** — Since LOA-1340 (#2659) this is a **thin trigger**: the
+  event carries only `{loanId, auditRunId, encompassLoanId, clientId}` — no embedded `documents[]`
+  array. This permanently removes the EventBridge 256 KB per-entry cliff that previously risked
+  silently dropping the push for pathologically large loans. The integrations consumer pulls the
+  authoritative segment rows from the Classifications API; the `classificationType`
+  null→`"unknown"` normalization (LOA-1041/LOA-882) moved to that consumer.
+
+  The emit is fire-and-forget (`fireDocumentsClassifiedPublic` → best-effort `emitForLoan`), fired in
+  a `finally` after the orchestrator runs (LOA-1565, #2408). A LlamaCloud/index failure makes
+  `orchestrator.run` throw, but the emit still fires. The emitter first checks for run-scoped
+  classified segments — if the current run has none it logs and skips (prevents a trigger whose pull
+  resolves to zero documents on a `skipped` re-audit). Two interim DogStatsD metrics track payload
+  size: `loanlight.documents_classified.payload_bytes` (distribution) and
+  `loanlight.documents_classified.oversize` (count, fires past ~90% of the 256 KB limit).
 - **`loanlight.documents.materialized` return leg** — after integrations carve the classified splits to
   S3 they emit `documents.materialized`; `DocumentsMaterializedConsumerService` consumes it (its own
   `documents-materialized-events` SQS queue + DLQ, short visibility timeout) and
