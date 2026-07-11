@@ -120,12 +120,13 @@ File: `integration-events/services/indexing.service.ts`. `IndexingService` runs 
 
 ## Orphan reapers
 
-Two net-new reapers (boot reap + unref'd `setInterval`, 5-minute cadence) keep the ledger from deadlocking on a dead worker/process. Both join on the parent `audit_runs` status, so they only unwedge runs that are themselves non-terminal — a no-op in steady state and storm-proof against a `pending` backlog under already-completed parents.
+Three reapers (boot reap + unref'd `setInterval`, 5-minute cadence) keep the ledger from deadlocking on dead workers and stuck completions. The `agent_runs` and `audit_infra_steps` reapers join on the parent `audit_runs` status, so they only unwedge runs that are themselves non-terminal — a no-op in steady state and storm-proof against a `pending` backlog under already-completed parents.
 
 | Reaper | File | Window | Reaps |
 |---|---|---|---|
 | `AgentRunOrphanReaperService` | `orchestrator/agent-run-orphan-reaper.service.ts` | 3h | Stuck non-terminal `agent_runs` rows → `failed` (skips `WORKER_OWNED_AGENT_TYPES`). |
 | `AuditInfraStepOrphanReaperService` | `orchestrator/audit-infra-step-orphan-reaper.service.ts` | 70min | Stuck non-terminal `audit_infra_steps` rows → `failed`. |
+| `AuditCompletionReaperService` | `orchestrator/audit-completion-reaper.service.ts` | 60min | `audit_runs` stuck non-terminal after **all** their `agent_runs` and `audit_infra_steps` are already terminal — the one case the other two reapers cannot cover (LOA-1752, #2719). Calls `reconciler.reapCompletableAuditRuns(windowMs)`. |
 
 The work itself is in `reconciler.reapStuckAgentRuns(windowMs)` and `reconciler.reapStuckInfraSteps(windowMs)`; both drive each affected run toward completion after reaping. Each window must exceed the slowest legitimate work it covers (credit fan-out for agents; the 57-minute index ceiling for infra steps) so a live-but-slow operation is never false-failed.
 

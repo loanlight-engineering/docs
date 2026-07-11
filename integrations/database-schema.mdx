@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **15 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 021 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 022 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -27,9 +27,7 @@ The current schema has **15 tables**. Migration `001_baseline_schema.sql` create
 || `007_create_transaction_documents` | `transaction_document` |
 || `008_transaction_is_shadow` | `transaction_record.is_shadow`, widen `loan.encompass_loan_number` to 64 |
 || `009_create_document_push_records` | `document_push_record` |
-|| `010_create_epc_delivery_records` | `epc_delivery_records` |
-|| `011_add_delivery_cancelled_after` | `transaction_state.delivery_cancelled_after` |
-|| `012_create_lender_and_client_lender_id` | `lender`, `client.lender_id` |
+||| `012_create_lender_and_client_lender_id` | `lender`, `client.lender_id` |
 || `013_create_audit_delivery_log` | `audit_delivery_log` |
 || `014_add_workos_org_id_to_lender` | `lender.workos_org_id` |
 || `014_drop_client_token` | drops `client.client_token` |
@@ -40,10 +38,11 @@ The current schema has **15 tables**. Migration `001_baseline_schema.sql` create
 || `019_create_lender_feature` | `lender_feature` |
 || `020_add_routing_outcome_to_document_push_record` | `document_push_record.outcome` + `document_push_record.missing_fields` (LOA-1715) |
 || `021_audit_delivery_log_status_and_unique` | `status`, `error_class`, `error_detail`, `attempts` columns on `audit_delivery_log`; UNIQUE `(transaction_state_id, file_name)` (LOA-989) |
-|| `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
+||| `022_drop_epc_delivery_records` | drops `epc_delivery_records` table and `transaction_state.delivery_cancelled_after` column (LOA-1678) |
+||| `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
-The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The nine tables added by migrations 003–019 (`audit_details`, `transaction_document`, `document_push_record`, `epc_delivery_records`, `lender`, `audit_delivery_log`, `document_push_routing_config`, `materialized_split_record`, `lender_feature`) are missing from it. Trust the schema, not the README.
+The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The nine tables added by migrations 003–019 (`audit_details`, `transaction_document`, `document_push_record`, `lender`, `audit_delivery_log`, `document_push_routing_config`, `materialized_split_record`, `lender_feature`) are missing from it. Trust the schema, not the README.
 </Note>
 
 <Note>
@@ -165,20 +164,8 @@ Backs the document-push pipeline (see [Messaging](/integrations/messaging)). UNI
 || `missing_fields` | added in 020 (LOA-1715); `text[]` of required template fields that were absent (populated when `outcome` is `missing_fields_fallback` or `degraded`). |
 || `epc_resource_id`, container columns, error columns | |
 
-### epc_delivery_records
-
-B-track durable delivery-queue scaffold (LOA-946/948/949). UNIQUE `(transaction_state_id, sequence_order)`.
-
-| Column | Notes |
-|---|---|
-| `id` | PK |
-| `transaction_state_id`, `sequence_order`, `delivery_type` | |
-| `status` | `pending` / `in_progress` / `completed` / `failed` / `cancelled` |
-| `payload` | jsonb |
-| attempt and lock columns | |
-
 <Note>
-This table and the associated `epc-delivery` package are dead scaffolding — they are not part of the live delivery path. The `document_push` flag-based routing (LOA-948) replaced this design. Cleanup is tracked in LOA-1678. See [Audit lifecycle](/integrations/audit-lifecycle).
+The `epc_delivery_records` table and the `epc-delivery` package were **dropped** in migration `022` (LOA-1678). They were dead scaffolding for a durable outbox delivery approach that was de-scoped in favor of the synchronous model. `transaction_state.delivery_cancelled_after` was removed in the same migration.
 </Note>
 
 ### lender
@@ -189,7 +176,7 @@ Per-lender delivery behaviour (added in 012).
 |---|---|
 | `id` | PK |
 | `name` | |
-| `audit_delivery_mode` | `single` / `split` / `pipeline`, default `single`. **Retired** — the `document_push` flag on the `lender_feature` table is now the sole switch for routed delivery (LOA-948). This column remains in the schema pending cleanup (LOA-1678). |
+| `audit_delivery_mode` | `single` / `split` / `pipeline`, default `single`. **Retired** — the `document_push` flag on the `lender_feature` table is now the sole switch for routed delivery (LOA-948). This column remains in the schema as a legacy artifact. |
 | `workos_org_id` | text, nullable; added in 014. The lender's WorkOS org id, sent as the `X-Requestor-ID` on the trusted internal audit-PDF data fetch. Unprovisioned lenders fall back to `provider_client_id`. |
 
 Shadow audits resolve a lender by name via this table — see [Shadow audits](/integrations/shadow-audits). `workos_org_id` is also how the [routing-config admin API](/integrations/routing-config-admin) maps an `:orgId` path param to a `lender.id`.

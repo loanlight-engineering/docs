@@ -98,7 +98,7 @@ The two run-ledger families use **different terminal-success spellings**. Get th
 
 ## Finding-type unions (bank-statement pipeline)
 
-`findings.finding_type` (the `borrower_files` family, 15-value CHECK `finding_type_check`): `large_deposit`, `anomaly`, `fraud_flag`, `income_classification`, `validation_balance_mismatch`, `validation_date_out_of_range`, `validation_duplicate`, `validation_invalid_amount`, `validation_missing_field`, `fraud_pdf_integrity`, `fraud_font_consistency`, `fraud_continuity`, `llm_source_mismatch`, `nsf_overdraft`, `income_trend`. Migration `0209` added `nsf_overdraft` / `income_trend` and re-asserted `validation_balance_mismatch` / `validation_duplicate`. `findings.severity`: `info | warning | critical | error`.
+`findings.finding_type` (the `borrower_files` family, 16-value CHECK `finding_type_check`): `large_deposit`, `anomaly`, `fraud_flag`, `income_classification`, `validation_balance_mismatch`, `validation_date_out_of_range`, `validation_duplicate`, `validation_invalid_amount`, `validation_missing_field`, `fraud_pdf_integrity`, `fraud_font_consistency`, `fraud_continuity`, `llm_source_mismatch`, `nsf_overdraft`, `income_trend`, `negative_balance`. Migration `0209` added `nsf_overdraft` / `income_trend` and re-asserted `validation_balance_mismatch` / `validation_duplicate`. Migration `0244` (LOA-1688) added `negative_balance` (emitted when any statement's `closing_balance` or running balance goes negative). `findings.severity`: `info | warning | critical | error`.
 
 ## Bank-statement and asset pipeline
 

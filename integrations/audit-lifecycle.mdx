@@ -75,7 +75,7 @@ Since LOA-989 (#497), document upload is **fail-soft per document**: network err
 
 One `audit_delivery_log` row per planned core document (`aus_report` / `property`) is upserted **before** the terminal PATCH, keyed on `(transaction_state_id, file_name)`, recording `status = 'delivered'` or `'failed'` and the retry count. A non-full delivery emits a `split_delivery_degraded` structured Datadog log (event key, failed/total counts, error classes, and missing document kinds — never file names, which embed borrower addresses). The path still fails loud on a missing or inapplicable routing config.
 
-The `audit_delivery_mode='split'` column and its trigger (LOA-970) are retired in favor of this flag-based routing. Cleanup of the dead durable-pipeline scaffolding (`epc-delivery` package, `epc_delivery_records` table, migrations 010/011, `audit_delivery_mode`) is tracked in LOA-1678.
+The `audit_delivery_mode='split'` column and its trigger (LOA-970) are retired in favor of this flag-based routing. The dead durable-pipeline scaffolding (`epc-delivery` package, `epc_delivery_records` table, migrations 010/011) was **removed** in migration 022 (LOA-1678, integrations PR #499). The `audit_delivery_mode` column is retained as a legacy artifact.
 </Tab>
 </Tabs>
 

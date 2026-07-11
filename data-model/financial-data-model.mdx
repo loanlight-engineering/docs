@@ -117,6 +117,12 @@ The original bank-statement income family is rooted at **`borrower_files`** and 
 
 Other columns: `name`, `created_by`, the `processing_*` progress columns, `income_qualification` (default `12`), `large_deposit_threshold` decimal, `industry_type`, and timestamps. (`ntropy_account_holder_id` was dropped in migration `0236`.)
 
+**Priority Financial income exclusion columns (LOA-1686, LOA-1690):**
+
+- `self_employed` boolean NOT NULL DEFAULT false (migration `0243`, LOA-1687). When `true`, payroll-classified deposits are excluded from qualifying income. Opt-in, zero behavior change unless the reviewer checks it.
+- `borrower_name` text (migration `0245`, LOA-1690). Borrower name captured at enqueue time; seeds family/spousal P2P transfer matching.
+- `co_borrower_name` text (migration `0245`, LOA-1690). Co-borrower name; same purpose.
+
 <Note>
 `borrower_files.large_deposit_threshold_mode` is a **text + CHECK** column, distinct from the `large_deposit_threshold_mode` **pgEnum** on `asset_rule_sets`. The text version adds `pct_avg_qualifying_income`, which the asset enum lacks — see [enums reference](/data-model/enums-reference).
 </Note>
@@ -157,7 +163,7 @@ Migration `0236` dropped `borrower_files.ntropy_account_holder_id` — the colum
 `findings.ts`. The bank-statement finding ledger. PK `id`, `borrower_file_id` → `borrower_files` (cascade).
 
 <ParamField path="statement_id" type="uuid → bank_statements (set null)">Links a finding to the statement it came from; indexed (migration `0201`).</ParamField>
-<ParamField path="finding_type" type="text NOT NULL">15-value CHECK `finding_type_check`. Migration `0209` added `nsf_overdraft` and `income_trend` (and re-asserted `validation_balance_mismatch` / `validation_duplicate`). See [enums reference](/data-model/enums-reference#finding-type-unions-bank-statement-pipeline).</ParamField>
+<ParamField path="finding_type" type="text NOT NULL">16-value CHECK `finding_type_check`. Migration `0209` added `nsf_overdraft` and `income_trend` (and re-asserted `validation_balance_mismatch` / `validation_duplicate`). Migration `0244` (LOA-1688) added `negative_balance`, emitted at the borrower-file level when any statement's `closing_balance` or running balance goes negative. See [enums reference](/data-model/enums-reference#finding-type-unions-bank-statement-pipeline).</ParamField>
 <ParamField path="severity" type="text NOT NULL">CHECK `severity_check`: `info | warning | critical | error`.</ParamField>
 <ParamField path="is_dismissed" type="boolean NOT NULL">Default `false`. Migration `0222`. When `true`, the finding is waived by an admin reviewer and excluded from the Issues surface.</ParamField>
 <ParamField path="dismissed_reason" type="text">Required when dismissing; free text ≤500 chars.</ParamField>

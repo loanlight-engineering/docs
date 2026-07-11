@@ -16,15 +16,11 @@ Defined in `constants/queue-names.ts` and provisioned by `worker-stack.ts`. Cons
 || Transaction events | `transaction-event-handling` | 900 s | `handleTransactionEvent` | `WorkerService` (from webhook) |
 || AUS updates | `handle-aus-updates` | 30 s | `handleAusUpdate` | EventBridge `AusUpdateRule` |
 || Document push | `document-push` | 900 s | `handleDocumentPush` | EventBridge `DocumentPushRule` |
-|| EPC delivery (FIFO) | `epc-delivery.fifo` | 120 s | scaffold (not live) | — |
 
-Queue config env vars are validated at boot: `SQS_{HEALTH_CHECK,TRANSACTION_EVENT,AUS_UPDATE,DOCUMENT_PUSH,EPC_DELIVERY}_QUEUE_{URL,NAME}` plus `AWS_REGION`.
+Queue config env vars are validated at boot: `SQS_{HEALTH_CHECK,TRANSACTION_EVENT,AUS_UPDATE,DOCUMENT_PUSH}_QUEUE_{URL,NAME}` plus `AWS_REGION`.
 
 The `WORKER_TYPES` enum (`messaging/constants.ts`) names the job types carried in messages: `handle-health-check`, `handle-transaction-created-event`, `handle-transaction-updated-event`, `handle-aus-updates`.
 
-<Warning>
-The `epc-delivery.fifo` queue (with `epc-delivery-dlq.fifo`, `maxReceiveCount` 5) is **B-track scaffolding** (LOA-946/948/949/989). It is provisioned but not yet driving deliveries. Current delivery is the synchronous single/split path inside `AusUpdateService` — see [Audit lifecycle](/integrations/audit-lifecycle). The `epc_delivery_records` table backs the same scaffold; see [Integrations database schema](/integrations/database-schema).
-</Warning>
 
 ## EventBridge rules
 

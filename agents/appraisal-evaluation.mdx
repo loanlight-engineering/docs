@@ -130,10 +130,35 @@ Project / condo validations.
 STR/LTR rental-data enrichment via Mashvisor (LOA-1449, PR #2285), for DSCR appraisals only.
 Runs between `validateProject` and `aggregate`. Gated on a DSCR `programDocType`
 (`DSCR_PROGRAM_CODES`) — a non-DSCR or null program returns `{ rentalData: null }` with no fetch.
-With a DSCR program it guards on a complete subject street/city/state, applies a wall-clock
-ceiling (`MASHVISOR_ENRICHMENT_CEILING_MS`, 1 minute) on the single adapter call, and never
-throws (failure/timeout yields a null-data sentinel). The result rides graph state as
-`rentalData`; the processor merges rental findings (`mergeRentalFindings`) and persists
+
+With a DSCR program the node guards on a complete subject street/city/state, then calls
+`MashvisorService.getRentalData(addr, signal)` with an abort signal capped at
+`MASHVISOR_ENRICHMENT_CEILING_MS` (1 minute). The service fans out **three parallel endpoints**
+(PR #2752):
+
+- **Lookup** — STR aggregate performance: `median_rental_income`, `median_annual_revenue`,
+  `median_occupancy_rate`, `sample_size`.
+- **List Comps** — STR comparable listings: an array of short-term rental comps
+  (`RentalComp`: `monthlyRevenue`, `occupancy`, `bedrooms`, `address`, `distanceMiles`, `url`).
+- **Long-Term Comps** — LTR comparable listings: an array of long-term rental comps
+  (`LtrComp`: `monthlyRent`, `bedrooms`, `bathrooms`, `sqft`, `address`, `listingDate`,
+  `distanceMiles`, `url`).
+
+`NormalizedAddress` now carries `latitude`/`longitude` (resolved from ATTOM enrichment data in
+the node) so each comp's `distanceMiles` can be computed via haversine; the field is `null`
+when ATTOM coordinates are unavailable — comps render with `distanceMiles: null` rather than
+blocking the fetch.
+
+The `RentalDataResult` shape is:
+- `strPerformance` — STR aggregate (from Lookup), or `null` on miss.
+- `strComps` — STR comp array (from List Comps).
+- `ltrComps` — LTR comp array (from Long-Term Comps).
+- `sampleSize` — number of STR comps behind the Lookup aggregate (`null` on miss). Replaces
+  the retired `confidence` field — no real confidence score exists in the Mashvisor API.
+
+The node never throws (per-endpoint failures surface in `_errors`; a timeout on the whole
+request yields the null-sentinel for all fields). The result rides graph state as `rentalData`;
+the processor merges rental findings (`mergeRentalFindings`) and persists
 `appraisal_runs.rental_data`.
 </Accordion>
 <Accordion title="aggregate">
@@ -143,7 +168,7 @@ Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-p
 
 ### R10 appraisal-gated completion race (LOA-1751)
 
-When an EPC audit is appraisal-gated, the orchestration service (`integration-orchestration.service.ts`) used to rely solely on the appraisal processor's own `tryCompleteAuditRun` call to close the audit. That single attempt no-oped if appraisal finished before its barrier-awaited siblings, leaving the audit permanently stuck in `processing`. Since LOA-1751 (#2709), after `orchestrator.run` resolves the gated branch unconditionally retries `tryCompleteAuditRun` (1 initial + 2 retries at 100ms and 300ms), closing the gap without risking double-emission of `workflow:complete`. A follow-up durable reaper is tracked in LOA-1752.
+When an EPC audit is appraisal-gated, the orchestration service (`integration-orchestration.service.ts`) used to rely solely on the appraisal processor's own `tryCompleteAuditRun` call to close the audit. That single attempt no-oped if appraisal finished before its barrier-awaited siblings, leaving the audit permanently stuck in `processing`. Since LOA-1751 (#2709), after `orchestrator.run` resolves the gated branch unconditionally retries `tryCompleteAuditRun` (1 initial + 2 retries at 100ms and 300ms), closing the gap without risking double-emission of `workflow:complete`. The follow-up durable backstop was delivered in LOA-1752 (#2719) as `AuditCompletionReaperService` — see [Orphan reapers](/agents/runs-ledger#orphan-reapers).
 
 ### agenticRefine has been deleted
 

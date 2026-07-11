@@ -81,11 +81,16 @@ Concurrent-write safety: every mutation uses `SELECT … FOR UPDATE` row-locking
 
 ## Portal routes and feature flag
 
-The "What's New" surface is gated on the `releaseNotes` feature flag (env `FEATURE_RELEASE_NOTES`, default-OFF). When the flag is off the `/whats-new` page renders a "not enabled" message.
+The "What's New" surface is gated by two checks:
+
+1. **Role + impersonation gate (LOA-1728):** `canSeeWhatsNew(role, isImpersonating)` returns `true` only when `role === "super_admin" && !isImpersonating`. During staged rollout the page is super-admin-only. When a super-admin is impersonating a lender ("View as Client"), the page renders the "not enabled" prompt instead of the feed, so the impersonated view matches what the client actually sees. This check is evaluated **before** the feature-flag lookup.
+2. **Feature flag (`releaseNotes`):** env `FEATURE_RELEASE_NOTES`, default-OFF. When the flag is off the page renders a "not enabled" message.
+
+The same `canSeeWhatsNew` gate controls the top-nav badge — so the unread-notes badge is also hidden during impersonation.
 
 | Route | Purpose |
 |---|---|
-| `/whats-new` | Client-facing published feed (`WhatsNewPage`). Gated on `flags.releaseNotes`. |
+| `/whats-new` | Client-facing published feed (`WhatsNewPage`). Gated on `canSeeWhatsNew` + `flags.releaseNotes`. |
 | `/admin/release-notes` | Super-admin authoring UI (`ReleaseNotesAdminEditor`). Internal-only; requires `super_admin` + internal lender. |
 
 ### Nav badge (unread count)
