@@ -127,11 +127,16 @@ ATTOM property enrichment, ceiling 2 minutes.
 Project / condo validations.
 </Accordion>
 <Accordion title="mashvisorFetch">
-STR/LTR rental-data enrichment via Mashvisor (LOA-1449, PR #2285), for DSCR appraisals only.
-Runs between `validateProject` and `aggregate`. Gated on a DSCR `programDocType`
-(`DSCR_PROGRAM_CODES`) — a non-DSCR or null program returns `{ rentalData: null }` with no fetch.
+STR/LTR rental-data enrichment via Mashvisor (LOA-1449, PR #2285). Runs between `validateProject`
+and `aggregate`. The gate (exported as `shouldEnrichRental`) fires when **either** the loan program
+is DSCR (`programDocType ∈ DSCR_PROGRAM_CODES`) **or** `state.formType === "1025"` (Form 1025,
+Small Residential Income Property, 2–4 unit) — see LOA-1837. The 1025 disjunct exists because
+portal appraisal uploads frequently carry no loan program (`loan_program_id` null →
+`programDocType` null), so a DSCR-only gate never fires for portal-uploaded income properties.
+Fires on any Form 1025, including owner-occupied 2–4 units (blanket product decision). A null /
+non-DSCR program on a non-1025 form returns `{ rentalData: null }` with no fetch.
 
-With a DSCR program the node guards on a complete subject street/city/state, then calls
+With the gate open the node guards on a complete subject street/city/state, then calls
 `MashvisorService.getRentalData(addr, signal)` with an abort signal capped at
 `MASHVISOR_ENRICHMENT_CEILING_MS` (1 minute). The service fans out **three parallel endpoints**
 (PR #2752):
@@ -219,13 +224,15 @@ and the field maps.
 ### Appraisal rules
 
 The rule definitions live in `lib/appraisal-pipeline/rules/definitions` (registry
-`rule-registry.ts`) and span **67 rules** across these prefixes: `SUBJ_` (15), `SITE_` (8),
-`EXH_` (6), `NEIGH_` (6), `COMP_` (6), `CONT_` (5), `IMP_` (6), `APPR_` (3), `CONDO_` (3),
+`rule-registry.ts`) and span **68 rules** across these prefixes: `SUBJ_` (15), `SITE_` (8),
+`EXH_` (6), `NEIGH_` (6), `COMP_` (6), `CONT_` (6), `IMP_` (6), `APPR_` (3), `CONDO_` (3),
 `REC_` (3), `INCOME_` (2), `RENT_` (2), `GEN_` (1), `UNIT_` (1). The rules are agency-aware
 (`AgencySource`: `fannie_mae`, `freddie_mac`), support compound conditions (`compound-walker`,
 `condition-schema`), and use `feature-gates`.
 
-**`IMP_006` — Unique / atypical property (LOA-1713)** is the newest global built-in. It flags when the appraiser characterizes the **property itself** as unique or atypical (e.g. a note saying "a unique property with limited comparables") by reading `improvements.has_unique_property_mention` (boolean tri-state). Outcomes: `true` → WARNING, `false` → PASS, `null` → NEEDS_INFO. The field is extracted from the narrative (comments, addendum, improvements, neighborhood, sales-comparison, reconciliation sections); boilerplate like "a unique opportunity" does not set it. Migration `0216` seeds the template row and **backfills it into all existing active rule sets** (same pattern as `0193`). This rule is complementary to Deephaven's `DH_019` (floor-plan-specific); both are kept because they measure different things.
+**`CONT_006` — Appraised value below purchase price (LOA-1753)** is the newest global built-in. It flags when the appraiser’s `reconciliation.final_opinion_of_value` (alias-aware via `resolveAppraisedValue`) comes in below `contract.contract_price`. Purchase transactions only; refinances return `SKIPPED`. Default severity `WARNING` (configurable per lender). A `tolerancePercent` threshold (default `0` = flag any shortfall) suppresses rounding noise. Missing operands return `NEEDS_INFO` rather than double-flagging — presence is owned by `REC_002` and `CONT_002`. Lender-neutral (no lender-code gate, no loan-context dependency) so it also evaluates on standalone portal appraisal runs. Migration `0246` seeds the template and backfills it into all active rule sets.
+
+**`IMP_006` — Unique / atypical property (LOA-1713)** is the previous newest global built-in.
 
 The `COMP_` family is `COMP_001`–`COMP_005` plus `COMP_007` (there is no `COMP_006`). `COMP_007`
 (**Stated vs Actual Proximity**, LOA-1200 / PR #2315) verifies each comp's stated proximity

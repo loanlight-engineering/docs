@@ -74,9 +74,16 @@ Octy surfaces document-router routing outcomes directly on classification cards 
 - the S3 split-storage path that produced the outcome, and
 - a link to the relevant Routing Config page.
 
-Outcomes are fetched once per loan by `RoutingOutcomesProvider` via the `document-push.getOutcomes` server action, using the classification's `split_storage_path` as the join key to the integrations routing outcome table. Fetch errors yield an empty result — the classification card renders normally without the routing section.
+Outcomes are fetched by `RoutingOutcomesProvider` via `getRoutingOutcomesByClassificationId`, which fans out two distinct lookups (LOA-1671):
 
-The `integrations-routing-client.ts` and `integrations-routing-types.ts` modules were extended to carry routing-outcome types and the new `getDocumentRoutingOutcomes` / `getRoutingOutcomesByClassificationId` actions.
+- **`listClassifications`** — accepts a `loanSearch` param that matches `loans.loan_number` / `loans.encompass_loan_id` (human-facing loan identifiers) to resolve the segment rows and their `split_storage_path`.
+- **`documentPush.getOutcomes`** — accepts a `correlationId` param equal to `audit_runs.id` (the EPC `transaction_state.id`). The integrations outcomes endpoint joins on `transaction_state.id` — **not** on loan number or `encompassLoanId`. Before LOA-1671 all call sites passed `encompassLoanId`, which is null for effectively all loans, so the join always missed and routing data was never shown.
+
+<Note>
+Pass the `correlationId` (= `audit_runs.id`) to `getOutcomes`, not the Encompass loan ID or loan number. Passing the wrong identifier silently empties the outcomes side of the join without an error.
+</Note>
+
+Fetch errors yield an empty result — the classification card renders normally without the routing section. The `integrations-routing-client.ts` and `integrations-routing-types.ts` modules were extended to carry routing-outcome types and the new `getDocumentRoutingOutcomes` / `getRoutingOutcomesByClassificationId` actions.
 
 ## Related pages
 

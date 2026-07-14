@@ -105,6 +105,21 @@ Unless `SKIP_LANGGRAPH_AGENTS === "true"`, the orchestrator calls `routeEpcSelec
 `piiValidation`, `propertyData`, `creditEvaluation` (Phase 2, parallel), then `documentHealth`,
 `redFlags` (Phase 3, parallel) — plus `urlaExtraction` reuse, all via `Promise.allSettled`.
 
+<Note>
+**EPC credit gate recompute on first-ever audits (LOA-1787).** Credit eligibility
+(`isCreditEvaluationEligible` → `ctx.creditEvaluationSkip` + `ctx.binaryRefs`) is normally
+computed once in `assembleExecutionContext`, before `orchestrator.run`. On the EPC path, Phase 0
+classification (`preAuditClassification`) runs *inside* `orchestrator.run`, so on a first-ever
+audit the `credit_report` classification row does not exist yet when the gate is evaluated —
+leaving `creditEvaluationSkip=true` and credit silently skipped. Since LOA-1787, the orchestrator
+recomputes the credit gate in the EPC `afterPhase(0)` hook, strictly after
+`awaitClassifyReadiness`, via `computeCreditGateWithRetry` (bounded backoff on
+`RACE_CHECK_RETRY_DELAYS_MS`, rethrowing on exhaustion so a transient DB blip fails loud rather
+than silently skipping credit). The recomputed gate mutates the outer `ctx` (not the per-phase
+`phaseCtx`) and merges `binaryRefs` by `agentType` rather than replacing wholesale. The
+assembly-time compute is retained as a fail-closed default for partner and `SKIP_LLAMA` paths.
+</Note>
+
 <Warning>
 **Per-agent failures never fail the run.** Each rejected agent is recorded in `audit_errors`
 and the run still completes. `failAuditRun` is reserved for infrastructure failures (XML
@@ -136,6 +151,25 @@ emit (which would stick the Encompass spinner):
 </Steps>
 
 The `finally` block removes `correlationId` from `processingAudits`.
+
+## Lender identity events (LOA-1014)
+
+When the WorkOS `organization.created` or `organization.updated` webhook resolves or renames
+lender identity (handlers `createLenderFromWorkosOrg` / `updateLenderWorkosOrgName`), and when a
+`lender_auth_clients` mapping is inserted (linking a partner API client to a lender), the
+orchestrator's `EventPublishingService` now publishes two EventBridge domain events on the
+`loanlight.aus` bus:
+
+- **`LenderUpserted`** (`LENDER_UPSERTED_DETAIL_TYPE`) — emitted on org create and org rename,
+  carrying lender identity so downstream consumers can mirror it without re-deriving from raw
+  WorkOS payloads.
+- **`LenderClientLinked`** (`LENDER_CLIENT_LINKED_DETAIL_TYPE`) — emitted after a
+  `lender_auth_clients` row is committed, so `loanlight-integrations` can learn the
+  client→lender mapping (LOA-1015, separate ticket).
+
+Every publish call is `try/catch`-wrapped with a logged error; a publish failure never fails
+the webhook response. Event contracts are defined in `@loanlight-engineering/shared-types`
+(v1.17.0+).
 
 ## Progress events back to Encompass
 

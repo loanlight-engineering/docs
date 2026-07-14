@@ -40,5 +40,5 @@ Terms and acronyms used across the LoanLight documentation. Where a term has a d
 | FusionAuth | A secondary identity provider still used by some Encompass/partner authorizer lambdas. See [identity and auth](/concepts/identity-and-auth). |
 | MCP | Model Context Protocol. The Mintlify MCP server serves these docs to Oz; a Datadog MCP server is attached to Oz runs for read-side Datadog access. |
 | BFF | Backend-For-Frontend. The portal's architecture: Next.js route handlers proxy to the NestJS backend. See [portal architecture](/portal/architecture-bff). |
-| correlationId | On the EPC path, the unique identifier that becomes both `loans.id` and `audit_runs.id` (the dedup key). |
+| correlationId | On the EPC path, the `transaction_state.id` that always equals `audit_runs.id` (the dedup key). **`loans.id` equals `correlationId` only on a loan’s first-ever EPC audit run** — on any re-audit, `upsertLoan` finds the existing row by `(loan_number, lender_id)` and the row keeps its original id. Always use `audit_runs.id` (or an event’s `auditRunId`/`loanId` field) to correlate a specific audit event; never `loans.id` (LOA-1671, loanlight-integrations CLAUDE.md). |
 | trigger_source | How an audit run was created: `epc`, `los`, `partner`, `portal`, `admin_rerun`, or `shadow`. |

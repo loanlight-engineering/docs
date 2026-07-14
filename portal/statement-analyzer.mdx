@@ -92,6 +92,16 @@ The UI lives in the `(app)` route group and is gated on `flags.statementAnalyzer
 
 The list uses the shared `<Pagination>` + `useListPagination` hook, and the **Statement Analyzer** entry in `TopNav` is keyed on the `statementAnalyzer` flag.
 
+### Manual asset entry dialog (LOA-1749)
+
+The **Linked Accounts** tab on the run detail shows a **"+ Add Another Asset"** button when `canManage` is true and the run is loan-bound (not standalone). Clicking it opens `AddAssetDialog` (`add-asset-dialog.tsx`), a modal form that lets the reviewer manually add an asset account:
+
+- **Asset type** — a select over the `asset_type_normalized` enum, minus the non-selectable `unknown` sentinel.
+- **Qualifying balance** — required, ≥0.
+- **Ownership %** — 0–100 (converted to the 0–1 fraction `CreateManualAccountDto` expects).
+
+On submit the dialog POSTs to `POST /api/assets/:runId/accounts` (the existing BFF proxy → `POST /api/v1/portal/assets/:runId/accounts`). On success `onAdded` is called so the parent run detail refetches its account list. The backend error `manual_account_requires_loan` (standalone path rejection) is surfaced as friendly copy. Prior to LOA-1749 the button rendered but `onClick` was `undefined` — no modal was ever wired.
+
 ## Plaid Link portal UX
 
 LOA-1580 added a Unified Intake tab on the run detail page. The new portal components are:

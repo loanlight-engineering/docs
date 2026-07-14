@@ -106,11 +106,13 @@ The webhook is the just-in-time provisioning path: WorkOS organization and user 
 
 | Event | Handler | Effect |
 |-------|---------|--------|
-| `organization.created` | `createLenderFromWorkosOrg` | Provision a lender from a new WorkOS org |
-| `organization.updated` | `updateLenderWorkosOrgName` | Sync the lender name |
+| `organization.created` | `createLenderFromWorkosOrg` | Provision a lender from a new WorkOS org; also publishes `LenderUpserted` EventBridge event (LOA-1014) |
+| `organization.updated` | `updateLenderWorkosOrgName` | Sync the lender name; also publishes `LenderUpserted` EventBridge event (LOA-1014) |
 | `user.created` | `linkWorkosUser` | Link a WorkOS user to a portal user |
 | `user.updated` | `updateLastSignIn` | Record last sign-in |
 | `organization_membership.created` / `.deleted` | membership handlers | Add/remove tenant membership |
+
+The `LenderUpserted` (`LENDER_UPSERTED_DETAIL_TYPE`) and `LenderClientLinked` (`LENDER_CLIENT_LINKED_DETAIL_TYPE`) events are published on the `loanlight.aus` EventBridge bus via `EventPublishingService` so that `loanlight-integrations` (LOA-1015) can mirror lender identity without re-deriving it from raw WorkOS payloads. A `LenderClientLinked` event is also emitted when a `lender_auth_clients` row is inserted. Every publish call is `try/catch`-wrapped; a publish failure never fails the webhook response.
 
 See [lenders, users, and programs](/portal/api-lenders-users-programs) for the full webhook table and the user-management endpoints it complements.
 
