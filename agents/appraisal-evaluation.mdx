@@ -157,9 +157,22 @@ blocking the fetch.
 The `RentalDataResult` shape is:
 - `strPerformance` — STR aggregate (from Lookup), or `null` on miss.
 - `strComps` — STR comp array (from List Comps).
-- `ltrComps` — LTR comp array (from Long-Term Comps).
+- `ltrComps` — LTR comp array (from Long-Term Comps), **bounded to the nearest 10** (proximity-ranked
+  by haversine distance, nearest-first; comps without coordinates keep API order at the tail).
+  Added in LOA-1869 (#2849) — a median over the full unbounded page-1 slice (up to 30
+  unranked comps) was noisy. The bound is cardinality, not sort-only: the sort picks which 10.
 - `sampleSize` — number of STR comps behind the Lookup aggregate (`null` on miss). Replaces
   the retired `confidence` field — no real confidence score exists in the Mashvisor API.
+
+<Note>
+**Occupancy format (LOA-1869):** the Mashvisor API returns `median_occupancy_rate` and the
+per-comp `occupancy` field as a **percent** (0–100, e.g. `42`), not a fraction. The adapter
+converts to a ratio (0–1) before writing to `strPerformance.occupancy` and
+`RentalComp.occupancy`. Values outside `[0,1]` after conversion are nulled by a downstream
+sanity guard. The live API also wraps every response in a `{ status, content: … }` envelope;
+the adapter unwraps `content` before schema-parsing and treats a missing or non-object
+`content` as an unrecognized shape (distinct from a genuine-empty `{}` response).
+</Note>
 
 The node never throws (per-endpoint failures surface in `_errors`; a timeout on the whole
 request yields the null-sentinel for all fields). The result rides graph state as `rentalData`;

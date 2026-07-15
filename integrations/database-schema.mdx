@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 022 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 023 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, two `021_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -38,8 +38,10 @@ The current schema has **14 tables**. Migration `001_baseline_schema.sql` create
 || `019_create_lender_feature` | `lender_feature` |
 || `020_add_routing_outcome_to_document_push_record` | `document_push_record.outcome` + `document_push_record.missing_fields` (LOA-1715) |
 || `021_audit_delivery_log_status_and_unique` | `status`, `error_class`, `error_detail`, `attempts` columns on `audit_delivery_log`; UNIQUE `(transaction_state_id, file_name)` (LOA-989) |
-||| `022_drop_epc_delivery_records` | drops `epc_delivery_records` table and `transaction_state.delivery_cancelled_after` column (LOA-1678) |
-||| `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
+|| `021_add_appraisal_package_columns_to_transaction_document` | adds `parent_doc_id`, `member_role` (CHECK), `urn_type` to `transaction_document`; idempotent `ADD COLUMN IF NOT EXISTS` (LOA-1674 #500) |
+|| `022_drop_epc_delivery_records` | drops `epc_delivery_records` table and `transaction_state.delivery_cancelled_after` column (LOA-1678) |
+|| `023_seed_bank_statement_income_asset_routing` | DML: seeds 6 suffixed bank-statement routing types (`bank_statement_personal_asset/income`, `bank_statement_business_asset/income`, `bank_statement_income_asset/income`) into the active global config (LOA-1825 #504) |
+|| `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
 The `encompass/README.md` "expected tables" list is stale — it names only the 6 baseline tables. The nine tables added by migrations 003–019 (`audit_details`, `transaction_document`, `document_push_record`, `lender`, `audit_delivery_log`, `document_push_routing_config`, `materialized_split_record`, `lender_feature`) are missing from it. Trust the schema, not the README.
@@ -147,6 +149,9 @@ One row per S3 file. UNIQUE `(transaction_state_id, doc_id)`.
 | `transaction_state_id` | FK |
 | `doc_id` | EPC resource id |
 | `s3_key`, `doc_map_type`, `original_name`, `mime_type`, `is_mismo` | |
+| `parent_doc_id` | text, nullable (added in 021). The `doc_id` of the parent EPC resource when this row is a synthetic member extracted from an appraisal package (UAD XML, appraisal PDF, or image). `NULL` for top-level documents. |
+| `member_role` | text, nullable, CHECK `member_role_check` (added in 021). Role of an extracted member: `uad-xml` \| `appraisal-pdf` \| `image` \| `ssr-json` \| `package`. Only `uad-xml` and `appraisal-pdf` are delivered into the audit; images and the raw ZIP are persisted only. |
+| `urn_type` | text, nullable (added in 021). The EPC resource `type` URN of the originating partner resource (e.g. UAD 3.6 package URN or UCDP SSR URN). Copied from the source resource for member traceability. |
 
 ### document_push_record
 
@@ -229,7 +234,7 @@ The de-dup key is a unique index over `(loan_id, original_doc_id, COALESCE(page_
 
 ### lender_feature
 
-Per-lender feature gates (added in 019; LOA-1336). Column names mirror octy's `lender_feature_flags`. The only key used today is `document_push`.
+Per-lender feature gates (added in 019; LOA-1336). Column names mirror octy's `lender_feature_flags`. Active feature keys:
 
 | Column | Notes |
 |---|---|
@@ -237,6 +242,10 @@ Per-lender feature gates (added in 019; LOA-1336). Column names mirror octy's `l
 | `enabled` | boolean, default `false` |
 | `feature_value` | text, nullable |
 | `created_at`, `updated_at` | |
+
+- **`document_push`** — enables the routed EPC document-push pipeline (split delivery).
+- **`appraisal_passthrough`** — gates EPC appraisal PDF passthrough into the audit (LOA-1673).
+- **`appraisal_package_delivery`** — gates ingestion of partner-sourced appraisal packages (UAD 3.6 ZIP + UCDP SSR JSON) from EPC (LOA-1674 #500). Default OFF, independent from `appraisal_passthrough`. When enabled, `WebhooksService.fetchAndUploadDocuments` extracts the UAD XML + appraisal PDF + SSR JSON and delivers them through the same audit path as manually-uploaded appraisal files. A ZIP-bomb guard (200 MB total) and a zip-slip guard (`entry.unsafeOriginalName` path-segment check) protect the extraction step.
 
 <Note>
 Default OFF is the **absence of a row** — a lender is enabled for a feature only when a row exists with `enabled = true`. There is no backfill of existing lenders. The [document-push consumer](/integrations/messaging) checks `EpcClientRepository.isLenderFeatureEnabled(lenderId, "document_push")` before materializing.

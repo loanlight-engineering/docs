@@ -154,6 +154,8 @@ Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-
 
 **Plaid Enrich columns (migration `0235`):** `category_detailed` text, `category_confidence` text, `merchant_logo_url` text, `merchant_website` text, `merchant_entity_id` text, `payment_channel` text, `counterparties` jsonb, `location` jsonb. These are populated by the Plaid Enrich API (replaces the deprecated Ntropy enrichment path).
 
+**Income-exclusion disposition (migration `0247`, LOA-1838 #2850):** `income_excluded_reason` text, nullable. `CHECK` constrains it to `'refund' | 'self_transfer' | 'family_transfer'`. Set by the exclusion passes (`applyRefundCategories`, `applyP2pSelfTransfer`, `applyFamilyDepositExclusion`) **instead of** rewriting `transactions.category`, so the raw Plaid PFC code survives for display and the reviewer dropdown. A non-null value vetoes income inclusion regardless of `category`. `NULL` means the row was not excluded by any homegrown pass.
+
 <Note>
 Migration `0236` dropped `borrower_files.ntropy_account_holder_id` — the column was used by the now-removed Ntropy integration and is no longer written.
 </Note>

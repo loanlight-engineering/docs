@@ -28,6 +28,20 @@ checks, and route documents back into Encompass.
     (`classification_type`), updates each row to `classification_status = 'classified'`, and — for
     non-`per_segment` modes — merges classify-time facts into the decision blob and sets
     `decision_complete = true`. Phase 2 is **uniform**: it does not branch on the mode.
+
+    `classifyWithRules` pages a segment into 10-page batches of `classify()` calls and keeps the
+    highest-confidence result. Since LOA-1838 (#2851), a single failing batch is **isolated**
+    rather than aborting the whole segment. Each batch is wrapped in a `try/catch`; a failure is
+    logged (`classify_batch_failed`) and skipped — the loop continues and the segment classifies
+    from surviving batches. When every batch fails, the first error is re-thrown so the segment is
+    still stamped `failed: true` (byte-identical pre-change behavior). When some batches succeed,
+    `classify_segment_partial_batches_recovered` is logged.
+
+    **Accepted trade-off:** because the loop no longer short-circuits on the first throw, an
+    all-timeout segment now runs every batch (up to N × `CLASSIFY_TIMEOUT_MS`) before failing,
+    versus failing fast at batch 1 before this fix. Only the degraded all-timeout case is affected;
+    HTTP and `FAILED` errors throw instantly, so typical failure paths are unchanged. A tighter
+    per-attempt timeout or a circuit-breaker is deferred reliability work (see ticket).
   </Step>
 </Steps>
 
