@@ -12,7 +12,7 @@ separate liabilities agent.
 <Note>
 The legacy Octy system prompt lists `creditEvaluation` as a "stub, not yet implemented." That
 is wrong. The agent is fully built: an 11-node graph plus the `lib/credit-pipeline` library
-(extraction, a Zod facts schema, 23 rules CRED_001–CRED_023, summaries, risk projection), the
+(extraction, a Zod facts schema, 24 rules CRED_001–CRED_024, summaries, risk projection), the
 `portal-credit` NestJS module, and a BullMQ worker with heartbeat and orphan recovery. The only
 genuine stub is [Liabilities-Assessment](/agents/liabilities-assessment).
 </Note>
@@ -127,7 +127,9 @@ validation never aborts the run.
 <Accordion title="evaluateRules — DB-backed rule evaluation">
 Resolves `loanProgramId` for program-scoped credit rules (LOA-1080) and calls
 `evaluateWithCreditRules`. The DB evaluator is authoritative; this node does no rule-set
-pre-lookup. Returns `complianceResults`, `ruleSetId`, and `ruleSetVersion`.
+pre-lookup. Returns `complianceResults`, `ruleSetId`, and `ruleSetVersion`. The node threads
+`loanAmount` from the graph state into `CreditRuleContext` (LOA-1762), which CRED_024 uses for
+its `max_loan_amount` tier condition.
 </Accordion>
 <Accordion title="generateAiSummary — DTI and narrative">
 Computes `dtiRatio = totalMonthlyDebt / grossMonthlyIncome`, guarding `grossMonthlyIncome > 0`.
@@ -181,34 +183,35 @@ and unsecured balances), `delinquencies`, `utilization`, `counts`, `score`
 
 ## Credit rules
 
-The 23 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
+The 24 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
 (`rule-registry.ts`, looked up by `getCreditRuleByCode`) across 11 categories:
 
-| Code | Name | Category |
-|---|---|---|
-| CRED_001 | Address Consistency | Consistency |
-| CRED_002 | Name Consistency | Consistency |
-| CRED_003 | SSN Consistency | Consistency |
-| CRED_004 | Late Payments (12mo) | Payment History |
-| CRED_005 | Late Payments (24mo) | Payment History |
-| CRED_006 | Active Delinquency | Payment History |
-| CRED_017 | Housing Payment History | Payment History |
-| CRED_007 | Bankruptcy | Public Records |
-| CRED_008 | Foreclosure / Short Sale | Public Records |
-| CRED_009 | Tax Lien / Judgment | Public Records |
-| CRED_018 | Credit-event Seasoning | Public Records |
-| CRED_010 | Disputed Accounts | Disputed Accounts |
-| CRED_023 | Active Disputes | Disputed Accounts |
-| CRED_011 | Recent Inquiries | Credit Inquiries |
-| CRED_012 | Credit Score Minimum | Credit Scores |
-| CRED_013 | Score Discrepancy | Credit Scores |
-| CRED_020 | All-Borrower Min FICO | Credit Scores |
-| CRED_014 | DTI Ratio | DTI & Liabilities |
-| CRED_016 | Work Number Income Qualify Addendum Present | DTI & Liabilities |
-| CRED_015 | Collection Accounts | Collections |
-| CRED_021 | Aggregate Collections + Charge-Offs | Collections |
-| CRED_019 | Minimum Tradelines | Tradelines |
-| CRED_022 | First-Time Homebuyer Program Eligibility | Program Eligibility |
+|| Code | Name | Category |
+||---|---|---|
+|| CRED_001 | Address Consistency | Consistency |
+|| CRED_002 | Name Consistency | Consistency |
+|| CRED_003 | SSN Consistency | Consistency |
+|| CRED_004 | Late Payments (12mo) | Payment History |
+|| CRED_005 | Late Payments (24mo) | Payment History |
+|| CRED_006 | Active Delinquency | Payment History |
+|| CRED_017 | Housing Payment History | Payment History |
+|| CRED_007 | Bankruptcy | Public Records |
+|| CRED_008 | Foreclosure / Short Sale | Public Records |
+|| CRED_009 | Tax Lien / Judgment | Public Records |
+|| CRED_018 | Credit-event Seasoning | Public Records |
+|| CRED_024 | Credit-event Seasoning LTV Cap | Public Records |
+|| CRED_010 | Disputed Accounts | Disputed Accounts |
+|| CRED_023 | Active Disputes | Disputed Accounts |
+|| CRED_011 | Recent Inquiries | Credit Inquiries |
+|| CRED_012 | Credit Score Minimum | Credit Scores |
+|| CRED_013 | Score Discrepancy | Credit Scores |
+|| CRED_020 | All-Borrower Min FICO | Credit Scores |
+|| CRED_014 | DTI Ratio | DTI & Liabilities |
+|| CRED_016 | Work Number Income Qualify Addendum Present | DTI & Liabilities |
+|| CRED_015 | Collection Accounts | Collections |
+|| CRED_021 | Aggregate Collections + Charge-Offs | Collections |
+|| CRED_019 | Minimum Tradelines | Tradelines |
+|| CRED_022 | First-Time Homebuyer Program Eligibility | Program Eligibility |
 
 <Note>
 The active-dispute detection rule is **CRED_023** (Active Disputes), seeded by migration
@@ -216,6 +219,26 @@ The active-dispute detection rule is **CRED_023** (Active Disputes), seeded by m
 (`module = 'credit'`) and backfilled into every active credit rule set. CRED_017 is **Housing
 Payment History**, not active disputes.
 </Note>
+
+**CRED_024 — Credit-event Seasoning LTV Cap** (`lib/credit-pipeline/rules/definitions/seasoning-ltv.ts`, LOA-1570 / LOA-1762)
+
+Distinct from CRED_018 (which fails unseasoned events): CRED_024 governs the mid-tier band — an event seasoned past the hard floor but still within the configurable window (default 24–36 months) is eligible only up to a purpose-scoped LTV cap (Purchase 75% / Refinance 70%). It consumes `CreditRuleContext.ltv`, `purpose`, and — since LOA-1762 — `loanAmount`.
+
+LOA-1762 added five optional threshold keys to the existing four:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `tier_min_months` | 24 | Lower bound of the mid-tier window |
+| `tier_max_months` | 36 | Upper bound of the mid-tier window |
+| `max_ltv_purchase` | 75 | Purchase LTV cap (%) |
+| `max_ltv_refinance` | 70 | Refi LTV cap (%) |
+| `foreclosure_tier_min_months` | — | Optional separate min for foreclosure events only |
+| `foreclosure_tier_max_months` | — | Optional separate max for foreclosure events only |
+| `max_loan_amount` | — | Optional loan-amount condition; reads `CreditRuleContext.loanAmount` |
+| `max_dti` | — | Optional DTI condition; computed from `grossMonthlyIncome` + facts |
+| `min_own_funds_pct` | — | Accepted but no data source yet; always routes to NEEDS_INFO |
+
+Rows carrying only the original four keys behave byte-identically to pre-LOA-1762 behavior (the five new keys are all optional). A second-pass re-evaluator (`reevaluateCred024OnAppraisedLtv`) patches CRED_024's entry in an already-computed `complianceResults[]` after the appraisal worker completes with the true appraised-value LTV — the only rule whose basis moves between first and second pass.
 
 ### Rule evaluation
 

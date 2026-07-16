@@ -123,19 +123,20 @@ Eligibility (which segments a field *may* use) and recall (which documents the q
 
 ## PII fields and comparison modes
 
-`PiiFieldKeySchema` enumerates the **9 canonical fields**. Each has a `comparisonMode` from `ComparisonMode` (`stringExact | caseInsensitive | digitsOnly | addressNormalized | dateNormalized`), implemented by `normalize/normalize.ts`.
+`PiiFieldKeySchema` enumerates the **10 canonical fields**. Each has a `comparisonMode` from `ComparisonMode` (`stringExact | caseInsensitive | digitsOnly | addressNormalized | dateNormalized`), implemented by `normalize/normalize.ts`.
 
-| Field | comparisonMode | Notable synonyms |
-|---|---|---|
-| FullName | caseInsensitive | Name, BorrowerName, ApplicantName |
-| DateOfBirth | dateNormalized | DOB, BirthDate |
-| SocialSecurityNumber | digitsOnly | SSN, SocSecNum |
-| ITIN | digitsOnly | ITINNumber |
-| MailingAddress | addressNormalized | Address, HomeAddress, CurrentAddress |
-| PropertyAddress | addressNormalized | SubjectProperty, PropertyLocation |
-| MaritalStatus | caseInsensitive | Marital, MarriageStatus |
-| EmployerName | caseInsensitive | Employer, BusinessName, CompanyName |
-| EmployerAddress | addressNormalized | WorkAddress, JobAddress |
+|| Field | comparisonMode | Notable synonyms |
+||---|---|---|
+|| FullName | caseInsensitive | Name, BorrowerName, ApplicantName |
+|| DateOfBirth | dateNormalized | DOB, BirthDate |
+|| SocialSecurityNumber | digitsOnly | SSN, SocSecNum |
+|| ITIN | digitsOnly | ITINNumber |
+|| MailingAddress | addressNormalized | Address, HomeAddress, CurrentAddress |
+|| PropertyAddress | addressNormalized | SubjectProperty, PropertyLocation |
+|| MaritalStatus | caseInsensitive | Marital, MarriageStatus |
+|| EmployerName | caseInsensitive | Employer, BusinessName, CompanyName |
+|| EmployerAddress | addressNormalized | WorkAddress, JobAddress |
+|| PurchasePrice | stringExact | SalesContractPrice, PurchaseAmount, ContractPrice |
 
 ## Single-document validation and safety nets
 
@@ -187,7 +188,9 @@ The orchestrator's `persistMultiDocumentValidationResults` resolves per-field se
 
 Both tables enforce a DB CHECK on `issue_kind` (NULL | `missing` | `inconsistent` | `identity_mismatch`) and on `severity` (`high` | `medium` | `low`). Default severities (`PiiSeverityService.DEFAULT_PII_SEVERITY`): FullName, SSN, ITIN, PropertyAddress, EmployerName, EmployerAddress = `high`; DateOfBirth, MailingAddress, MaritalStatus = `medium`. Lender overrides come from `lenderPiiSeverityOverrides` and are frozen on the row at audit time.
 
-The `pii_field_doc_type_rules` scoping matrix has columns `field_key` (CHECK = one of the 9 keys), `applies_to_loan_purpose` (CHECK NULL | PURCHASE | REFINANCE), `match_kind` (CHECK `split_type` | `classification_type`), `match_value`, `is_active`, with a unique index on `(field_key, COALESCE(applies_to_loan_purpose,'__ANY__'), match_kind, match_value)`.
+Migration `0248_purchase_price_doc_type_rule` (LOA-1757) widens the `pii_field_doc_type_rules_field_key_check` constraint to include `PurchasePrice` and seeds one retrieval-scope row: `classification_type = 'purchase_contract'`, `applies_to_loan_purpose = 'PURCHASE'` — so PurchasePrice retrieval is scoped to purchase agreements on purchase loans only. The currency normalization (strip `$`/commas/`.00`) lives in the `PurchasePrice.validation.ts` prompt, not in a `ComparisonMode`, because no second money field needed the same path yet (LOA-1757 comment). The validation prompt enforces exact match after normalization — no tolerance band — because even a small delta can move LTV across a program threshold.
+
+The `pii_field_doc_type_rules` scoping matrix has columns `field_key` (CHECK = one of the 10 keys), `applies_to_loan_purpose` (CHECK NULL | PURCHASE | REFINANCE), `match_kind` (CHECK `split_type` | `classification_type`), `match_value`, `is_active`, with a unique index on `(field_key, COALESCE(applies_to_loan_purpose,'__ANY__'), match_kind, match_value)`.
 
 <Info>
 `RetrievalHealthService.logFieldRetrievalHealth` emits a structured `event: "retrieval_health"` log (Datadog) per field with snippet counts, retrieval calls, duration, and `docTypeScoping` metrics. This is log-only, not a DB table. See [observability](/agents/observability).

@@ -10,21 +10,22 @@ The encompass service is event-driven. Inbound webhooks fan out to SQS; the hand
 
 Defined in `constants/queue-names.ts` and provisioned by `worker-stack.ts`. Consumers use `batchSize: 1`, and SQS handler errors re-throw to trigger the DLQ.
 
-| Logical | Queue name | Visibility timeout | Consumer | Producer / source |
-|---|---|---|---|---|
-|| Health check | `health-check` | 30 s | `handleHealthCheck` (SELECT 1) | `WorkerService.enqueueHealthCheck` |
-|| Transaction events | `transaction-event-handling` | 900 s | `handleTransactionEvent` | `WorkerService` (from webhook) |
-|| AUS updates | `handle-aus-updates` | 30 s | `handleAusUpdate` | EventBridge `AusUpdateRule` |
-|| Document push | `document-push` | 900 s | `handleDocumentPush` | EventBridge `DocumentPushRule` |
+|| Logical | Queue name | Visibility timeout | Consumer | Producer / source |
+||---|---|---|---|---|
+||| Health check | `health-check` | 30 s | `handleHealthCheck` (SELECT 1) | `WorkerService.enqueueHealthCheck` |
+||| Transaction events | `transaction-event-handling` | 900 s | `handleTransactionEvent` | `WorkerService` (from webhook) |
+||| AUS updates | `handle-aus-updates` | 30 s | `handleAusUpdate` | EventBridge `AusUpdateRule` |
+||| Document push | `document-push` | 900 s | `handleDocumentPush` | EventBridge `DocumentPushRule` |
+||| Lender events | `lender-event` | 30 s | `handleLenderEvent` | EventBridge `LenderEventRule` (LOA-1015) |
 
-Queue config env vars are validated at boot: `SQS_{HEALTH_CHECK,TRANSACTION_EVENT,AUS_UPDATE,DOCUMENT_PUSH}_QUEUE_{URL,NAME}` plus `AWS_REGION`.
+Queue config env vars are validated at boot: `SQS_{HEALTH_CHECK,TRANSACTION_EVENT,AUS_UPDATE,DOCUMENT_PUSH,LENDER_EVENT}_QUEUE_{URL,NAME}` plus `AWS_REGION`.
 
 The `WORKER_TYPES` enum (`messaging/constants.ts`) names the job types carried in messages: `handle-health-check`, `handle-transaction-created-event`, `handle-transaction-updated-event`, `handle-aus-updates`.
 
 
 ## EventBridge rules
 
-Two rules (`worker-stack.ts`) route external events into SQS.
+Three rules (`worker-stack.ts`) route external events into SQS.
 
 ### AusUpdateRule
 
@@ -147,3 +148,14 @@ The return leg of the document-push pipeline (LOA-1337). After `DocumentMaterial
 The `DetailType` is the shared-types constant `DOCUMENTS_MATERIALIZED_TYPE`. On the loanlight-api side an EventBridge rule routes it to the dedicated SQS queue `documents-materialized-events`, which loanlight-api consumes (it is the only consumer of this event).
 
 For the consuming side and the audit flow these events drive, see [Audit lifecycle](/integrations/audit-lifecycle) and [Orchestration pipeline](/integrations/orchestration-pipeline).
+
+### LenderEventRule (LOA-1015)
+
+Matches source `["loanlight.aus"]` and detail-types `["LenderUpserted", "LenderClientLinked"]`, routing to the `lender-event` queue. These events are emitted by loanlight-api when WorkOS provisions or links a lender organisation.
+
+`QueueConsumerService.handleLenderEvent` dispatches on the `detail-type`:
+
+- **`LenderUpserted`** — `LenderRepository.upsertLenderByWorkosOrgId` — creates or updates the `lender` row, matching in priority order: `workos_org_id` → `api_lender_id` → unambiguous name. The `api_lender_id` secondary key (migration `023_add_lender_api_lender_id`) was added as a follow-up because the `workos_org_id`-only lookup is order-dependent: if `LenderUpserted` arrives before `LenderClientLinked` for a legacy lender (no `workos_org_id`), a new duplicate row would be inserted instead of adopting the existing one.
+- **`LenderClientLinked`** — `LenderRepository.linkClient` — associates a `client` row to the resolved lender row, idempotently.
+
+Both event schemas (`LenderUpsertedEventSchema`, `LenderClientLinkedEventSchema`) are validated with Zod against the contract types in `@loanlight-engineering/shared-types`. An invalid payload is logged and the message is re-thrown (routes to DLQ). Unrecognised `detail-type` values are dropped (logged, not re-thrown).

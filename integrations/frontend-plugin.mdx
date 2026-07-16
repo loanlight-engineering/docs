@@ -53,6 +53,8 @@ The `/audit/credit-liabilities` route renders the shared `CreditLiabilitiesView`
 
 The sidebar (`MergedAuditSidebar`) lists, in order: **Overview**, **Data Consistency**, **Document Health**, **Properties Check** (flagged on `properties-check`), **Credit & Liabilities** (data-presence gate: `!!creditData?.length`), **Appraisal** (data-presence gate: `appraisalData != null`). Credit & Liabilities moved after Properties Check. The 1003-check is a route but not a sidebar item.
 
+The Document Health card on the Overview route now displays the **estimated closing date** when `auditData.summary.estimatedClosingDate` is present (LOA-1875). The date is parsed from `YYYY-MM-DD` using the numeric constructor (local time, no UTC day-shift) and validated against calendar roll-over before rendering; an invalid or absent date renders nothing. The integrations frontend plugin reads this from the same `audit_runs.summary` payload the portal uses, so the two UIs stay in sync.
+
 <Note>
 LOA-1722 removed the `appraisal` and `credit-liabilities` PostHog feature flags. Both sections are now gated on whether an agent run exists for the loan — entitlement is enforced server-side at run creation, so an unentitled lender never gets a run and the section stays hidden without a client-side flag.
 </Note>

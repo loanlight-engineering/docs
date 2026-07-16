@@ -85,6 +85,18 @@ Pass the `correlationId` (= `audit_runs.id`) to `getOutcomes`, not the Encompass
 
 Fetch errors yield an empty result — the classification card renders normally without the routing section. The `integrations-routing-client.ts` and `integrations-routing-types.ts` modules were extended to carry routing-outcome types and the new `getDocumentRoutingOutcomes` / `getRoutingOutcomesByClassificationId` actions.
 
+## EPC feature flags (lender detail page)
+
+The lender detail page at `/lenders/[id]` has a fifth tab, **EPC Flags** (`?tab=epc-flags`, `EpcFeatureFlagsTab.tsx`), for managing per-lender feature flags in the integrations service. It proxies to `INTEGRATIONS_INTERNAL_URL` and requires `workos_org_id` to be set on the lender — lenders without a WorkOS org display an "EPC flags unavailable" notice.
+
+<Note>
+The integrations EPC feature-flag API (`GET /integrations/feature-flags`, `GET/PUT /integrations/feature-flags/lenders/{orgId}/{key}`) is planned but **not live yet** (LOA-1463). The Octy tab is built against the contract in `src/lib/integrations-feature-flag-types.ts`; it will begin working once the integrations service ships the endpoint.
+</Note>
+
+The tab loads a **registry** of all known EPC feature flags (`listEpcFeatureFlags` → `GET /integrations/feature-flags`) and the lender's **current values** (`getLenderEpcFeatureFlags`) in parallel, merges them (absent key → `defaultEnabled`), and renders a toggle row per flag. Toggling calls `setLenderEpcFeatureFlag` (`PUT /integrations/feature-flags/lenders/{orgId}/{key}`) with optimistic UI — on failure the toggle reverts and a toast appears.
+
+This is separate from the **Feature Flags** tab (`?tab=flags`), which manages Octy's own internal `lender_feature_flags` rows (AUS platform gates). EPC Flags controls the `lender_feature` table on the integrations side (document push, appraisal passthrough, etc.).
+
 ## Related pages
 
 <Columns cols={2}>

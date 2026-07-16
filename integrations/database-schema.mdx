@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 023 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, two `021_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 023 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -39,8 +39,10 @@ The current schema has **14 tables**. Migration `001_baseline_schema.sql` create
 || `020_add_routing_outcome_to_document_push_record` | `document_push_record.outcome` + `document_push_record.missing_fields` (LOA-1715) |
 || `021_audit_delivery_log_status_and_unique` | `status`, `error_class`, `error_detail`, `attempts` columns on `audit_delivery_log`; UNIQUE `(transaction_state_id, file_name)` (LOA-989) |
 || `021_add_appraisal_package_columns_to_transaction_document` | adds `parent_doc_id`, `member_role` (CHECK), `urn_type` to `transaction_document`; idempotent `ADD COLUMN IF NOT EXISTS` (LOA-1674 #500) |
+|| `021_add_unique_workos_org_id_index` | partial UNIQUE index on `lender.workos_org_id WHERE workos_org_id IS NOT NULL` — the ON CONFLICT target for the idempotent lender upsert (LOA-1015) |
 || `022_drop_epc_delivery_records` | drops `epc_delivery_records` table and `transaction_state.delivery_cancelled_after` column (LOA-1678) |
 || `023_seed_bank_statement_income_asset_routing` | DML: seeds 6 suffixed bank-statement routing types (`bank_statement_personal_asset/income`, `bank_statement_business_asset/income`, `bank_statement_income_asset/income`) into the active global config (LOA-1825 #504) |
+|| `023_add_lender_api_lender_id` | `lender.api_lender_id` column (text, nullable) + partial UNIQUE index `WHERE api_lender_id IS NOT NULL`; secondary identity key so the lender consumer can match a legacy lender (no `workos_org_id`) by the API's own stable `lenders.id` (LOA-1015 follow-up) |
 || `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
@@ -182,7 +184,8 @@ Per-lender delivery behaviour (added in 012).
 | `id` | PK |
 | `name` | |
 | `audit_delivery_mode` | `single` / `split` / `pipeline`, default `single`. **Retired** — the `document_push` flag on the `lender_feature` table is now the sole switch for routed delivery (LOA-948). This column remains in the schema as a legacy artifact. |
-| `workos_org_id` | text, nullable; added in 014. The lender's WorkOS org id, sent as the `X-Requestor-ID` on the trusted internal audit-PDF data fetch. Unprovisioned lenders fall back to `provider_client_id`. |
+| `workos_org_id` | text, nullable; added in 014. The lender's WorkOS org id, sent as the `X-Requestor-ID` on the trusted internal audit-PDF data fetch. Unprovisioned lenders fall back to `provider_client_id`. Partial UNIQUE index `uq_lender_workos_org_id` added in migration `021_add_unique_workos_org_id_index` (LOA-1015). |
+| `api_lender_id` | text, nullable; added in `023_add_lender_api_lender_id` (LOA-1015 follow-up). The LoanLight API's own stable `lenders.id`, stored so the lender event consumer can recognize a legacy (pre-WorkOS) lender by a second identity signal when `workos_org_id` is null. Partial UNIQUE index `uq_lender_api_lender_id`. |
 
 Shadow audits resolve a lender by name via this table — see [Shadow audits](/integrations/shadow-audits). `workos_org_id` is also how the [routing-config admin API](/integrations/routing-config-admin) maps an `:orgId` path param to a `lender.id`.
 
