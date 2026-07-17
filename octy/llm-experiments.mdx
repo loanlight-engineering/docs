@@ -1,0 +1,112 @@
+---
+title: LLM experiments
+description: Shadow A/B experiments and PR-gated promotion for every LLM model change.
+icon: flask-conical
+---
+
+The LLM experiments cockpit at `/llm-experiments` is where engineers audit the effective model at every LLM call site in the audit pipeline, stage model changes, run bounded shadow A/B experiments against real traffic, and kick off the Oz-authored PR that makes the change permanent.
+
+The page replaced a simpler "Model Config" read-only view. Its central mental model: **nothing on this page changes a live model**. The live model for every step is its `codeDefault`, defined in code. Changing a model means merging a PR. This page's job is to test a candidate first, in the dark, and then generate that PR.
+
+Source: `octy/src/app/(app)/llm-experiments/` and `octy/src/lib/llm-config.ts`, `llm-experiments.ts`.
+
+## How the live config works
+
+Each LLM step in the audit pipeline is registered in `loanlight-api/packages/api/src/llm-config/llm-step-registry.ts`. Each step declaration carries:
+
+- **`codeDefault`** — the model that runs unless overridden.
+- **`allowedModels`** — server-derived allowlist (framework + capability constraints); Octy honours it but never re-derives it.
+- **`experimentable`** — whether this step passes through the audit router (and therefore has a shadow run to pin a candidate onto).
+
+There is deliberately **no runtime override table** for the live config. The only path for a live model change is a merged commit that edits a `codeDefault`. Every model swap therefore arrives with git history, a review, and a revert path.
+
+An env var override (`<STEP_KEY>_MODEL_OVERRIDE`) can supersede a `codeDefault` without a commit, but is allowlisted and audit-logged; steps resolved this way appear with `source: "env"` in the `/api/llm-config/steps` response and are flagged on the page.
+
+## Page layout
+
+Three URL-synced tabs (`?tab=`):
+
+| Tab | What it shows |
+|---|---|
+| **A/B-testable** (default) | Audit-agent steps — those that pass through the router and can carry a shadow experiment. |
+| **Code-managed** | Portal features, pipeline utilities, and other steps that never pass through the audit router. You can still change them, but the change goes straight to a promotion PR — no shadow run is possible. |
+| **Experiments** | Full experiment history: every experiment ever created, with its per-agent status, run counts, and arm-vs-arm links. |
+
+A stat band above the tabs shows total LLM call sites, A/B-testable count, active experiment count, and model-provider mix.
+
+Staged changes accumulate in a client-side draft set. When at least one step has been changed, **Discard** and **Review & save…** appear in the header. The `Review & save…` dialog starts the experiment.
+
+## Starting an experiment
+
+<Steps>
+<Step title="Stage model changes">
+On the A/B-testable or Code-managed tab, expand an agent group. Each step row shows its effective model and a picker. Select a candidate model to stage the change. An agent already under a running experiment is locked — cancel it first to re-stage.
+</Step>
+<Step title="Review & save">
+Clicking **Review & save…** opens `StartExperimentDialog`. You set:
+
+- A name.
+- **Mode**: `shadow_ab` (mint shadow runs against real traffic) or `direct` (skip the experiment, open a promotion PR immediately).
+- For `shadow_ab`: an optional end date and per-agent target run counts. At least one bound is required — an unbounded shadow experiment mints shadow runs forever.
+- Optional promotion instructions passed to the Oz run at promote time.
+</Step>
+<Step title="Experiment runs">
+For `shadow_ab`, every real audit run involving an enrolled agent spawns a shadow run pinned to the candidate config. The real run uses the control arm (the live `codeDefault` frozen at experiment start); the shadow uses the candidate. Both arms are recorded in `llm_experiment_audit_runs`.
+
+One running experiment per agent is enforced fleet-wide by a Postgres partial unique index — changing a running experiment requires cancelling it first.
+</Step>
+<Step title="Complete or cancel">
+From the Experiments tab, an in-progress experiment can be **Completed** (done collecting — mark ready for review), **Cancelled** (abort), or **Rejected** (concluded, outcome: rejected — no PR).
+</Step>
+<Step title="Promote">
+**Promote** calls `conclude` first (the goalposts check: refuses if a deploy moved the control arm's `codeDefault` since the experiment froze it), then calls `/api/llm-config/experiments/:id/oz-run` to launch an Oz run. Oz opens a PR that edits the `codeDefault` in code. Nothing is live until that PR is merged.
+</Step>
+</Steps>
+
+<Note>
+Promotion is a two-step server call by design: `conclude` (goalposts check) → `oz-run` (PR). If `conclude` returns 409 — because a deploy changed the live config under the experiment — promotion stops before launching Oz. Fix the drift first.
+</Note>
+
+## Database schema
+
+The LLM experiments schema was introduced in migrations `0249`–`0253`. See [agent platform schema](/data-model/agent-platform-schema) for the full table reference.
+
+**`llm_model_experiments`** — one row per experiment (`shadow_ab` or `direct`). Status lifecycle: `draft → running → completed/cancelled → promoting → promoted/promotion_failed`. Carries `mode`, `outcome`, `promotionInstructions`, and the timestamps for each transition.
+
+**`llm_experiment_agents`** — one row per agent in an experiment. Holds the `candidate` declaration (a `{ stepKey: { model } }` map, not resolved) and the `control` arm (the full resolved agent config, frozen at start time). Tracks `targetRuns`, `runsStarted`, `runsCompleted`, `runsFailed`.
+
+**`llm_experiment_audit_runs`** — tags every audit run that participated. Both arms (`control` and `candidate`) get a row. `controlAuditRunId` pairs the arms: the candidate's row points at the real run, the control's row points at itself. `terminalRecordedAt` (migration `0253`) is the exactly-once latch that prevents double-counting when multiple observers report the same arm's terminal state.
+
+**`agent_runs.llm_config`** — migration `0250` added this `jsonb` column to the agent ledger. The router freezes the resolved LLM config into this column at plan time, so the run records what it actually used. Shape: `{ "<group>.<step>": { model, params } }`. A NULL value means the row pre-dates the column or the router did not seed it (legacy; agent falls back to ambient resolution and logs a warning).
+
+**`octy_runs.experiment_id`** — migration `0251` made `octy_runs` polymorphic: a run now hangs off either an `octy_issues` row (bug report/RCA) or an `llm_model_experiments` row (promotion PR). A CHECK constraint enforces exactly one parent.
+
+## API endpoints (Octy)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/llm-config/steps` | Step catalogue with `groups[]`, `experimentable`, `effectiveModel`, `effectiveParams`, `allowedModels`, `source`. |
+| `GET` | `/api/llm-config/experiments` | Experiment list. |
+| `POST` | `/api/llm-config/experiments` | Create experiment (`CreateLlmExperimentBody`). |
+| `POST` | `/api/llm-config/experiments/:id/cancel` | Cancel. |
+| `POST` | `/api/llm-config/experiments/:id/complete` | Mark completed (ready to review). |
+| `POST` | `/api/llm-config/experiments/:id/conclude` | Conclude with `outcome` (`"promoted"` or `"rejected"`); runs the goalposts check. |
+| `POST` | `/api/llm-config/experiments/:id/oz-run` | Launch the promotion Oz run. Requires `status === "promoting"`. |
+| `GET` | `/api/llm-config/experiments/:id/audit-runs` | Arm-vs-arm run pairs for an experiment. |
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Agent platform schema" href="/data-model/agent-platform-schema" icon="database">
+The LLM experiment tables and the `agent_runs.llm_config` column.
+</Card>
+<Card title="Oz run lifecycle" href="/octy/oz-run-lifecycle" icon="workflow">
+How promotion Oz runs are launched and tracked.
+</Card>
+<Card title="Runs ledger" href="/agents/runs-ledger" icon="list-checks">
+The agent_runs ledger where llm_config is frozen.
+</Card>
+<Card title="Agent catalog and dependencies" href="/agents/catalog-and-dependencies" icon="layers">
+Which agents are A/B-testable (audit router vs. code-managed).
+</Card>
+</Columns>

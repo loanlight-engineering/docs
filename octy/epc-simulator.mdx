@@ -1,0 +1,96 @@
+---
+title: EPC Simulator
+description: Trigger simulated Encompass/EPC audit runs from the Octy UI — local-only dev tool.
+icon: play-circle
+---
+
+The EPC Simulator (`/epc-sim`) is a browser-based port of the CLI test harness at `~/Projects/LoanLight/test-harness`. It lets engineers trigger simulated Encompass/EPC audit runs without touching a real Encompass environment. Octy hosts a mock EPC API surface, posts a signed webhook to your **local** `loanlight-integrations`, and the run flows through LocalStack S3 → the `audit-requested-events` SQS queue → `loanlight-api` → a real `audit_runs` row, visible in `/audit-runs` and Loan Lookup.
+
+Source: `octy/src/app/(app)/epc-sim/` and `octy/src/lib/epc-sim/`. Internal spec: `octy/docs/epc-sim.md`.
+
+<Warning>
+**Local only.** Everything is gated on `EPC_SIM_ENABLED=true`, which has no CDK wiring — in int/prod the nav item is hidden and every `/api/epc-sim/*` route returns 404. Hosted environments talk to real Encompass and never need this.
+</Warning>
+
+## One-time setup
+
+<Steps>
+<Step title="Seed the test lender">
+On the Preflight tab, click **Seed test lender** whenever the check is not green. This creates `lenders['Octy Test Lender']`, maps the simulator's Encompass client id (`55afce73-…`, already in integrations' `CLIENT_ALLOW_LIST`) to it, and enables all agents (no `lender_agent_entitlements` rows — every active agent runs; add rows to restrict). Billing excludes this lender by name; it never exists in deployed DBs.
+</Step>
+<Step title="Point integrations at the mock EPC">
+In `loanlight-integrations/packages/encompass/.env.local`, set:
+
+```bash
+EPC_API_URL=http://localhost:7873/api/epc-sim/mock
+EPC_API_UAT_URL=http://localhost:7873/api/epc-sim/mock
+```
+
+Use `host.docker.internal:7873` if integrations runs in Docker, and set `EPC_SIM_PUBLIC_BASE_URL` to match. `SIGNING_KEY` in integrations must equal `EPC_SIM_SIGNING_KEY` in Octy (both default to `test-signing-key`). Restart integrations after the change.
+</Step>
+<Step title="Configure Octy env">
+In `octy/.env.local`, set `EPC_SIM_ENABLED=true`, `EPC_SIM_PUBLIC_BASE_URL`, and `INTEGRATIONS_DATABASE_URL` (the integrations Postgres — dockerized `loanlight_epc`, host port `5433`). The other required vars (`AWS_ENDPOINT`, `S3_INTEGRATION_FILES_BUCKET`, `INTEGRATIONS_INTERNAL_URL`) are typically already set. See the `EPC Simulator` block in `octy/.env.example`.
+</Step>
+</Steps>
+
+## Services required per session
+
+| Service | Where | Probe |
+|---|---|---|
+| `loanlight-api` | `:3000` + LocalStack consumers | any HTTP response |
+| `loanlight-integrations` | `:3001` | `GET /integrations/webhooks/events` |
+| LocalStack | `:4566` (`loanlight-localstack`) | `/_localstack/health` |
+| api Postgres | `DATABASE_URL` | `SELECT 1` |
+| integrations Postgres | `:5433/loanlight_epc` | `SELECT 1` |
+
+The **Environment** panel on `/epc-sim` probes all of these (plus SQS queue existence, S3 bucket, mock-EPC self-reachability, sibling-repo discovery, and the env-var coverage summary) with fix-it hints. A run stalling with no callbacks means integrations' `EPC_API_URL` is not pointed at Octy.
+
+## Cockpit layout
+
+The page is a full-screen 2×2 grid with no scroll or history view (the durable record lives in `/audit-runs`):
+
+- **Top-left — control quadrant**: **Preflight** and **Run** tabs. A fix agent adds its own Claude Code / Codex tab while active.
+- **Remaining three quadrants — live log terminals**: one each for `loanlight-api`, `loanlight-integrations`, and `octy` itself. Octy streams its own process output; the other two attach to `docker logs -f` automatically when the container is running, or can be launched as Octy children via **Start here**.
+
+## Running a simulation
+
+**Quick run** — one pass: register files with the mock → signed webhook → integrations downloads docs and uploads to S3 → SQS event → api creates the audit run → completion. Use this for the "select files and go" case.
+
+**Full 4-pass suite** — the harness's dedup/append scenario: Initial → Duplicate files (`classify_split_runs.status='skipped'`) → Same files with new doc ids (still deduped by content) → Append held-back docs (expects exactly N new `loan_documents`). Per-pass verification checks render in the UI.
+
+**Source files**: pick any local loan folder (browser folder picker). Validation: exactly one MISMO `.xml` plus at least one PDF; hidden files are dropped. The CLI harness's `test-data/test-loan-*` folders work as-is.
+
+**Re-run checks**: the Run tab's **Re-run checks** button re-evaluates checks against current DB state and the current check suite — useful after the suite evolves, without re-running the simulation.
+
+**Cost note**: a real run invokes LlamaCloud/OpenAI for classification. For free runs, start the api with `SKIP_AI_PIPELINE=true` or `SKIP_LLAMA_INGESTION=true` — process-wide api flags.
+
+## Fix agent
+
+When any preflight check fails, **Fix** launches a coding agent:
+
+- **Claude** — Claude Code CLI, Opus 4.8.
+- **OpenAI Codex** — default model.
+
+The agent runs server-side in the workspace root with a prompt describing what is failing (checks + hints + discovered repo paths + probe commands). Its terminal output streams live into the control quadrant. The agent runs with approvals bypassed (local-only, user-triggered dev-stack repair). Both CLIs must be installed and authenticated on the machine.
+
+When the fix agent needs to start a service, it calls Octy's managed launcher (`POST /api/epc-sim/agent/logs/{api|integrations}/start`, authorised by a per-job bearer token) so agent-started services appear in the cockpit's log panes and survive page reloads.
+
+## Notable differences from the CLI harness
+
+| Harness piece | Octy equivalent |
+|---|---|
+| `mock-epc/server.ts` (Express, `:3099`) | `src/lib/epc-sim/mock-epc.ts` via `/api/epc-sim/mock/[...path]` |
+| `workflows/epc.workflow.ts` | `src/lib/epc-sim/runner.ts` (+ `signing.ts`) |
+| `verify/checks.ts` + `api-db.ts` | `src/lib/epc-sim/checks.ts` + `queries.ts` |
+| `infra/health.ts` | `src/lib/epc-sim/preflight.ts` |
+| `test-data/` loan folders | browser folder picker |
+
+Six agent-platform checks were added beyond the harness's classify-era ones: `agent_ledger_complete`, `agent_outcomes`, `infra_steps_terminal`, `lender_attribution`, `correlation_id_contract`, and `entitlements_respected`. The PAPI workflow is not ported.
+
+## Gotchas
+
+- The webhook endpoint always returns 200 — outcome is read from `audit_details.audit_state` in the integrations DB.
+- Multi-pass runs deactivate `transaction_state` rows between passes (simulating EPC's completion callback); without this integrations' duplicate-transaction guard cancels pass N+1.
+- Simulated runs are shape-identical to real EPC runs — the test lender row is the only marker. Billing excludes it by name; any other aggregate is lender-agnostic and will count simulation runs locally.
+- Dev-server restarts lose in-flight run progress (in-memory registry only) — the pipeline finishes server-side; check `/audit-runs`.
+- Loan attachment on pass 1 is time-based — avoid concurrent loan-creating activity while a simulation runs.
