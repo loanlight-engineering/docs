@@ -264,6 +264,8 @@
             "group": "Octy application",
             "pages": [
               "octy/bug-reports-console",
+              "octy/llm-experiments",
+              "octy/epc-simulator",
               "octy/db-studio",
               "octy/classify-split-config",
               "octy/routing-config",

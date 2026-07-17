@@ -60,6 +60,7 @@ The per-`(audit_run, agent)` execution ledger (`database/schema/agent-runs.ts`).
 | `completed_at` | `timestamptz` | Set on any terminal flip; cleared on reopen. |
 | `errors` | `jsonb` | Per-agent error rollup. |
 | `output` | `jsonb` | Cross-phase handoff payload an agent persists on completion (e.g. `propertyData`'s `trustIndicator`); rehydrated into the next phase. |
+| `llm_config` | `jsonb` | Frozen LLM config for this agent run, set by the router at plan time (migration `0250`). Shape: `{ "<group>.<step>": { model, params } }`. NULL on legacy rows or when the router did not seed it (falls back to ambient resolution). |
 | `created_at` | `timestamptz` NOT NULL | Default `now()`. |
 
 Constraints and indexes:
@@ -135,6 +136,61 @@ Index and uniqueness changes:
 - INDEX `idx_audit_runs_lender` on `(lender_id)` for tenant-scoped reads.
 
 The EXPAND/backfill/CONTRACT deploy order behind these changes is documented in [Rollout and backfill](/agents/feature-flags-and-rollout).
+
+## LLM model experiments schema
+
+The LLM model-config framework (migrations `0249`–`0253`) adds four tables that back the [LLM experiments cockpit](/octy/llm-experiments). The live model config lives in code (`codeDefault` in each module's `llm-steps.ts`); these tables hold only experiments — candidate configs under test on shadow runs.
+
+### llm_model_experiments
+
+One row per experiment.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `name` | `text` NOT NULL | Operator-supplied display name. |
+| `mode` | `text` NOT NULL | `shadow_ab` — mint shadow runs; `direct` — skip experiment, go straight to promotion PR. |
+| `status` | `text` NOT NULL | `draft → running → completed/cancelled → promoting → promoted/promotion_failed`. |
+| `ends_at` | `timestamptz` | Optional wall-clock bound. Expiry is whichever comes first: this, or every agent reaching `target_runs`. |
+| `outcome` | `text` | `promoted` or `rejected` — set at conclude time. |
+| `promotion_instructions` | `text` | Operator guidance appended to the Oz promotion prompt. |
+| `created_by` | `text` NOT NULL | Octy user who created the experiment. |
+
+### llm_experiment_agents
+
+One row per agent in an experiment. A partial unique index enforces **one running experiment per agent, fleet-wide** (`WHERE status = 'running'`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `experiment_id` | `uuid` NOT NULL | FK `llm_model_experiments(id)` ON DELETE CASCADE. |
+| `agent_type` | `text` NOT NULL | Must be a key of `AGENT_PIPELINE` (validated in the service). |
+| `candidate` | `jsonb` NOT NULL | The B arm — a declaration `{ "<stepKey>": { model } }`, not resolved. |
+| `control` | `jsonb` NOT NULL | The A arm — fully resolved (`effectiveModel` / `effectiveParams`), frozen at experiment start. If a deploy changes a `codeDefault` mid-flight, `conclude` detects it via this column. |
+| `target_runs` | `integer` | NULL = no run cap; bounded by `ends_at` instead. |
+| `runs_started` | `integer` NOT NULL | Claimed atomically at mint time — never derived from `count(*)`. |
+| `runs_completed` / `runs_failed` | `integer` NOT NULL | Terminal accounting. |
+
+UNIQUE `uq_llm_experiment_agent` on `(experiment_id, agent_type)`.
+
+### llm_experiment_audit_runs
+
+Tags every audit run that participated — both the control arm (real run) and the candidate arm (shadow run).
+
+| Column | Type | Notes |
+|---|---|---|
+| `experiment_id` | `uuid` NOT NULL | FK → `llm_model_experiments`. |
+| `audit_run_id` | `uuid` NOT NULL | The run's own id. |
+| `control_audit_run_id` | `uuid` NOT NULL | Pairs the arms. The candidate row points at the real run; the control row points at itself. |
+| `agent_type` | `text` NOT NULL | |
+| `arm` | `text` NOT NULL | `control` or `candidate`. |
+| `terminal_recorded_at` | `timestamptz` | Exactly-once latch (migration `0253`): flipped before incrementing per-agent counters, preventing double-counting from concurrent observers. NULL on control rows. |
+
+PK `(experiment_id, audit_run_id, agent_type)`. A partial unique index `uq_llm_experiment_one_candidate_per_run_agent` on `(control_audit_run_id, agent_type) WHERE arm = 'candidate'` prevents double-minting at the per-run level.
+
+### octy_runs polymorphic parent (migration 0251)
+
+`octy_runs.issue_id` is now nullable. A new `experiment_id` column (FK → `llm_model_experiments`, ON DELETE CASCADE) was added. A CHECK constraint enforces exactly one parent: `(issue_id IS NOT NULL AND experiment_id IS NULL) OR (issue_id IS NULL AND experiment_id IS NOT NULL)`. An Oz run hangs off either a bug report or a promotion experiment — never both, never neither.
 
 ## appraisal_runs link
 

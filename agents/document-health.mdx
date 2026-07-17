@@ -235,6 +235,8 @@ Page selection uses three strategies in order:
    `SIGNATURE_CUE_BATCH_SIZE = 10`, OR-merged across batches.
 3. **Regex fallback** (`findSignatureRegexPages`) — used if all LLM batches return nothing.
 
+**Single-file scope gate (LOA-1893).** Each signature-verification subgraph invocation is scoped to exactly one document (`documentId`). Before page selection the subgraph now enforces this with an authoritative post-retrieval filter: any snippet whose `metadata.file_id` does not match the current `documentId` is dropped. This closes the root cause of false `verification_failed` results that occurred when LlamaCloud retrieval returned snippets from sibling documents in the same pipeline, causing cue-model candidates to land on the wrong file and leaving the target document's pages never checked.
+
 Vision verification fetches page screenshots via
 `llama.getPageScreenshotPresignedUrl(documentId, pageNumber - 1)` (0-based), downloads them
 server-side as base64 data URLs (OpenAI cannot fetch S3 presigned URLs), then calls

@@ -6,11 +6,11 @@ icon: bug
 
 The Bug Reports console at `/bug-reports` is the operator surface where engineers triage reported audit issues and delegate them to Oz, the autonomous coding agent. It is the human side of the [Oz run lifecycle](/octy/oz-run-lifecycle): you pick a skill, attach context, launch a run, then come back to read the agent's summary and any PRs it opened.
 
-The page lives in `src/app/(app)/bug-reports/page.tsx` plus its panel components (`RunDetailPanel.tsx`, `RunTimeline.tsx`, `ContextRunSelector.tsx`, `ModelPicker.tsx`, `IssueComments.tsx`).
+The page lives in `src/app/(app)/bug-reports/page.tsx` plus its panel components (`LinearTicketPanel.tsx`, `RunDetailPanel.tsx`, `RunTimeline.tsx`, `ContextRunSelector.tsx`, `ModelPicker.tsx`, `IssueComments.tsx`).
 
 ## The issue list
 
-The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue references an `audit_run_id` (always present) and a `loan_id` (optional — loanless portal-appraisal runs have none), and carries aggregate counts (run count, latest run status, PR count, comment count) plus its attached labels.
+The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue references an `audit_run_id` (always present) and a `loan_id` (optional — loanless portal-appraisal runs have none), and carries aggregate counts (run count, latest run status, PR count, comment count).
 
 Filters are URL-driven, so a filtered view is shareable:
 
@@ -18,7 +18,6 @@ Filters are URL-driven, so a filtered view is shareable:
 |---|---|---|
 | Status | `status` / `intake_status` | Comma list. Default shows `new,acknowledged,delegated,ai_complete,in_review` (hides `closed`/`cancelled`). |
 | Agent | `agents` | Comma list of agent types, each normalized to its canonical `agent_type` + LangSmith aliases (catalog-tolerant), matched against `related_traces[].agent_type`. |
-| Labels | `labels` | Comma list of label UUIDs. |
 | Lender | `lenders` | Comma list of lender UUIDs (resolved against `audit_runs.lender_id`). |
 | Search | `q` | ILIKE over loan number or `audit_run_id`. |
 | Sort | `sort` | `date_asc` or `date_desc`. |
@@ -81,6 +80,27 @@ When a run finishes, the completion webhook stores its markdown `summary` and `p
 <Note>
 Per-run completion never silently overwrites an engineer's manual status — the `delegated → ai_complete` transition only fires when the issue is still `delegated`. See [Completion webhook](/octy/completion-webhook).
 </Note>
+
+## Linear ticket integration
+
+Every Octy bug report owns at most one Linear ticket, regardless of how many Oz runs it accumulates. The dedup unit is the bug report, not the run.
+
+**How a ticket is created:** at the end of an Oz run the agent calls the `attach-linear-ticket` Oz tool. Octy writes the ticket anchor in a race-safe conditional update (`WHERE linear_ticket_identifier IS NULL`) so concurrent runs on the same bug report can never create duplicate tickets.
+
+**Where ticket data lives:** four columns on `octy_issues` (migration `0255`):
+
+| Column | Purpose |
+|---|---|
+| `linear_ticket_id` | Internal Linear UUID. |
+| `linear_ticket_identifier` | Human-readable id (e.g. `LOA-1234`). |
+| `linear_ticket_url` | Deep-link into Linear. |
+| `linear_ticket_attached_at` | When the anchor was written. |
+
+`linear_snapshot` (jsonb) is a read-through display cache of the ticket (state, assignee, priority, cycle, labels) refreshed by Octy on each Linear fetch. Linear stays the source of truth; staleness is display-only.
+
+**`LinearTicketPanel`:** the issue detail panel shows a Linear tab when a ticket is attached. It displays the live ticket state (via `GET /api/linear/meta` and `GET /api/linear/search`) and lets engineers navigate directly to Linear for label and assignee management.
+
+**Retiring in-house labels:** migration `0256` dropped `octy_labels` and `octy_issue_labels`. Labels now live on the Linear ticket and are mirrored in `linear_snapshot`. The previous in-house label assignments were not migrated — Linear provides a fresh taxonomy.
 
 ## Related pages
 

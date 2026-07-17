@@ -155,7 +155,8 @@ The core prompt's `issueKind` taxonomy:
 
 - **FullName** — if the LLM flagged a mismatch but stripping trailing account-titling designations (`stripTrailingNameDesignations`: TOD/POD/JTWROS/IRA/ROTH/TTEE/REV LIV TR, etc.) and tokenizing names match on first+last, override to no issue.
 - **dateNormalized / addressNormalized** — if both sides normalize equal, override to no issue.
-- **digitsOnly (SSN/ITIN)** — if the LLM flagged inconsistent but the doc value has no mask chars (`X`/`*`/`#`) and is not 9 digits, treat it as an OCR artifact (`hasIssue: false`, `issueKind: "missing"` = unverifiable). `SocialSecurityNumber.validation.ts` also handles redacted SSNs (compare only the visible last-4) and SSN↔ITIN interchangeability.
+- **digitsOnly (SSN/ITIN) and dateNormalized (DOB) — cross-borrower attribution (LOA-1832):** when the LLM finds a value in a document that does not match the target borrower but whose normalized form matches another borrower's authoritative value in the household, the discrepancy is a borrower-attribution error rather than a data inconsistency. The net overrides the verdict to `hasIssue: false` with `issueKind: "missing"` (the target borrower's value was simply not found on this page — correct outcome, no PII issue surfaced). This prevents false-positive PII findings on joint-borrower documents such as joint bank statements or combined tax returns that print all co-borrowers' SSNs, ITINs, and DOBs on a single page.
+- **digitsOnly (SSN/ITIN) — OCR artifact override:** if the LLM flagged inconsistent but the doc value has no mask chars (`X`/`*`/`#`) and is not 9 digits, treat it as an OCR artifact (`hasIssue: false`, `issueKind: "missing"` = unverifiable). `SocialSecurityNumber.validation.ts` also handles redacted SSNs (compare only the visible last-4) and SSN↔ITIN interchangeability.
 
 ### Aggregation rules
 
