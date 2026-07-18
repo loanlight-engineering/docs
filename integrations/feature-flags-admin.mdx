@@ -1,0 +1,105 @@
+---
+title: Feature-flags admin API
+description: The secured internal API for viewing and setting per-lender feature flags in the integrations service.
+icon: toggle-left
+---
+
+The integrations service exposes a secured admin API for managing per-lender feature flags — the same `lender_feature` table rows that gate document push, appraisal pass-through XML, and appraisal package delivery on the EPC path. It is served by `FeatureFlagAdminController` and mirrors the pattern established by the [routing-config admin API](/integrations/routing-config-admin) (LOA-1463).
+
+The controller base path is `integrations/feature-flags`. There is **no global route prefix** — every path below is literal.
+
+## Auth
+
+Every route is guarded by `InternalApiKeyGuard` — the same guard used by the routing-config and document-push-outcomes endpoints.
+
+- The caller sends the shared secret in the `x-internal-api-key` header. The guard reads `INTERNAL_API_KEY` (trimmed) and compares with `crypto.timingSafeEqual`.
+- **Fail-closed**: an unset or blank `INTERNAL_API_KEY` returns `401` even with a matching header.
+- The optional `x-acting-user-id` / `x-acting-user-email` headers are **logged only** — they appear in the `feature_flag_set` audit log line on every mutation; they are not part of authorization.
+
+## Flag registry
+
+The service maintains a code-defined registry (`feature-flags.registry.ts`) of the flags it manages. These are the three active per-lender `lender_feature` keys already read by `resolveLenderFeatureGate` in `webhooks.service.ts`; no new table or migration was introduced.
+
+| `key` | Label | Default | Gates |
+|---|---|---|---|
+| `document_push` | Document Push | `false` | EPC document push for this lender |
+| `appraisal_passthrough` | Appraisal Pass-Through XML | `false` | Manually-uploaded, non-MISMO appraisal XML alongside the appraisal PDF |
+| `appraisal_package_delivery` | Appraisal Package Delivery | `false` | Partner-delivered appraisal packages (UAD 3.6 ZIP or UCDP SSR) |
+
+All three default to disabled (absence of a row = disabled), which matches the existing behavior before this API existed.
+
+## Endpoints
+
+`:orgId` is a **WorkOS org id**. The service resolves it to a provisioned lender via `lender.workos_org_id`.
+
+| Method & path | Action |
+|---|---|
+| `GET /integrations/feature-flags` | The code-defined flag registry (key, label, description, defaultEnabled for all three flags). |
+| `GET /integrations/feature-flags/lenders/:orgId` | A lender's effective flag values — all three flags merged with registry defaults (an absent row resolves to the default, never a 404). |
+| `PUT /integrations/feature-flags/lenders/:orgId/:key` | Set one flag (upsert). Body: `{ "enabled": boolean }`. Returns `{ "key": string, "enabled": boolean }`. Audit-logged (see below). |
+
+### PUT request body
+
+```json
+{ "enabled": true }
+```
+
+`@IsBoolean()` is enforced — a non-boolean value returns `400`.
+
+### GET lenders/:orgId response
+
+```json
+{
+  "orgId": "<workos-org-id>",
+  "flags": [
+    { "key": "document_push", "enabled": false },
+    { "key": "appraisal_passthrough", "enabled": false },
+    { "key": "appraisal_package_delivery", "enabled": false }
+  ]
+}
+```
+
+All three flags are always present in the response, whether or not a DB row exists for them. An absent row resolves to the registry's `defaultEnabled` (currently `false` for all three).
+
+## Audit logging
+
+Every `PUT` performs a read-before-write and emits a structured log line:
+
+```json
+{
+  "event": "feature_flag_set",
+  "orgId": "<workos-org-id>",
+  "key": "document_push",
+  "previousValue": false,
+  "newValue": true,
+  "actorId": "<x-acting-user-id>",
+  "actorEmail": "<x-acting-user-email>"
+}
+```
+
+`previousValue` is resolved server-side and stays internal to the log; the wire-contract response shape is `{ key, enabled }` only. This mirrors the `routing_config_authored` / `_activated` / `_deactivated` pattern in `RoutingConfigAdminController`.
+
+## Error responses
+
+| Status | Body | When |
+|---|---|---|
+| `409` | `{ code: "LENDER_NOT_PROVISIONED", message }` | `:orgId` does not resolve to a provisioned lender. |
+| `400` | `{ code: "UNKNOWN_FEATURE_FLAG", message }` | `:key` is not in the registry. |
+
+## Transport
+
+This API is served on the integrations **internal NLB**, not the public gateway — the same NLB as the routing-config admin and document-push-outcomes endpoints. See [Integrations infrastructure](/integrations/infrastructure) for NLB and security group details.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Routing-config admin API" href="/integrations/routing-config-admin" icon="route">
+    The sibling internal API this controller mirrors.
+  </Card>
+  <Card title="Integrations database schema" href="/integrations/database-schema" icon="database">
+    The `lender_feature` table these flags read and write.
+  </Card>
+  <Card title="Integrations service overview" href="/integrations/service-overview" icon="plug">
+    The integrations service architecture.
+  </Card>
+</Columns>
