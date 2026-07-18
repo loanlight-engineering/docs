@@ -7,7 +7,7 @@ icon: route
 The encompass service exposes a small set of HTTP endpoints. There is **no global route prefix** — every path is literal (`/integrations/...`, `/auth/encompass`).
 
 <Note>
-This page covers the gateway-fronted endpoints. Two internal, server-to-server APIs are **not** reachable through the public API Gateway — they are served on the integrations internal NLB and guarded by `InternalApiKeyGuard`: the [routing-config admin API](/integrations/routing-config-admin) (`integrations/routing-config/...`) and the document-push outcomes read endpoint (`integrations/document-push/outcomes`) described below.
+This page covers the gateway-fronted endpoints. Three internal, server-to-server APIs are **not** reachable through the public API Gateway — they are served on the integrations internal NLB and guarded by `InternalApiKeyGuard`: the [routing-config admin API](/integrations/routing-config-admin) (`integrations/routing-config/...`), the [feature-flags admin API](/integrations/feature-flags-admin) (`integrations/feature-flags/...`), and the document-push outcomes read endpoint (`integrations/document-push/outcomes`) described below.
 </Note>
 
 ## Auth model

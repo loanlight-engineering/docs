@@ -55,6 +55,22 @@ The large-deposit flag threshold is computed against **qualified monthly income*
 
 The pipeline emits a `negative_balance` finding at the borrower-file level when any statement's `closing_balance` or running balance drops below zero (LOA-1688, migration `0244`). The finding type is `negative_balance`; severity is `warning`. It is dismissible via the same `PATCH .../findings/:findingId` path as other findings.
 
+#### Impossible calendar date detection (PR #2909)
+
+The pipeline detects **calendar-impossible dates** (e.g. `2023-02-29` in a non-leap year, `2023-04-31`) in extracted statements and surfaces them as a `validation_date_out_of_range` finding with severity `critical`.
+
+The check runs before the strict Zod `z.string().date()` parse in both the active Reducto path and the dormant LLM path (`date-validity.ts`). Impossible dates are clamped to the last valid day of the same month so the transaction remains visible and income math is unaffected, but the original impossible value is recorded in `bank_statements.metadata.date_anomalies[]` as a transient marker. The processor reads these markers via `extractDateAnomalies` and emits one `validation_date_out_of_range` finding per affected statement.
+
+<Note>
+Prior to this change, an impossible date on the Reducto path silently dropped the offending transaction (or discarded the entire PDF), and on the LLM path crashed the whole document — neither surfaced a reviewable fraud signal. The date marker is transient: it is never persisted to the DB (`toParsedStatement` is column-mapped and drops it), so no migration was needed.
+</Note>
+
+#### Font-consistency check (PR #2909)
+
+The `fraud_font_consistency` finding now uses **real embedded font names** from each statement PDF rather than per-load loader IDs. Previously, `extractFontProfile` compared `textItem.fontName` from pdf.js, which is a process-global counter (`g_d{N}_f{n}`) that resets per `getDocument()` call — making independently-loaded statements always produce disjoint font sets and triggering false positives on virtually every multi-statement run.
+
+The fix resolves real font names via `page.getOperatorList()` + `commonObjs.get(id).name` and strips the 6-character subset-embedding prefix (e.g. `WPCUBE+Arial` → `Arial`) before comparison.
+
 #### Self-employed toggle
 
 `PATCH /api/v1/portal/bank-statements/:id/settings` accepts `{ selfEmployed: boolean }` (LOA-1687). When `true`, payroll-classified deposits are excluded from qualifying income during recompute. The setting persists on `borrower_files.self_employed` and survives reprocess runs; it is visible in the income-analysis view. Default `false`.
@@ -97,6 +113,9 @@ Optional borrower legal name. Stored in `borrower_files.borrower_name`; seeds fa
 <ParamField body="coBorrowerName" type="string">
 Optional co-borrower legal name. Stored in `borrower_files.co_borrower_name`; same purpose.
 </ParamField>
+<ParamField body="ownershipPercentage" type="string">
+Optional business-ownership share as a 0–1 fraction with at most 4 decimal places (e.g. `"0.5"` = 50%). Business-only. Omitting this field is equivalent to 100% ownership. Stored as `borrower_files.income_ownership_percent`; the income calc applies it to qualifying income at recompute time (#2913).
+</ParamField>
 <ParamField body="selfEmployed" type="boolean">
 When `true`, payroll-classified deposits are excluded from qualifying income (LOA-1687, Priority Financial guideline). Default `false`; zero behavior change unless set.
 </ParamField>
@@ -107,14 +126,29 @@ Processors: `bank-statement.processor.ts` (extraction pipeline), `ai-summary.pro
 
 Since PR #2850 (LOA-1838), **raw Plaid PFC DETAILED codes** are the source of truth for transaction categories. The deposit-bucket relabeling pass (formerly `deposit-bucket.ts` + `deposit-bucket-llm.ts`, which ran an LLM fallback over ambiguous inbound deposits) has been removed. `transactions.category` now carries the raw Plaid coarse code (e.g. `TRANSFER_IN`) and `transactions.category_detailed` carries the detailed code (e.g. `TRANSFER_IN_DEPOSIT`); both are set by the Plaid Enrich API.
 
-Income inclusion applies a **single whitelist** (`DEFAULT_INCOME_CATEGORIES_CONSUMER` in `bank-statement.service.ts`) that covers explicit income PFC codes and the legacy deposit-mechanism bucket labels (for historically-persisted rows). There is no separate business blacklist.
+Income eligibility is determined by a **resolved LoanLight category label** (LOA-1900, PR #2902), not by raw PFC code membership. The `loanlight-categories.ts` module (canonical in `@loanlight/shared`, mirrored in `api/lib/plaid-enrich/`) maps all 31 credit PFC DETAILED codes to 16 human-readable labels via `PFC_TO_LOANLIGHT`, then `isIncomeEligibleLabel(label, borrowerType?)` determines eligibility:
+
+| Labels counted as income | Notes |
+|---|---|
+| `W2` | `INCOME_SALARY`, `INCOME_WAGES` |
+| `Self Employment` | `INCOME_CONTRACTOR`, `INCOME_GIG_ECONOMY` |
+| `Military` | `INCOME_MILITARY` |
+| `Investment / Retirement` | `INCOME_RETIREMENT_PENSION`, `INCOME_DIVIDENDS`, `INCOME_INTEREST_EARNED` |
+| `Rental` | `INCOME_RENTAL` |
+| `Child Support` | `INCOME_CHILD_SUPPORT` |
+
+All other labels (`Gov. Support`, `Tax Refund`, `Uncategorized Income`, `Deposit / Wire`, `Account Transfer`, `Investment Transfer`, `P2P Transfer`, `Cash Advance`, `Loan Proceeds`, `Other`) are not income. `Uncategorized` (null/blank PFC — enrichment returned nothing) is **borrower-type-aware**: income for `business` borrowers, excluded for `personal` and unspecified. Unrecognized non-blank input (reviewer-entered labels, primary Plaid codes) resolves to `Other`, which is always ineligible.
+
+<Note>
+`TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` resolves to the separate `Investment Transfer` label (not `Investment / Retirement`) so its ineligibility does not bleed onto the three `INCOME_*` investment codes that share the same display name. `isDefaultIncomeCategory` in `income-categories.ts` is still the public entry point — it now routes through `resolveLoanLightCategory` → `isIncomeEligibleLabel` internally.
+</Note>
 
 Three exclusion passes run after Plaid enrichment, in this order. Each pass **sets `transactions.income_excluded_reason`** (migration `0247`) instead of rewriting `category`, so the raw Plaid PFC code is preserved on the row:
 
 1. **Refund exclusion:** `applyRefundCategories` (`lib/bank-statement/refund-categories.ts`) matches credits whose description contains a refund pattern and sets `income_excluded_reason = 'refund'`. Runs first so a matching row is already disposition-flagged before the P2P passes. Applies to new uploads only.
 2. **P2P self-transfer exclusion:** `applyP2pSelfTransfer` (`lib/bank-statement/p2p-self-transfer.ts`) sets `income_excluded_reason = 'self_transfer'` for credits whose Plaid counterparty (`merchant`) shares the account holder's surname or is an exact full-name match. The legacy relabel label `p2p self-transfer` on older persisted rows still excludes the credit via `EXCLUSION_BUCKETS`. Applies to new uploads only.
 3. **Family/spousal P2P exclusion (LOA-1686):** `applyFamilyDepositExclusion` (`lib/bank-statement/family-p2p-transfer.ts`) sets `income_excluded_reason = 'family_transfer'` for credits matching the `borrower_name` or `co_borrower_name` on the `borrower_files` row. Short-circuits on any `income_excluded_reason` an earlier pass already set. Applies only when the name fields are populated; a no-op otherwise.
-4. **Per-transaction category override:** reviewers can reassign a transaction's category via `transaction_category_overrides` (migrations `0217`/`0218`). `transactions.category` is write-once (the override is a separate row). The reviewer dropdown now uses the raw PFC vocabulary (`CREDIT_PFC_CATEGORIES`, `@loanlight/shared` — income and non-income credit PFC codes) plus `non-income deposit`; labels are formatted via `formatPfcCategory` for display.
+4. **Per-transaction category override:** reviewers can reassign a transaction's category via `transaction_category_overrides` (migrations `0217`/`0218`). `transactions.category` is write-once (the override is a separate row). The reviewer dropdown uses the raw PFC vocabulary (`CREDIT_PFC_CATEGORIES`, `@loanlight/shared`) plus `non-income deposit`; labels are formatted via `formatPfcCategory` for display.
 
 ## bank-statement-export
 

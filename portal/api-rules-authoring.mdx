@@ -73,6 +73,8 @@ A second controller under `portal-appraisal-rules/staged-bundles` mounts at `api
 | `GET /api/v1/portal/admin/staged-rule-bundles` | List staged appraisal rule bundles (`StagedBundleListItem[]`) |
 | `POST /api/v1/portal/admin/lenders/:lenderId/staged-rule-bundles/:bundleId/apply` | Apply a curated bundle to a lender (HTTP 200) |
 
+The `apply` endpoint upserts both `loan_programs` rows and the associated `appraisal_rules` (the credit twin `apply` does the same for `credit_rules`). As of LOA-1872 (migration `0257`), apply also seeds `loan_programs.match_program_aliases` — an array of canonical program-name residuals used by the alias-first EPC program resolver. A row whose bundle definition carries no aliases binds SQL `NULL` (not `'{}'`) so a subsequent re-apply cannot clobber previously-seeded aliases with an empty array. Re-apply is append-only: `DO UPDATE COALESCE(excluded.match_program_aliases, loan_programs.match_program_aliases)` preserves existing aliases on conflict.
+
 ## portal-credit-rules
 
 Controller: `portal-credit-rules/portal-credit-rules.controller.ts` at `api/v1/portal/credit-rules`. The credit twin of the appraisal-rules module: templates come from `appraisal_rule_templates WHERE module='credit'`, rule sets/rules live in `credit_rule_sets` / `credit_rules`, and the evaluator is `lib/credit-pipeline/rules/evaluator.ts::evaluateWithDb`.

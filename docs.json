@@ -181,6 +181,7 @@
               "integrations/audit-lifecycle",
               "integrations/http-api",
               "integrations/routing-config-admin",
+              "integrations/feature-flags-admin",
               "integrations/messaging",
               "integrations/database-schema",
               "integrations/shadow-audits",
