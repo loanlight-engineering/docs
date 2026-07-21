@@ -47,7 +47,7 @@ The lookup primitive is `lender_auth_clients` (`database/schema/lender-auth-clie
 | `id` | uuid PK | |
 | `lender_id` | uuid NOT NULL → `lenders.id` (cascade) | |
 | `client_id` | text NOT NULL | external IdP / org / requestor id |
-| `source` | text NOT NULL | check: `fusionauth \| encompass \| devconnect \| workos` |
+| `source` | text NOT NULL | check: `fusionauth \| encompass \| devconnect \| workos \| workos_m2m` |
 | `created_at`, `updated_at` | timestamptz | |
 
 The unique index `lender_auth_clients_client_id_uniq` on `client_id` is the tenant-attribution

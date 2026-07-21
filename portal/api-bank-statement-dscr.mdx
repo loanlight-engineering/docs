@@ -71,10 +71,6 @@ The `fraud_font_consistency` finding now uses **real embedded font names** from 
 
 The fix resolves real font names via `page.getOperatorList()` + `commonObjs.get(id).name` and strips the 6-character subset-embedding prefix (e.g. `WPCUBE+Arial` → `Arial`) before comparison.
 
-#### Self-employed toggle
-
-`PATCH /api/v1/portal/bank-statements/:id/settings` accepts `{ selfEmployed: boolean }` (LOA-1687). When `true`, payroll-classified deposits are excluded from qualifying income during recompute. The setting persists on `borrower_files.self_employed` and survives reprocess runs; it is visible in the income-analysis view. Default `false`.
-
 #### Finding dismissal (`is_dismissed`)
 
 Reviewers can waive a `large_deposit` finding without removing it (admin-only). Dismissed findings remain in the ledger but are excluded from the Issues surface. The `PATCH .../findings/:findingId` endpoint (`UpdateFindingFeedbackDto`) accepts `{ dismissed: true, reason: "..." }` — the dismiss path skips `feedback_status` validation. A dismissal writes `is_dismissed = true`, `dismissed_reason`, `dismissed_at`, and `dismissed_by` onto the `findings` row. The `findings_dismissed_idx` partial index on `(borrower_file_id) WHERE is_dismissed = true` serves dismiss-state queries.
@@ -116,9 +112,6 @@ Optional co-borrower legal name. Stored in `borrower_files.co_borrower_name`; sa
 <ParamField body="ownershipPercentage" type="string">
 Optional business-ownership share as a 0–1 fraction with at most 4 decimal places (e.g. `"0.5"` = 50%). Business-only. Omitting this field is equivalent to 100% ownership. Stored as `borrower_files.income_ownership_percent`; the income calc applies it to qualifying income at recompute time (#2913).
 </ParamField>
-<ParamField body="selfEmployed" type="boolean">
-When `true`, payroll-classified deposits are excluded from qualifying income (LOA-1687, Priority Financial guideline). Default `false`; zero behavior change unless set.
-</ParamField>
 
 Processors: `bank-statement.processor.ts` (extraction pipeline), `ai-summary.processor.ts`, and `categorization.service.ts` (Plaid Enrich enrichment, in batches of 100). `VALID_FINDING_TYPES` is imported from the processor.
 
@@ -143,12 +136,13 @@ All other labels (`Gov. Support`, `Tax Refund`, `Uncategorized Income`, `Deposit
 `TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` resolves to the separate `Investment Transfer` label (not `Investment / Retirement`) so its ineligibility does not bleed onto the three `INCOME_*` investment codes that share the same display name. `isDefaultIncomeCategory` in `income-categories.ts` is still the public entry point — it now routes through `resolveLoanLightCategory` → `isIncomeEligibleLabel` internally.
 </Note>
 
-Three exclusion passes run after Plaid enrichment, in this order. Each pass **sets `transactions.income_excluded_reason`** (migration `0247`) instead of rewriting `category`, so the raw Plaid PFC code is preserved on the row:
+Four exclusion passes run after Plaid enrichment, in this order. Each pass **sets `transactions.income_excluded_reason`** (migration `0247`) instead of rewriting `category`, so the raw Plaid PFC code is preserved on the row:
 
 1. **Refund exclusion:** `applyRefundCategories` (`lib/bank-statement/refund-categories.ts`) matches credits whose description contains a refund pattern and sets `income_excluded_reason = 'refund'`. Runs first so a matching row is already disposition-flagged before the P2P passes. Applies to new uploads only.
 2. **P2P self-transfer exclusion:** `applyP2pSelfTransfer` (`lib/bank-statement/p2p-self-transfer.ts`) sets `income_excluded_reason = 'self_transfer'` for credits whose Plaid counterparty (`merchant`) shares the account holder's surname or is an exact full-name match. The legacy relabel label `p2p self-transfer` on older persisted rows still excludes the credit via `EXCLUSION_BUCKETS`. Applies to new uploads only.
 3. **Family/spousal P2P exclusion (LOA-1686):** `applyFamilyDepositExclusion` (`lib/bank-statement/family-p2p-transfer.ts`) sets `income_excluded_reason = 'family_transfer'` for credits matching the `borrower_name` or `co_borrower_name` on the `borrower_files` row. Short-circuits on any `income_excluded_reason` an earlier pass already set. Applies only when the name fields are populated; a no-op otherwise.
-4. **Per-transaction category override:** reviewers can reassign a transaction's category via `transaction_category_overrides` (migrations `0217`/`0218`). `transactions.category` is write-once (the override is a separate row). The reviewer dropdown uses the raw PFC vocabulary (`CREDIT_PFC_CATEGORIES`, `@loanlight/shared`) plus `non-income deposit`; labels are formatted via `formatPfcCategory` for display.
+4. **Own-account transfer exclusion (#2962):** `applyInternalAccountTransfer` (`lib/bank-statement/apply-internal-account-transfer.ts`) sets `income_excluded_reason = 'account_transfer'` for `TRANSFER_IN_ACCOUNT_TRANSFER` (Plaid DETAILED) credits whose source account matches one of the borrower's own accounts (statement `account_number_masked` last-4 or debit-side "Transfer To …NNNN" destinations). Third-party book transfers that share the same PFC code but carry no own-account source evidence are left untouched and remain income-eligible. Migration `0259` extends the `income_excluded_reason` CHECK to include `account_transfer`.
+5. **Per-transaction category override:** reviewers can reassign a transaction's category via `transaction_category_overrides` (migrations `0217`/`0218`). `transactions.category` is write-once (the override is a separate row). The reviewer dropdown uses the raw PFC vocabulary (`CREDIT_PFC_CATEGORIES`, `@loanlight/shared`) plus `non-income deposit`; labels are formatted via `formatPfcCategory` for display.
 
 ## bank-statement-export
 

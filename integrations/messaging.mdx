@@ -67,7 +67,7 @@ The source is `loanlight.aus`, not `loanlight.api`. loanlight-api emits `loanlig
 
 `QueueConsumerService.handleDocumentPush` runs the consumer:
 
-1. Checks the global kill-switch `appConfig.documentPushEnabled` (`DOCUMENT_PUSH_ENABLED`). When `false` it throws, returning the message to the queue (a prolonged stop eventually drains the backlog into the DLQ). It is `true` in INT.
+1. Checks the global kill-switch `appConfig.documentPushEnabled` (`DOCUMENT_PUSH_ENABLED`). When `false` it throws, returning the message to the queue (a prolonged stop eventually drains the backlog into the DLQ). It is `true` in INT and prod (LOA-1933). Enabling the flag does not push documents to any lender; per-lender enablement still requires `lender_feature`, `client`, and routing-config rows in the DB.
 2. Validates the `detail` with `DocumentsClassifiedEventSchema` (invalid payloads are dropped).
 3. Resolves the transaction from the integrations DB by `correlationId` — `getTransactionRecordByCorrelationIdOrThrow(event.loanId)`, where `event.loanId == transaction_state.id == auditRunId == correlationId` (LOA-1491). The S3 path emits `encompassLoanId: null`, so the real Encompass loan GUID is read from the joined `loan` row, never the event field. Previously the consumer gated on `event.encompassLoanId`, which was always null, so every push was dropped.
 4. Skips shadow audits — when `transaction_record.is_shadow`, it logs `"Shadow audit; skipping document push"` and consumes the message (shadow audits never touch Encompass). See [Shadow audits](/integrations/shadow-audits).

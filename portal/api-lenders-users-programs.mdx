@@ -50,11 +50,12 @@ Multipart logo upload (`FileInterceptor`). Filenames are sanitized to `[a-zA-Z0-
 | Method / path | Roles | Purpose |
 |---|---|---|
 | `GET /api/v1/portal/lenders/:id/feature-flags` | tenant roles + super_admin | Read flags |
-| `PUT /api/v1/portal/lenders/:id/feature-flags` | super_admin | Update (`UpdateFeatureFlagsDto`) |
-| `GET /api/v1/portal/lenders/:id/api-keys` | requireInternal | List partner API keys |
-| `POST /api/v1/portal/lenders/:id/api-keys` | requireInternal | Generate (`GenerateApiKeyDto { name }`) |
-| `DELETE /api/v1/portal/lenders/:id/api-keys/:keyId` | requireInternal | Revoke key |
-| `GET /api/v1/portal/lenders/:id/usage` | requireInternal | Usage metrics |
+|| `PUT /api/v1/portal/lenders/:id/feature-flags` | super_admin | Update (`UpdateFeatureFlagsDto`) |
+|| `GET /api/v1/portal/lenders/:id/api-keys` | requireInternal | List partner API keys |
+|| `POST /api/v1/portal/lenders/:id/api-keys` | requireInternal | Generate (`GenerateApiKeyDto { name }`) |
+|| `DELETE /api/v1/portal/lenders/:id/api-keys/:keyId` | requireInternal | Revoke key |
+|| `POST /api/v1/portal/lenders/:id/epc-credentials` | requireInternal | Mint an EPC WorkOS M2M client secret (`MintEpcCredentialDto { name }`, HTTP 201). Ensures the lender's WorkOS org, re-asserts `LenderUpserted`, creates or reuses an M2M application, and returns the one-time plaintext secret. The `client_id` is persisted in `lender_auth_clients` with `source = 'workos_m2m'`; the plaintext secret is never written to the DB. |
+|| `GET /api/v1/portal/lenders/:id/usage` | requireInternal | Usage metrics |
 
 See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements) for the flag catalog.
 

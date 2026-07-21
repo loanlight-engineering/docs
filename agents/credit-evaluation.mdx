@@ -12,7 +12,7 @@ separate liabilities agent.
 <Note>
 The legacy Octy system prompt lists `creditEvaluation` as a "stub, not yet implemented." That
 is wrong. The agent is fully built: an 11-node graph plus the `lib/credit-pipeline` library
-(extraction, a Zod facts schema, 24 rules CRED_001–CRED_024, summaries, risk projection), the
+(extraction, a Zod facts schema, 26 rules CRED_001–CRED_030, summaries, risk projection), the
 `portal-credit` NestJS module, and a BullMQ worker with heartbeat and orphan recovery. The only
 genuine stub is [Liabilities-Assessment](/agents/liabilities-assessment).
 </Note>
@@ -87,8 +87,10 @@ __start__ → prepare → detectScanned → ocr → extractText → extractStruc
 <Accordion title="prepare — cross-tenant guard">
 If `loanId` is undefined, looks up the `credit_runs` row by `(pipelineId, lenderId)` and reads
 `gross_monthly_income` and `rule_set_id`. If `loanId` is set, verifies the loan is owned by the
-lender and throws `CrossTenantGuardError` on mismatch. This guard never soft-degrades. The
-audit-driven path keeps the orchestrator-seeded `grossMonthlyIncome`.
+lender, reads `credit_report_date` and `credit_reference_number` from the `loans` row (both
+nullable; see CRED_029/030 below), and throws `CrossTenantGuardError` on mismatch. This guard
+never soft-degrades. The audit-driven path keeps the orchestrator-seeded `grossMonthlyIncome`
+but always reads the fresh credit metadata from the DB.
 </Accordion>
 <Accordion title="detectScanned — digital vs scanned">
 Loads the PDF with pdfjs and extracts text items. A page counts as "digital" when it has at
@@ -128,8 +130,9 @@ validation never aborts the run.
 Resolves `loanProgramId` for program-scoped credit rules (LOA-1080) and calls
 `evaluateWithCreditRules`. The DB evaluator is authoritative; this node does no rule-set
 pre-lookup. Returns `complianceResults`, `ruleSetId`, and `ruleSetVersion`. The node threads
-`loanAmount` from the graph state into `CreditRuleContext` (LOA-1762), which CRED_024 uses for
-its `max_loan_amount` tier condition.
+`loanAmount`, `creditReportDate`, and `creditReferenceNumber` from the graph state into
+`CreditRuleContext`. `loanAmount` is used by CRED_024; `creditReportDate` and
+`creditReferenceNumber` are the assertion side for CRED_029/030.
 </Accordion>
 <Accordion title="generateAiSummary — DTI and narrative">
 Computes `dtiRatio = totalMonthlyDebt / grossMonthlyIncome`, guarding `grossMonthlyIncome > 0`.
@@ -180,17 +183,18 @@ and unsecured balances), `delinquencies`, `utilization`, `counts`, `score`
 (`representative_score`, `representative_bureau`, `meets_threshold`, `bureau_spread`), and
 `tradeline_type_rollups[]`. The Work Number / TWN "Income Qualify" addendum fields on
 `EmploymentSchema` drive rule CRED_016.
-
 ## Credit rules
 
-The 24 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
+The 26 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
 (`rule-registry.ts`, looked up by `getCreditRuleByCode`) across 11 categories:
 
 || Code | Name | Category |
-||---|---|---|
+|||---|---|---|
 || CRED_001 | Address Consistency | Consistency |
 || CRED_002 | Name Consistency | Consistency |
 || CRED_003 | SSN Consistency | Consistency |
+|| CRED_029 | Credit Report Date Consistency | Consistency |
+|| CRED_030 | Credit Reference Number Consistency | Consistency |
 || CRED_004 | Late Payments (12mo) | Payment History |
 || CRED_005 | Late Payments (24mo) | Payment History |
 || CRED_006 | Active Delinquency | Payment History |
@@ -219,6 +223,13 @@ The active-dispute detection rule is **CRED_023** (Active Disputes), seeded by m
 (`module = 'credit'`) and backfilled into every active credit rule set. CRED_017 is **Housing
 Payment History**, not active disputes.
 </Note>
+
+**CRED_029 — Credit Report Date Consistency** and **CRED_030 — Credit Reference Number Consistency** (LOA-1759)
+
+Both rules compare Encompass-asserted loan fields against the extracted credit report. Migration `0261` adds `loans.credit_report_date` (text) and `loans.credit_reference_number` (text) — both nullable, populated by `loanlight-integrations` once the Encompass field entitlement lands. The rules are seeded by migration `0262` and backfilled into every active credit rule set at `WARNING` severity. Until the entitlement is mapped the columns are `NULL`, the rules' `skipForContext` gate fires before the required-fields precheck, and every lender sees a clean `SKIPPED` — never `FAIL`, never `NEEDS_INFO`.
+
+- **CRED_029** warns when the credit report's `pulled_at` date differs from `loans.credit_report_date` by more than `tolerance_days` (default 1).
+- **CRED_030** warns when the credit report's reference number matches neither `loans.credit_reference_number` nor the reference the report was reissued from.
 
 **CRED_024 — Credit-event Seasoning LTV Cap** (`lib/credit-pipeline/rules/definitions/seasoning-ltv.ts`, LOA-1570 / LOA-1762)
 
