@@ -11,7 +11,7 @@ The Classify & Split config tool at `/classify-split-config` lets engineers edit
 The page is tab-based (`src/app/(app)/classify-split-config/`):
 
 - **Categories & Rules** — the split categories and classification rules.
-- **Classifications** — the classification types.
+- **Classifications** — the classification types. The Classifications tab includes a **Show routing** toggle: when enabled, it fetches each visible segment's routed Final container from the integrations service and surfaces it as an inline chip in the Classification column. The fetch is keyed by audit-run correlation ID (fan-out capped server-side); toggling off clears the overlay. This is a display-only toggle — it does not modify any query filter.
 - **Confusion Map / Matrix / Graph** — visualizations of misclassification.
 - **PII Doc-Type Rules** — the `pii_field_doc_type_rules` that drive PII scoping.
 - **Dry Run** — run the live validation described below.

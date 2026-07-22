@@ -18,10 +18,11 @@ pipeline, not a catalog agent.
 </Note>
 
 <Warning>
-Do not confuse this with the older, separate bank-statement income pipeline keyed off
+Do not confuse this with the bank-statement income pipeline keyed off
 `borrower_files` → `bank_statements` → `transactions` (plus `income_filters`, `findings`,
-`ai_summaries`). That is a distinct, legacy subsystem. This page describes the newer
-`income_runs` family.
+`ai_summaries`). That pipeline has been ported to a compiled LangGraph agent — see
+[Bank-Statement-Income agent](/agents/bank-statement-income) (LOA-1711, currently seeded
+`active=false`). This page describes the separate `income_runs` family.
 </Warning>
 
 <Note>

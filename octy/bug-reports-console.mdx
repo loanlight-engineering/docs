@@ -87,7 +87,7 @@ Every Octy bug report owns at most one Linear ticket, regardless of how many Oz 
 
 **How a ticket is created:** at the end of an Oz run the agent calls the `attach-linear-ticket` Oz tool. Octy writes the ticket anchor in a race-safe conditional update (`WHERE linear_ticket_identifier IS NULL`) so concurrent runs on the same bug report can never create duplicate tickets.
 
-**Where ticket data lives:** four columns on `octy_issues` (migration `0255`):
+**Where ticket data lives:** five columns on `octy_issues` (migration `0255`):
 
 | Column | Purpose |
 |---|---|
@@ -95,6 +95,7 @@ Every Octy bug report owns at most one Linear ticket, regardless of how many Oz 
 | `linear_ticket_identifier` | Human-readable id (e.g. `LOA-1234`). |
 | `linear_ticket_url` | Deep-link into Linear. |
 | `linear_ticket_attached_at` | When the anchor was written. |
+| `linear_ticket_attached_by_run_id` | The `octy_runs.id` of the Oz run that attached the ticket. FK ON DELETE SET NULL. |
 
 `linear_snapshot` (jsonb) is a read-through display cache of the ticket (state, assignee, priority, cycle, labels) refreshed by Octy on each Linear fetch. Linear stays the source of truth; staleness is display-only.
 

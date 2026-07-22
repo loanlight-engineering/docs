@@ -104,7 +104,8 @@ Added by migration `0227_create_eligibility_results.sql` (LOA-1570). One row per
 
 PK `id`, `audit_run_id` (NOT NULL), `code` (NOT NULL).
 
-<ParamField path="code" type="text NOT NULL">Per-run finding identity. Backs the idempotency unique index `(audit_run_id, code)`. Also the stable lead of the mandatory order tiebreaker `[code, created_at, id]` (mirrors the `red_flag_results` dual-tiebreaker order chain).</ParamField>
+<ParamField path="code" type="text NOT NULL">Per-run finding identity. Backs the idempotency unique index `(audit_run_id, lender_id, code)`. Also the stable lead of the mandatory order tiebreaker `[code, created_at, id]` (mirrors the `red_flag_results` dual-tiebreaker order chain).</ParamField>
+<ParamField path="lender_id" type="uuid NOT NULL">FK to `lenders` (ON DELETE RESTRICT). Added by migration `0265` (LOA-1763 §A2), backfilled from `audit_runs.lender_id`. Present on all new rows; legacy rows were backfilled. Required for per-lender eligibility config lookups.</ParamField>
 <ParamField path="outcome" type="text NOT NULL">The `RuleOutcome` value from the eligibility evaluator.</ParamField>
 <ParamField path="program" type="text">The `LoanProgram` this finding is scoped to. Nullable when the finding is not program-specific.</ParamField>
 <ParamField path="message" type="text NOT NULL">Human-readable finding description.</ParamField>
@@ -112,8 +113,11 @@ PK `id`, `audit_run_id` (NOT NULL), `code` (NOT NULL).
 <ParamField path="selected_row_id" type="text">The matrix row that was matched.</ParamField>
 <ParamField path="rule_id" type="text">Optional order-95 overlay rule code.</ParamField>
 <ParamField path="severity" type="text">Writer-populated at persistence time; mirrors `red_flag_results.severity`.</ParamField>
+<ParamField path="effective_max_ltv" type="numeric">The composed LTV cap for GRID rows (LOA-1763 §A2). NULL on order-95 overlay rows (`rule_id IS NOT NULL`). Set at write time from `composedMaxLtv`; the upsert UPDATE branch mirrors the INSERT so a re-run never leaves a stale cap.</ParamField>
+<ParamField path="applied_caps" type="jsonb">The individual cap steps that composed `effective_max_ltv`. NULL on overlay rows.</ParamField>
+<ParamField path="applied_reductions" type="jsonb">The reduction steps applied after the grid cap (e.g. declining market, multi-unit). NULL on overlay rows.</ParamField>
 
-Indexes: unique on `(audit_run_id, code)`, composite on `(audit_run_id, code, created_at, id)` for deterministic ordering, and on `rule_id` for overlay lookups.
+Indexes: unique on `(audit_run_id, lender_id, code)`, composite on `(audit_run_id, code, created_at, id)` for deterministic worst-outcome-first ordering (via `eligibilityOutcomeRankDesc()`), and on `rule_id` for overlay lookups.
 
 ## audit_errors
 

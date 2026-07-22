@@ -119,6 +119,36 @@ BFF proxies for these live under `packages/app/src/app/api/credit-rules/*`.
 | `GET /api/v1/portal/admin/staged-credit-rule-bundles` | List staged credit bundles |
 | `POST /api/v1/portal/admin/lenders/:lenderId/staged-credit-rule-bundles/:bundleId/apply` | Apply a bundle (HTTP 200) |
 
+## portal-eligibility-rules
+
+Eligibility rules govern per-lender LTV grid eligibility (loan-amount/FICO/occupancy/DSCR matrix rows), geographic bars, and LTV modifier stacks. They run only for loan-data channels (EPC / LOS / partner integrations + API) — portal appraisal-only runs have no URLA-derived loan axes and are gated out at the engine call site.
+
+Two tables store authoring state for the eligibility system:
+
+**`eligibility_rule_sets` / `eligibility_rules`** — the rule authoring model, mirroring the credit/appraisal shape (`rule_sets` + `rules` with `code`, `category`, `thresholds`, `evaluateFnKey`, `operator`, `fieldPath`, `condition`, and optional `loanProgramId`). Key differences from credit/appraisal: no `severity` column on the rule (severity is purely a function of `outcome`, computed by `eligibilitySeverity()`). Unique partial index on `(rule_set_id, name) WHERE is_active = true` prevents duplicate active names per lender.
+
+**`eligibility_configs`** — a per-lender JSON config (one row per lender, unique) that carries the full eligibility engine input: `grids` (per-program LTV matrix rows keyed by `rowId`), `geoBars` (geographic bar rules), `ltvModifiers` (condo cap, cash-out cap, multi-unit/FL-condo/declining-market reductions), `programClassifier` (doc-type and name-regex program matching), and `ficoStrategy` (per-program FICO selection strategy). Loaded and Zod-validated on every read by `EligibilityConfigLoaderService`.
+
+<Note>
+`programClassifier` and `ficoStrategy` are schema-valid and persisted but **not yet consumed at runtime** (forward-staged, LOA-1763 §B4). `determineProgram` still uses in-code doc-type/name regexes; `selectRepresentativeFico` still uses the in-code `FIRSTCOLONY_FICO_STRATEGY`. Do not treat them as live overrides until a later ticket wires the processor plumbing.
+</Note>
+
+### Staged eligibility bundles (super-admin)
+
+A controller under `portal-eligibility-rules/staged-bundles` mounts at `api/v1/portal/admin`. Class-level `@Roles("super_admin")`. Staged bundles are pre-defined eligibility configs that internal staff apply to a lender in one atomic transaction — the `apply` endpoint writes both the `eligibility_rule_set`/`eligibility_rules` and the `eligibility_configs` row together.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/admin/staged-eligibility-rule-bundles` | List staged eligibility bundles |
+| `POST /api/v1/portal/admin/lenders/:lenderId/staged-eligibility-rule-bundles/:bundleId/apply` | Apply a bundle (dry-run via `?dryRun=true`) |
+
+The portal admin UI for this lives at `/admin/staged-eligibility-rules`. The BFF proxy routes:
+
+| Route handler | Backend |
+|---|---|
+| `GET /api/admin/staged-eligibility-rule-bundles` | list bundles |
+| `POST /api/admin/staged-eligibility-rules/apply` | apply with `{ lenderId, bundleId, dryRun }` |
+
 ## portal-income-rules
 
 Controller: `portal-income-rules/portal-income-rules.controller.ts` at `api/v1/portal/income-rules`. Same template-adoption pattern via `IncomeRuleSetsService`.

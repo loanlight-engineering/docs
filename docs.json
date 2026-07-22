@@ -91,7 +91,8 @@
               "agents/income-analysis",
               "agents/statement-analyzer",
               "agents/appraisal-evaluation",
-              "agents/liabilities-assessment"
+              "agents/liabilities-assessment",
+              "agents/bank-statement-income"
             ]
           }
         ]

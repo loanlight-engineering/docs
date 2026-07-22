@@ -1,0 +1,100 @@
+---
+title: Bank-Statement-Income agent
+description: The LangGraph port of the bank-statement income pipeline (LOA-1711). Currently inert — seeded active=false; runs as a bare worker for portal uploads pending full catalog dispatch in LOA-1696.
+icon: landmark
+---
+
+The `bankStatementIncome` agent is a 9-node compiled LangGraph that implements the bank-statement income analysis pipeline — extraction, validation, categorization, fraud detection, deposit classification, anomaly detection, income-trend analysis, and aggregation — in a single blob-free `Annotation.Root` graph. It replaces the monolithic `postProcess` function in the legacy `bank-statement.processor.ts` (PR #2865, LOA-1711).
+
+<Warning>
+`bankStatementIncome` is seeded into the `agents` catalog with `active = false` (migration `0264_seed_bank_statement_income_agent.sql`). It is **not yet dispatchable through the audit pipeline** — that wiring is reserved for a follow-up ticket (LOA-1696). Portal bank-statement uploads invoke the compiled graph directly as a bare worker (no `agent_runs` ledger row). Until LOA-1696 flips it live, it must stay absent from `AgentRegistryService.EXECUTOR_AGENT_KEYS`, `UiAuditAgentType`, `GraphRegistryService` canonical registration, and `WORKER_OWNED_AGENT_TYPES`.
+</Warning>
+
+## The 9-node graph
+
+The graph follows the legacy `bank-statement.processor.ts` extraction-loop execution order exactly. Edges are all unconditional; `aggregate` is the terminal node:
+
+```text
+prepare → extractStructured → validate → categorize → detectFraud →
+classifyDeposits → detectAnomalies → checkIncomeTrend → aggregate
+```
+
+State is carried in `BankStatementIncomeStateSchema` (`buildGraph.ts`) — a **blob-free** `Annotation.Root` (no PDF bytes, buffers, or paths in state channels). PDF bytes, the per-file s3Key span map, and the PDF-access closure are injected through `buildGraph(deps)`, never through state or `config.configurable`.
+
+<AccordionGroup>
+<Accordion title="prepare">
+Reads `borrower_files` from the DB to resolve the run's `lenderId`, `loanId`, and `borrowerType`, then emits a `PreparedRunRef` (ids and scalar status only — no blobs).
+</Accordion>
+<Accordion title="extractStructured">
+Calls `structureWithReducto` (injected via `deps.structure`) with the closure-held `pdfBuffer`. Returns the full `ExtractionResult` (statements + metadata) and writes `statements` onto state.
+</Accordion>
+<Accordion title="validate">
+Runs `ValidationService.validate` against the extracted statements and writes a `ValidationResult` onto state. Pure; no I/O.
+</Accordion>
+<Accordion title="categorize">
+Calls `CategorizationService.categorizeStatement` (Plaid PFC enrichment) for each statement. Writes `enrichments`, `categorized`, `failed`, and `skipped` onto state.
+</Accordion>
+<Accordion title="detectFraud">
+Runs PDF-integrity and font-consistency fraud checks. PDF bytes arrive via `deps.readPdfBySourceKey(s3Key)`, which resolves the worker's already-downloaded temp file — **not** an S3 re-fetch. Attribution is file/s3Key-keyed, not statement-keyed (one PDF can produce multiple statements). Returns `fraudFindings`.
+</Accordion>
+<Accordion title="classifyDeposits">
+Classifies each extracted deposit (`deposit_classification`) by `borrowerType`. Pure; no I/O.
+</Accordion>
+<Accordion title="detectAnomalies">
+Runs large-deposit, anomaly, and income-basis (audit P2) analysis via `AnomalyDetectionService`. Threads both `category_detailed` and `income_excluded_reason` into the income basis so refund/P2P/family exclusions are honored.
+</Accordion>
+<Accordion title="checkIncomeTrend">
+Checks the month-over-month income trend (audit F2). Threads `incomeExcludedReason` and `borrowerType` through the `toTrendStatements` adapter so the eligibility matrix is borrower-type-aware. No DB access — all inputs come from graph state.
+</Accordion>
+<Accordion title="aggregate (terminal)">
+Assembles the `AggregateWritePlan` — per-table write-batches for `borrower_files`, `bank_statements`, `transactions`, `income_filters`, and `findings` — and returns it. The node itself performs **no DB write** (IC-3/D9). Two additional detectors run inline inside aggregate's glue wrapper (NOT registered StateGraph nodes, so the topology stays at 9 nodes): `detectBalanceFindingsNode` (NSF + negative-balance at extraction time) and `detectContinuityFindingsNode` (balance-continuity fraud). Their outputs thread into `AggregateInput` directly.
+</Accordion>
+</AccordionGroup>
+
+## Write plan and persistence
+
+`aggregate` produces an `AggregateWritePlan`. The **worker** (`bank-statement.processor.ts::analyzeWithGraph` → unchanged `writeResults`) is the sole DB persister. No node may write to the DB — any node that takes a `DrizzleDB` uses it read-only (tenant guards, basis lookups).
+
+The worker's `writeResults` is unchanged from before the port: it reads the write plan produced by the graph and persists the same five table families it always did (`borrower_files`, `bank_statements`, `transactions`, `income_filters`, `findings`). The graph replaces the deleted `postProcess` function; everything after `writeResults` is unchanged.
+
+## Parity with the legacy pipeline
+
+The port restores several extraction-time finding categories that the legacy hard-swap (T11) had dropped:
+
+- **NSF and negative-balance** (`detectBalanceFindingsNode`): reuses `detectNsfFinding` / `detectNegativeBalances`, the same pair the append/recompute path uses.
+- **Balance continuity fraud** (`detectContinuityFindingsNode`): reuses `FraudDetectionService.checkContinuity`. Its input is sourced from raw `ParsedStatement` balances (pre-`?? 0` coercion) via the `deps.continuityStatements` closure, so the legacy unparseable-balance warning remains reachable.
+- **Income-basis veto** (P2 + F2): credits flagged `incomeExcludedReason ∈ {refund, self_transfer, family_transfer, account_transfer}` drop from the income basis even when `deposit_classification === "income_deposit"`, mirroring `bank-statement.processor.ts` post-#2860.
+
+## Catalog identity
+
+`bankStatementIncome` is the 10th member of `CatalogAgentType` (after `liabilitiesAssessment`) and has **no UI audit-result card** — it is a 4th member of the set of catalog agents absent from `UiAuditAgentType` (alongside `preAuditClassification`, `redFlags`, and `liabilitiesAssessment`). It is seeded as follows:
+
+| Column | Value |
+|---|---|
+| `agent_type` | `bankStatementIncome` |
+| `display_name` | `Bank Statement Income` |
+| `is_billable` | `false` |
+| `active` | `false` |
+| Phase (code) | `null` |
+| Runtime (code) | `queue_worker` |
+
+<Note>
+Phase `null` and `active = false` mean the orchestrator never includes this agent in a plan. Until LOA-1696 wires the dispatch path, the only callers are portal bank-statement uploads (bare worker, no `agent_runs` ledger row).
+</Note>
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Statement-Analyzer agent" icon="building-columns" href="/agents/statement-analyzer">
+The asset-ledger agent that also runs after bank-statement extraction.
+</Card>
+<Card title="Income analysis pipeline" icon="wallet" href="/agents/income-analysis">
+The newer `income_runs` pipeline (distinct from bank-statement income).
+</Card>
+<Card title="Bank statement and DSCR" icon="landmark" href="/portal/api-bank-statement-dscr">
+The portal API for bank-statement uploads and the extraction pipeline.
+</Card>
+<Card title="Agent platform schema" icon="boxes" href="/data-model/agent-platform-schema">
+The `agents` catalog and `active` flag semantics.
+</Card>
+</Columns>
