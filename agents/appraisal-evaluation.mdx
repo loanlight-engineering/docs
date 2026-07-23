@@ -143,8 +143,8 @@ With the gate open the node guards on a complete subject street/city/state, then
 
 - **Lookup** — STR aggregate performance: `median_rental_income`, `median_annual_revenue`,
   `median_occupancy_rate`, `sample_size`.
-- **List Comps** — STR comparable listings: an array of short-term rental comps
-  (`RentalComp`: `monthlyRevenue`, `occupancy`, `bedrooms`, `address`, `distanceMiles`, `url`).
+- **List Comps** — STR comparable listings: short-term rental comps filtered, ranked, and capped
+  at **5** (see below).
 - **Long-Term Comps** — LTR comparable listings: an array of long-term rental comps
   (`LtrComp`: `monthlyRent`, `bedrooms`, `bathrooms`, `sqft`, `address`, `listingDate`,
   `distanceMiles`, `url`).
@@ -154,9 +154,22 @@ the node) so each comp's `distanceMiles` can be computed via haversine; the fiel
 when ATTOM coordinates are unavailable — comps render with `distanceMiles: null` rather than
 blocking the fetch.
 
+#### STR comps filtering and ranking (LOA-1940, PR #2980)
+
+The raw List Comps response is filtered and ranked before it reaches the portal:
+
+- **Bedroom filter** — comps must exactly match the subject's bedroom count(s). Mashvisor's `beds=N` param is fuzzy (returns ≥N-ish), so a client-side exact match (`num_of_beds ∈ targets`) is applied after fetching. Multi-unit Form 1025 appraisals use the distinct bedroom counts across `units[].bedrooms`; single-unit forms use the scalar `improvements.bedrooms` (or `unit_description.bedrooms` for condos). Per-target fetches run in parallel with adaptive paging — page 2 is requested only when a target's page-1 exact-match count is below the display cap.
+- **Entire-home only** — comps where `room_type !== "Entire home/apt"` (private-room, shared-room) are dropped.
+- **Best 5** — the table is capped at 5 comps. Quota is allocated deterministically across bedroom targets (`floor(5/n)` + nearest-remainder + thin-pool redistribution) so each unit type retains representation, then sorted by proximity (closest first).
+- **Location column** — shows a real `"City, State"` locality string (e.g. `"Brooklyn, NY"`) instead of a placeholder repeated on every row.
+
+Two discriminators flow from backend → DTO → portal:
+- `strCompsFilteredEmpty` — list-comps returned results but bedroom/entire-home filters left none. The finding is relabelled **"Rental Comps Filtered"** (never asserts "no rental market").
+- `bedTargetsResolved` — whether subject bedroom count was derivable. Gates "matched" vs. "nearby comparable listings" copy so legacy/underivable rows do not falsely claim a bedroom match.
+
 The `RentalDataResult` shape is:
 - `strPerformance` — STR aggregate (from Lookup), or `null` on miss.
-- `strComps` — STR comp array (from List Comps).
+- `strComps` — STR comp array (from List Comps), after bedroom/entire-home filtering, quota ranking, and 5-comp cap.
 - `ltrComps` — LTR comp array (from Long-Term Comps), **bounded to the nearest 10** (proximity-ranked
   by haversine distance, nearest-first; comps without coordinates keep API order at the tail).
   Added in LOA-1869 (#2849) — a median over the full unbounded page-1 slice (up to 30
@@ -228,9 +241,23 @@ processor's DI'd DB.
 <Step title="Generate findings">
 `AppraisalFindingsService.generateFindings`.
 </Step>
+<Step title="Cross-document validation (step 7d)">
+Once per extraction completion (gated on `auditRunId` + `loanId`; portal-only uploads skip
+silently): retrieves three source documents — the URLA/1003 (`urla_1003` or `ed_urla`
+classification type), the 1008 Transmittal (`transmittal_1008`), and the Flood Certificate
+(`flood_certificate`) — via per-document deterministic LlamaCloud retrieval, then runs one
+structured-output extraction call per source doc (3 LLM calls/run, no LLM query planner).
+Compares 10 appraisal-extracted fields against the source values using deterministic
+normalize-then-exact TypeScript (never fuzzy). Disagreements surface as `XDOC-*` **warning**
+findings in the existing appraisal findings stream. Results are persisted in the new
+`appraisal_runs.cross_doc_validation` jsonb column (migration `0264`), which stores only source
+values — verdicts are always re-derived so corrections remain correct. The LLM step uses the
+`appraisalEvaluation.crossDocExtraction` config (gpt-4.1, structuredOutput). On for all lenders;
+not lender-configurable.
+</Step>
 <Step title="Write the run">
 Writes `appraisal_runs` with `extractedData`, `complianceResults`, `findings`, coverage fields,
-and the field maps.
+the field maps, and `cross_doc_validation`.
 </Step>
 </Steps>
 
@@ -369,8 +396,9 @@ revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status
 `isScanned`), `complianceResults`, `enrichmentData`, `findings`, `parentSnapshotData`,
 `photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`,
 `selectedAgencySources[]`, `loanNumber` (migration `0215_appraisal_runs_loan_number`, persisted
-from the EPC audit path by LOA-1681), and `rentalData` (Mashvisor STR/LTR enrichment, migration
-`0179_add_appraisal_runs_rental_data`).
+from the EPC audit path by LOA-1681), `rentalData` (Mashvisor STR/LTR enrichment, migration
+`0179_add_appraisal_runs_rental_data`), and `cross_doc_validation` jsonb (source values from the
+cross-document validation step, migration `0264_appraisal_runs_cross_doc_validation`).
 </ResponseField>
 
 <ResponseField name="rules, overrides, corrections" type="tables">

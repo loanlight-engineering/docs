@@ -195,7 +195,53 @@ emitted via dd-trace DogStatsD on a cadence of `PIPELINE_METRICS_INTERVAL_MS`
 `pipeline` is either `appraisal` or `credit`. The constants file also defines
 `QUEUE_STATES` and `APPRAISAL_RUN_STATUSES` for zero-filling gauges.
 
-## Dashboards as code
+## Monitors as code
+
+Monitors and dashboards for the `loanlight-api` service are committed to `packages/api/observability/datadog/` as JSON; monitors for the `encompass` service live in `packages/encompass/observability/datadog/`. The pattern in both repos is identical.
+
+### loanlight-api monitors
+
+Committed monitor files in `packages/api/observability/datadog/`:
+
+| File | What it pages on |
+|---|---|
+| `appraisal-reducto-queued-stalled.monitor.json` | Appraisal Reducto queue backlog stalled |
+| `bank-statement-reducto-queued-stalled.monitor.json` | Bank-statement Reducto queue backlog stalled |
+| `appraisal-reducto-circuit-read-failed.monitor.json` | Circuit snapshot reads fail (break-glass override may not be enforced) |
+| `appraisal-reducto-circuit-opened.monitor.json` | Reducto breaker trips OPEN (vendor is down) |
+| `appraisal-break-glass-audit-write-failed.monitor.json` | Break-glass mutation applied but audit-trail insert failed |
+| `llapi-ecs-memory-oom.monitor.json` | llapi ECS Fargate task memory ≥85% of container limit (warn at 75%), grouped by `task_arn` (LOA-965) |
+
+`monitors.registry.json` contains one entry per `*.monitor.json` basename with `{ "deprecated": boolean }`. Setting `deprecated: true` causes `apply-monitors.ts` to delete that monitor from Datadog on the next apply rather than updating it. The registry shape is validated by `monitor-schema.ts` (Zod) at both PR time and apply time.
+
+`monitor-schema.ts` also enforces that every `*.monitor.json` has **exactly one** of `env:int` or `env:prod` in its `tags` array. For log-alert monitors this tag must also appear in the `query` string (Datadog tags and log-facet filters are different mechanisms).
+
+`apply-monitors.ts` is idempotent by exact `name` match against Datadog's monitor list — no committed id file. Renaming a monitor's `name` field orphans the old one in Datadog; coordinate a deliberate rename with a manual delete of the orphan.
+
+### encompass monitors
+
+Committed monitor files in `packages/encompass/observability/datadog/`:
+
+| File | What it pages on |
+|---|---|
+| `document-push-dlq-depth.monitor.json` | Encompass document-push DLQ depth exceeds threshold |
+
+The same `monitors.registry.json` / `monitor-schema.ts` / `apply-monitors.ts` pattern applies.
+
+### CI and apply workflows
+
+Every PR and push validates that all `*.monitor.json` files are valid JSON, match the required schema, and have a matching `monitors.registry.json` entry (and vice versa). A new or malformed monitor fails the PR before it can merge.
+
+Two separate GitHub Actions workflows apply monitors to Datadog on push to `main`:
+
+| Workflow | Trigger |
+|---|---|
+| `.github/workflows/apply-datadog-monitors-api.yml` | Changes to `packages/api/observability/datadog/` |
+| `.github/workflows/apply-datadog-monitors-encompass.yml` | Changes to `packages/encompass/observability/datadog/` |
+
+Both can also be triggered manually via `workflow_dispatch`. They run the full reconciliation (apply or delete based on the registry) and self-heal any out-of-band Datadog UI edits. Deliberately **not** wired into the main deploy workflows — a Datadog outage or an invalid `DD_APP_KEY` never blocks an app or infra deploy.
+
+### Dashboards as code
 
 The committed dashboard lives in `packages/api/observability/datadog/`:
 
@@ -206,5 +252,5 @@ The committed dashboard lives in `packages/api/observability/datadog/`:
 DD_API_KEY=… DD_APP_KEY=… pnpm exec tsx observability/datadog/apply-dashboard.ts
 ```
 
-  Supports `--dry-run`, `--id`, `--site` (default `datadoghq.com`).
+  Supports `--dry-run`, `--site` (default `datadoghq.com`), `--only <basename>` to apply a single dashboard.
 - `README.md` — the operational runbook, including the APM-vs-log service tag note.

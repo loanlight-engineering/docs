@@ -329,6 +329,31 @@ Per-rule definitions (`ruleSetId`, `sourceTemplateId` — intentionally not an F
 Human-in-the-loop tables: `credit_corrections` (field edits) and `credit_rule_overrides`
 (override outcome `PASS | FAIL | WARNING | NEEDS_INFO | SKIPPED`).
 
+## Lender-specific rule bundles
+
+Curated credit rule bundles live in `portal-credit-rules/staged-bundles/`. Apply them via `/admin/staged-credit-rules` → dry-run → promote.
+
+### Luxury WSE (LOA-1652, LOA-1764)
+
+**CRED_011 disable:** the `luxury-wse-credit` bundle disables `CRED_011` (hard-inquiry count check) lender-wide, including DSCR programs. Rationale: a threshold-less WARNING would mark virtually every borrower as medium-risk with no underwriting signal.
+
+**CRED_024 mid-tier LTV caps (LOA-1764, PR #2982):** the bundle adds program-scoped `CRED_024` entries for the Luxury SA-cohort programs.
+
+The lender-wide CRED_024 row is **disabled** (`is_enabled: false`), so Prime, ITIN, and unresolved-program loans evaluate `SKIPPED` — never the registry's default 24–36 month tier. The program rows pin `isEnabled: true` explicitly. By program:
+
+| Programs | Mid-tier window | Non-foreclosure cap | Foreclosure additions |
+|---|---|---|---|
+| SFD, SBS, S99 | 24–48mo | ≤80 LTV, ≤$1.5MM | ≤70 LTV, ≤$1.5MM, DTI≤43, ≥10% own funds |
+| SAQ | 24–48mo | ≤80 LTV, ≤$1.5MM | ≤70 LTV, ≤$1.5MM, ≥10% own funds (no DTI — asset program) |
+| SCF, SFN | 36–48mo | ≤70 LTV, ≤$1.5MM | ≤70 LTV, ≤$1.5MM |
+| GRAD | 36–48mo | ≤75 LTV | ≤70 LTV |
+
+<Note>
+`min_own_funds_pct` routes to `NEEDS_INFO` on every in-tier foreclosure event — no extraction source exists yet, so the rule surfaces the case for manual underwriter review rather than failing it.
+</Note>
+
+Rollout: run credit `import-updates` for Luxury first (so the lender-wide CRED_024 row exists), then apply the bundle. Never use the Settings **Adopt** flow for this — a later `adopt()` re-enables the lender-wide row until the bundle is re-applied.
+
 ## HTTP endpoints
 
 All under `api/v1/portal/credit` (`PortalCreditController`):

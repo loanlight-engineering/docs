@@ -133,6 +133,16 @@ Two tables store authoring state for the eligibility system:
 `programClassifier` and `ficoStrategy` are schema-valid and persisted but **not yet consumed at runtime** (forward-staged, LOA-1763 §B4). `determineProgram` still uses in-code doc-type/name regexes; `selectRepresentativeFico` still uses the in-code `FIRSTCOLONY_FICO_STRATEGY`. Do not treat them as live overrides until a later ticket wires the processor plumbing.
 </Note>
 
+`EligibilityConfigLoaderService.resolveByLenderId` emits the `eligibility_not_applied` `warn` log event when it resolves to `null` without applying eligibility. The `missingSurface` field identifies the cause:
+
+| `missingSurface` value | Meaning |
+|---|---|
+| `rule_set` | No adopted (active) eligibility rule set for this lender. |
+| `config` | No `eligibility_configs` row for this lender. |
+| `both` | Neither an active rule set nor a config row exists. |
+
+This log event (LOA-1957) replaced two silent `return null` paths that were previously byte-identical in Datadog to an applied lender with zero findings. An unapplied lender is a deploy state, not a fault — hence `warn` not `error`.
+
 ### Staged eligibility bundles (super-admin)
 
 A controller under `portal-eligibility-rules/staged-bundles` mounts at `api/v1/portal/admin`. Class-level `@Roles("super_admin")`. Staged bundles are pre-defined eligibility configs that internal staff apply to a lender in one atomic transaction — the `apply` endpoint writes both the `eligibility_rule_set`/`eligibility_rules` and the `eligibility_configs` row together.

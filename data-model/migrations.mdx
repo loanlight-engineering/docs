@@ -13,6 +13,8 @@ All scripts live in `loanlight-api/packages/api/package.json`.
 | Script | Command | Purpose |
 |---|---|---|
 | `db:generate` | `drizzle-kit generate` | Diff `schema/index.ts` against the journal and emit a new numbered SQL migration in `db/migrations/`. **The primary authoring command.** |
+| `db:generate:custom` | `tsx scripts/generate-custom.ts` | Server-side migration numbering — numbers a new `--custom` migration against `origin/main`'s journal (not a stale local copy). Refuses if the branch is behind or the journal is mid-conflict. See below. |
+| `db:renumber` | `tsx scripts/renumber/cli.ts` | Resolve a migration number collision between a branch and `origin/main`. Three modes: `--check` (exit 0/1), `--dry-run` (preview), apply. See below. |
 | `db:migrate` | `drizzle-kit migrate` | Apply pending migrations. |
 | `db:check` | `drizzle-kit check` | Detect collisions / consistency issues in the migration set. |
 | `validate:migrations` | `ts-node scripts/validate-migrations.ts` | CI lint (see below). |
@@ -25,7 +27,7 @@ All scripts live in `loanlight-api/packages/api/package.json`.
 Change the table file under `src/database/schema/` and make sure it is re-exported from `index.ts`.
 </Step>
 <Step title="Generate">
-Run `db:generate`. Drizzle diffs the schema against `db/migrations/meta/_journal.json` and writes the next numbered `.sql` file (e.g. `0180_*.sql`).
+Run `db:generate`. Drizzle diffs the schema against `db/migrations/meta/_journal.json` and writes the next numbered `.sql` file (e.g. `0267_*.sql`). If you are on a branch that has fallen behind `main` and your number collides with an existing migration, use `db:renumber` to reslot your migration onto main's current tail without hand-editing the journal.
 </Step>
 <Step title="Review the SQL">
 Read the generated SQL. Confirm it does what you intended and did not emit an unexpected narrowing revert (a common symptom of schema/migration drift — see canaries below).
@@ -38,11 +40,24 @@ Run `db:migrate` against the target environment.
 </Step>
 </Steps>
 
-The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest (`0242_add_closing_date_inconsistent_issue_kind` at time of writing).
+The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest. The prefix (`idx`) can **jump** — `db:generate:custom` numbers from journal entry count, which has drifted from the last file tag, so gaps are expected.
 
 <Warning>
 **The migration runner owns the outer transaction.** Do not add raw `BEGIN;` / `COMMIT;` inside a migration `.sql` — it broke atomicity in `0143`.
 </Warning>
+
+## Server-side migration numbering (LOA-1918)
+
+Two scripts under `packages/api/scripts/renumber/` make Drizzle migration numbering reliable on branches without requiring client-side git config or the `gt` tool:
+
+**`pnpm db:generate:custom -- --name=<name>`** generates a new custom migration and numbers it against `origin/main`'s journal, not a potentially stale local copy. It refuses to run if the branch is behind main (naming `db:renumber`) or the journal is in a merge conflict, then deletes the throwaway snapshot `drizzle-kit --custom` leaves behind.
+
+**`pnpm db:renumber`** resolves a migration number collision. Three modes:
+- `--check` — exits `0` (no collision) or `1` (collision detected). Used by the CI gate (LOA-1920).
+- `--dry-run` — previews the renumber by running the real logic against a throwaway copy.
+- *(apply)* — auto-resolves a conflicted journal, re-slots each branch migration onto main's tail via `drizzle-kit` (numbering delegated, never hand-computed), preserves each SQL body byte-for-byte, and stages the result.
+
+The core is layered and unit-tested under `packages/api/scripts/renumber/`: `journal-state` (pure logic) → `git-journal` (git adapter) → `renumber` (orchestration) → `cli`.
 
 ## CI lint rules (validate:migrations)
 
@@ -51,6 +66,7 @@ The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks e
 - Journal `when` timestamps are strictly increasing.
 - Every `.sql` file has a journal entry and vice-versa.
 - Enum value migrations must use `ADD VALUE IF NOT EXISTS` so they are idempotent on non-transactional re-runs.
+- **(Check 7, LOA-1918)** No leftover `--custom` throwaway snapshot files are present. A snapshot is the temporary file `drizzle-kit generate --custom` emits before your manual SQL edit; `db:generate:custom` deletes it automatically, but leaving one in the branch fails CI.
 
 ## Migration-only constructs
 

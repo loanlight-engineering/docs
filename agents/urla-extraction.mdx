@@ -138,7 +138,7 @@ Every leaf is nullable, and the literal string `"null"` is sanitized to `null` (
 | 9 | Loan originator (global PARTIES lookup, not scoped to the subject borrower) |
 
 <Note>
-`LenderLoanInformationSchema` ("Lender Loan Information") is defined in `schemas/lender-loan-info.schema.ts` but is **not wired** into `UrlApplicationView` or any extraction node. Treat it as defined-but-unused.
+`LenderLoanInformationSchema` ("Lender Loan Information") is defined in `schemas/lender-loan-info.schema.ts`. It is used by the **URLA loan-data lane** (LOA-1754, PR #3016) — a loan-level producer that joins the borrower extraction fan-out and runs once per application. It reads `salesContractPrice` from MISMO (`qualifyingBorrowerCalculation.salesContractPrice`) via the existing XML/path utilities (no LLM call), persists the output in `urla_extraction_results.urla_extraction_result`, and threads `salesContractPrice` through `LoanContextAxes.purchasePrice` to the appraisal evaluation bag as `loan.purchase_price`. The schema is **not** part of `UrlApplicationView`; it is persisted separately via the lane.
 </Note>
 
 ## Tables written

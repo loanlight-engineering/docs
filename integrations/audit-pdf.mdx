@@ -4,9 +4,9 @@ description: The shared PDF rendering library used to build AUS reports.
 icon: file-text
 ---
 
-`audit-pdf` (workspace package `audit-pdf`, in `packages/audit-pdf/`) is a pure TypeScript library that renders the **AUS Report PDF** and per-property detail PDFs from audit results. It has no NestJS dependency and is imported by the encompass service's `AuditReportPdfService`.
+`audit-pdf` (workspace package `audit-pdf`, in `packages/audit-pdf/`) is a pure TypeScript library that renders the **AUS Pre-Underwriting Analysis PDF** and per-property detail PDFs from audit results. It has no NestJS dependency and is imported by the encompass service's `AuditReportPdfService`.
 
-It uses `pdfmake` for document layout and `pdf-lib` for merging.
+It uses `pdfmake` for document layout and `pdf-lib` for merging. The report font is **Roboto** (TTFs embedded from `pdfmake`'s bundled assets; `bold` maps to Roboto Medium, not a dedicated bold weight).
 
 <Note>
 This is a different PDF path from the one in loanlight-api. The loanlight-api [audit report PDF](/storage/pdf-reports) renders per-agent reports with Handlebars + Puppeteer and pushes them to the LOS. The `audit-pdf` library here renders the consolidated AUS Report that the EPC integration delivers into the Encompass transaction. They are separate engines.
@@ -45,13 +45,57 @@ interface AuditSectionsInput {
   documentHealth;
   check1003;
   propertiesCheck;
-  credit;          // added in the credit-section redesign
+  credit;
 }
 ```
 
-The render order is loan details, summary, document health, data consistency, Check 1003, **credit**, properties check — so the credit section sits between Check 1003 and the properties check.
+The render order (exceptions-first) is:
+
+1. Loan Details
+2. Audit Summary
+3. Important Expiration Dates (strip of expiration-only findings, before the full Document Health section)
+4. 1003 Check
+5. Document Health
+6. Data Consistency
+7. Credit Review
+8. Property Review
 
 When the audit state is not `Complete`, or sections are missing, the encompass service passes the data through so the library renders a status / NULL_SECTIONS PDF rather than a full report.
+
+### Header subtitle
+
+`auditSubtitle(sections)` emits the subtitle line below "Pre-Underwriting Analysis". It returns:
+- `undefined` when `sections.summary` is null (status-only PDFs).
+- `"All checks passed across analyzed documents."` when `issueCount === 0` **and** none of the exception sections (credit, 1003, properties) carry flagged findings.
+- `"Issues found across analyzed documents. Items in good standing are summarized, not listed."` otherwise.
+
+<Note>
+Prior to the grouped-Document-Health redesign (#516), the subtitle keyed only on `summary.issueCount`. A loan with zero document issues but a FAILing credit or 1003 rule would falsely claim "All checks passed". The fix adds `exceptionSectionsHaveFindings(sections)` as a second gate so the subtitle is consistent with the report body.
+</Note>
+
+### Document Health section
+
+Findings are **grouped by document type** (`documentType` field, falling back to the friendly display name). Each group occupies one or more rows in a table with a **Document (25%) / Status (15%) / Issue (60%)** column layout; the Document cell uses `rowSpan` to span all category rows within the group.
+
+Category rows within a group appear in canonical order: missing → expiration → incomplete → unsigned. The issue cell content varies by category:
+
+| Category | Status pill colour | Issue cell content |
+|---|---|---|
+| `missing` (1 instance) | Red — **Missing** | "Required by the loan program but not found in the loan file." |
+| `missing` (multiple instances) | Red — **Missing** | Count header + bulleted list of instance names; dated bank-statement instances sorted newest → oldest. |
+| `expiration` (expired) | Red — **Expired** | Document + dated clause + expired/on clause; requests a current document. |
+| `expiration` (expiring soon) | Amber — **Expiring** | Document + dated clause + will expire/on clause; requests a renewal. |
+| `incomplete` (bank statement) | Amber — **Incomplete** | Names the account and statement month; directs re-upload of all pages. |
+| `incomplete` (other doc) | Amber — **Incomplete** | Generic re-upload directive. |
+| `unsigned` | Amber — **Unsigned** | Wording by `signatureStatus`: `unsigned` / `partially_signed` / `verification_failed`. |
+
+Group ordering: top band (missing or expired findings) first, then alphabetical by label.
+
+The `document-health-model.ts` module owns group construction (`groupFindings`, `deriveCategories`, `parseMissingInstanceLabel`). `document-health-phrasing.ts` owns issue-cell and pill rendering (`buildIssueContent`, `categoryPill`, `expirationPhrase`, `incompletePhrase`, `unsignedPhrase`).
+
+<Note>
+The `required-documents.ts` module that existed before the grouped redesign has been removed. Its responsibilities (listing per-document status rows) are replaced by `document-health-model.ts` + `document-health-phrasing.ts`.
+</Note>
 
 ### Credit section
 
@@ -63,38 +107,45 @@ The `credit` section (`{ data: CreditReportInput[] }`) renders one block per cre
 
 ### Loan Details card
 
-The Loan Details card (`summary.loanDetails`, a `LoanDetails`) renders 15 fields, three per row. All values are pre-formatted display strings resolved by loanlight-api; an absent field renders as `—`. The labels and keys are:
+The Loan Details card (`summary.loanDetails`, a `LoanDetails`) renders on a 6-column grid:
+
+- **Row 1** (50/50 split): Borrower(s), Property — each spans 3 columns.
+- **Rows 2–5** (even thirds): 12 remaining fields, 3 per row.
+
+All values are pre-formatted display strings resolved by loanlight-api; an absent field renders as `—`.
 
 | Label | Key |
 |---|---|
 | Borrower(s) | `borrowers` |
-| Loan # | `loanNumber` |
 | Property | `propertyAddress` |
+| Loan # | `loanNumber` |
 | Loan Program | `loanProgramName` |
 | Income Type | `incomeType` |
 | Est. Closing Date | `estimatedClosingDate` |
 | Purpose | `loanPurpose` |
 | Occupancy | `occupancyType` |
-| Note Rate | `noteRate` |
 | Loan Amount | `loanAmount` |
 | Purchase Price | `purchasePrice` |
 | Appraised Value | `appraisedValue` |
-| LTV / CLTV | `ltv` (renders `ltv` and `combinedLtv` together) |
+| Note Rate | `noteRate` |
 | Rate Lock Status | `rateLockStatus` |
 | Current Milestone | `currentMilestone` |
 
-The card grew from 9 to 15 fields: `incomeType`, `estimatedClosingDate`, `noteRate`, `appraisedValue`, `rateLockStatus`, and `currentMilestone` are new, and the labels changed from "Loan Number" to "Loan #" and from "Program" to "Loan Program".
+<Note>
+`LTV / CLTV` was removed from the Loan Details card in the grouped-Document-Health redesign (#516). The fields (`ltv`, `combinedLtv`) still exist in `LoanDetails` and the API type, but the card no longer renders them.
+</Note>
 
 ## Source modules
 
 | Module | Contents |
 |---|---|
-| `audit/` | `build-audit-doc`, `audit-content`, `audit-column-widths` |
+| `audit/` | `build-audit-doc`, `audit-content` |
+| `audit/sections/` | `loan-details`, `summary`, `expiration-strip`, `document-issues`, `document-health-model`, `document-health-phrasing`, `data-consistency`, `check-1003`, `credit`, `properties` |
 | `property/` | `build-property-doc`, `property-content` |
 | `combine` | PDF merge logic |
 | `page-break`, `logo`, `types` | layout helpers and shared types |
 
-The package has unit tests (`*.spec.ts`) and a `generate-test-pdfs` script for visual checks.
+The package has unit tests (`*.spec.ts`) and a `preview-server.ts` script for visual checks.
 
 ## How encompass consumes it
 
