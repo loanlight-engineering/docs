@@ -43,6 +43,13 @@ or `{ data: null }` (never 404). The `AppraisalAuditProjectionService` applies t
 overlay (LOA-1685) to the projection. See [Integration orchestration pipeline](/integrations/orchestration-pipeline)
 and [Reading audit results](/pipeline/results).
 
+`PortalAppraisalPayload` includes `rentalData: AppraisalRentalData | null` (LOA-1954). The EPC/partner
+surface gets the **display subset only**: `AppraisalAuditProjectionService` pipes rental data through
+`toAppraisalRentalData()` before returning, stripping the `_`-prefixed internal diagnostic fields
+(`_endpointStatus`, `_synthetic`, `_skipped`, `_errors`, `propertyProfile`, `requestCoords`) that the
+staff portal's own `getRunDetail` path retains. `null` when the run was not rental-gated or the lookup
+was skipped.
+
 `LangGraphService.createAppraisalEvaluationGraph` takes an options object, returns the
 extraction result plus the graph-owned `enrichmentData`, and races the graph against
 `APPRAISAL_GRAPH_DEADLINE_MS`. The builder `buildAppraisalEvaluationGraph` closes over
@@ -270,7 +277,9 @@ The rule definitions live in `lib/appraisal-pipeline/rules/definitions` (registr
 (`AgencySource`: `fannie_mae`, `freddie_mac`), support compound conditions (`compound-walker`,
 `condition-schema`), and use `feature-gates`.
 
-**`CONT_006` — Appraised value below purchase price (LOA-1753)** is the newest global built-in. It flags when the appraiser’s `reconciliation.final_opinion_of_value` (alias-aware via `resolveAppraisedValue`) comes in below `contract.contract_price`. Purchase transactions only; refinances return `SKIPPED`. Default severity `WARNING` (configurable per lender). A `tolerancePercent` threshold (default `0` = flag any shortfall) suppresses rounding noise. Missing operands return `NEEDS_INFO` rather than double-flagging — presence is owned by `REC_002` and `CONT_002`. Lender-neutral (no lender-code gate, no loan-context dependency) so it also evaluates on standalone portal appraisal runs. Migration `0246` seeds the template and backfills it into all active rule sets.
+**`CONT_006` — Appraised value below purchase price (LOA-1753)** is the newest global built-in. It flags when the appraiser's `reconciliation.final_opinion_of_value` (alias-aware via `resolveAppraisedValue`) comes in below `contract.contract_price`. Purchase transactions only; refinances return `SKIPPED`. Default severity `WARNING` (configurable per lender). A `tolerancePercent` threshold (default `0` = flag any shortfall) suppresses rounding noise. Missing operands return `NEEDS_INFO` rather than double-flagging — presence is owned by `REC_002` and `CONT_002`. Lender-neutral (no lender-code gate, no loan-context dependency) so it also evaluates on standalone portal appraisal runs. Migration `0246` seeds the template and backfills it into all active rule sets.
+
+**LOS appraisal value reconciliation (LOA-1753)** — `reconcileAppraisedValue()` in `lib/loan-context/loan-context-adapter.ts` reconciles the appraiser's extracted `final_opinion_of_value` against the LOS (Encompass) loan-file copy. The document value remains the appraisal-axis winner and the grading source; when the two values differ beyond `toleranceDollars` (default `0` = any mismatch), a `LoanFactConflict` is emitted on axis `appraisedValue` carrying both source values and the absolute delta. The LOS copy is comparison evidence only — without a document value, the appraisal axis stays unknown rather than falling back to the LOS copy. `parseLosAppraisedValue()` normalises the raw text column (strips `$`, commas) before comparison.
 
 **`IMP_006` — Unique / atypical property (LOA-1713)** is the previous newest global built-in.
 

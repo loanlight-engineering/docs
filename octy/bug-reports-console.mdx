@@ -61,6 +61,12 @@ Custom instructions apply to the fixed tentacles (RCA and fix-and-PR) as an "Add
 </Step>
 </Steps>
 
+### Untraced agent runs (LOA-1910)
+
+The `BugReportPanelBody` reconciles the audit's `agent_runs` ledger against the LangSmith traces attached to the issue. For every agent that has a ledger row but **no** LangSmith trace (excluding intentional `skipped` rows), the panel shows a **"No run recorded"** indicator next to the agent name. This highlights agents that started and failed before LangSmith could capture them, or were never instrumented — conditions where the trace chip alone would give a false all-clear.
+
+The reconciliation is done by `untracedLedgerAgents()` (`src/lib/agent-types.ts`): it takes the set of traced agent types (from trace chip presence, not status) and the complete ledger, and returns the agents in the ledger that have no corresponding trace. Skipped rows are excluded because a `skipped` agent legitimately produces no trace.
+
 ### Live prompt preview
 
 The panel assembles a live preview of the exact prompt the server will build. It calls `buildBasePrompt` client-side with placeholder tokens (and `datadogAvailable: true`) and appends the context, comments, and skill sections, mirroring the server. For the Ad Hoc tentacle the preview is an editable textarea seeded with the skill's pre-fill, which becomes the `customPrompt`.

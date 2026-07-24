@@ -1,10 +1,64 @@
 ---
 title: Billing reports
-description: Octy's catalog- and ledger-driven billing/usage reporting.
+description: Octy's catalog- and ledger-driven billing/usage reporting, including the vendor cost dashboard.
 icon: receipt
 ---
 
-Billing Reports at `/billing-reports` count billable usage per lender over a date range. The logic lives in `src/lib/billing.ts`; shared definitions are in `src/lib/billing-shared.ts`. As of the agent-platform work (octy #84), billing is **catalog- and ledger-driven**: the billable agent set comes from the `agents` catalog and per-agent credit comes from the `agent_runs` execution ledger, replacing the old per-result-table existence probes.
+The Billing Reports page at `/billing-reports` has two tabs: **Vendor Costs** (AI spend from the cost-attribution ledger, LOA-997) and **Billing** (the existing loan/agent credit report). A third tab surfaces the [LLM Experiments](/octy/llm-experiments) cockpit.
+
+## Vendor Costs tab
+
+The Vendor Costs tab (`VendorCostsView`) aggregates AI vendor spend from the `agent_runs.cost` and `audit_infra_steps.cost` JSONB ledgers across the date range and lender/agent filter. It queries at read time — there are no rollup tables — so the view always reflects the current ledger state.
+
+### API
+
+`GET /api/vendor-costs` (route `src/app/api/vendor-costs/route.ts`, query function `getVendorCostSummary` in `src/lib/vendor-costs.ts`):
+
+<ParamField query="from" type="string (ISO date/datetime)">
+Inclusive lower bound on `audit_runs.started_at`.
+</ParamField>
+<ParamField query="to" type="string (ISO date/datetime)">
+Inclusive upper bound.
+</ParamField>
+<ParamField query="lenderId" type="string (repeated)">
+Scope to one or more lender ids.
+</ParamField>
+<ParamField query="agent" type="string (repeated)">
+Scope to one or more `agent_type` labels (or `infra:<capability>` for infra-step rows). Absent = all.
+</ParamField>
+<ParamField query="bucket" type="string">
+Time bucket for the trend series: `hour`, `day` (default), `week`, or `month`.
+</ParamField>
+
+### Response shape (`VendorCostSummary`)
+
+All dollar values in the response are projected via the **largest-remainder cent allocation** method so every displayed partition (by vendor, by lender, by day) sums exactly to the visible grand total at 2dp — no penny drift between widgets.
+
+| Field | Notes |
+|---|---|
+| `totals.usd` | Sum over priced, non-estimated lines. |
+| `totals.estimatedUsd` | Sum over client-counted lines (LlamaCloud retrieval; marked `estimated: true`). |
+| `totals.interactiveUsd` | Spend from interactive/comment-chat calls (`interactive: true`); included in the above totals but broken out so consumers can split pipeline cost from on-demand. |
+| `totals.unknownLines` | Billed-but-unquantifiable events (LLM errors, responses with no usage payload). Never zero-priced. |
+| `totals.runCount` | Distinct (day, source, lender) tuples with captured spend. |
+| `totals.todayUsd` | Spend since UTC midnight today, same lender/agent scope regardless of the selected range — a cockpit vital sign. |
+| `byVendor[]` | Per-vendor `{ vendor, usd, estimatedUsd, calls }`. |
+| `byOp[]` | Per-vendor · operation/model drill-down `{ vendor, op, usd, calls, credits, tokens, estimated, interactive }`. |
+| `byDay[]` | Trend series bucketed per `bucket` with per-vendor splits: `{ day, usd, vendors: Record<vendor, usd> }`. |
+| `byLender[]` | Per-lender `{ lenderId, lenderName, usd }`. |
+| `bySource[]` | Per-source-label `{ source, usd }` (source = `agent_type` or `infra:<capability>`). |
+
+### Vendor vocabulary
+
+Four closed vendors are tracked: `openai`, `anthropic`, `reducto`, `llamacloud`. A line whose provider cannot be mapped lands in `unknown`. New vendors need no code change in the aggregation layer — they surface automatically from the line's `vendor` field.
+
+### Cost sources and double-counting
+
+`classify_split_runs.cost` is **excluded** from this view: it is a per-document breakdown of spend already counted on the `preAuditClassification` agent run in `agent_runs`. Including it would double-count. Use `classify_split_runs.cost` only for per-document attribution (cost per source file), not fleet-level totals.
+
+## Billing tab
+
+The Billing tab counts billable usage per lender over a date range. The logic lives in `src/lib/billing.ts`; shared definitions are in `src/lib/billing-shared.ts`. As of the agent-platform work (octy #84), billing is **catalog- and ledger-driven**: the billable agent set comes from the `agents` catalog and per-agent credit comes from the `agent_runs` execution ledger, replacing the old per-result-table existence probes.
 
 ## The billable unit
 

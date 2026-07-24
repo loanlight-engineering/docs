@@ -45,6 +45,8 @@ Runs large-deposit, anomaly, and income-basis (audit P2) analysis via `AnomalyDe
 </Accordion>
 <Accordion title="checkIncomeTrend">
 Checks the month-over-month income trend (audit F2). Threads `incomeExcludedReason` and `borrowerType` through the `toTrendStatements` adapter so the eligibility matrix is borrower-type-aware. No DB access — all inputs come from graph state.
+
+Income is bucketed by **representative month** (`getRepresentativeMonthForDate` using each statement's `periodStart`/`periodEnd`), not by calendar month. The divisor for qualified monthly income is the count of **distinct documented months** — the set of representative months across the included statements, regardless of how many transactions fell in each month. Every documented month is present as a zero-filled row when it has no eligible deposits, so `months_analyzed == monthly_data.length == included_months` by construction. This prevents the prior bug where months with no eligible income were silently omitted from the denominator, overstating the average.
 </Accordion>
 <Accordion title="aggregate (terminal)">
 Assembles the `AggregateWritePlan` — per-table write-batches for `borrower_files`, `bank_statements`, `transactions`, `income_filters`, and `findings` — and returns it. The node itself performs **no DB write** (IC-3/D9). Two additional detectors run inline inside aggregate's glue wrapper (NOT registered StateGraph nodes, so the topology stays at 9 nodes): `detectBalanceFindingsNode` (NSF + negative-balance at extraction time) and `detectContinuityFindingsNode` (balance-continuity fraud). Their outputs thread into `AggregateInput` directly.

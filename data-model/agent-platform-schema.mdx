@@ -62,6 +62,7 @@ The per-`(audit_run, agent)` execution ledger (`database/schema/agent-runs.ts`).
 | `errors` | `jsonb` | Per-agent error rollup. |
 | `output` | `jsonb` | Cross-phase handoff payload an agent persists on completion (e.g. `propertyData`'s `trustIndicator`); rehydrated into the next phase. |
 | `llm_config` | `jsonb` | Frozen LLM config for this agent run, set by the router at plan time (migration `0250`). Shape: `{ "<group>.<step>": { model, params } }`. NULL on legacy rows or when the router did not seed it (falls back to ambient resolution). |
+| `cost` | `jsonb` | AI vendor spend observed during this agent's execution, written once at run end (migration `0270`). Shape: `AgentRunCost` — `{ version, totalUsd, estimatedUsd, unknownLines, lines[] }`. NULL when nothing was observed (legacy rows, or an agent with no captured vendor calls). Lines carry the vendor, quantity, rate snapshot, and USD amount frozen at record time. |
 | `created_at` | `timestamptz` NOT NULL | Default `now()`. |
 
 Constraints and indexes:
@@ -90,7 +91,8 @@ A thin ledger for **non-agent** infra steps that join a phase — today only Lla
 | `started_at` | `timestamptz` | |
 | `completed_at` | `timestamptz` | |
 | `errors` | `jsonb` | |
-| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+| `cost` | `jsonb` | AI vendor spend for this infra step, written once on completion (migration `0270`). Same `AgentRunCost` shape as `agent_runs.cost`. NULL when nothing was observed. |
+| `created_at` | `timestamptz` NOT NULL | |
 
 Constraints and indexes:
 

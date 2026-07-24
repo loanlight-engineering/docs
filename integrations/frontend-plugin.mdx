@@ -47,6 +47,15 @@ Via `audit-api.service.ts`, against `NEXT_PUBLIC_LL_WEB_AUS_API_HOST`. It calls 
 </Tab>
 </Tabs>
 
+## Appraisal rental data (LOA-1955)
+
+The appraisal review surface now renders **STR and LTR rental data** from the `rentalData` field of `PortalAppraisalPayload`. Two shared-ui components drive the display:
+
+- **`AppraisalRentalMarketCard`** — STR aggregate performance card (monthly/annual revenue, occupancy, sample size) from Mashvisor's lookup endpoint.
+- **`AppraisalRentComparablesTable`** — merged comps table: the 1025 income-approach rent comparables (from the appraisal form) plus Mashvisor LTR comps as additional rows. STR comps are shown in a separate card.
+
+These components live in `@loanlight-engineering/shared-ui/audit/appraisal` (LOA-1953). The integrations frontend plugin imports them from `shared-ui` and feeds them the `rentalData` payload from `GET /api/v1/audit_runs/:id/appraisal`. `rentalData` is `null` when the run was not rental-gated (non-DSCR / non-Form-1025 appraisals); both components render nothing in that case. The EPC appraisal surface strips internal diagnostic fields (`_`-prefixed) before the data reaches the wire — see [Appraisal-Evaluation agent](/agents/appraisal-evaluation#epc-audit-path-loa-1675).
+
 ## Credit and liabilities
 
 The `/audit/credit-liabilities` route renders the shared `CreditLiabilitiesView` from `@loanlight-engineering/shared-ui/audit`, fed by `AuditApiService.getCreditData` (`GET /api/v1/audit_runs/{id}/credit`). The sidebar nav item and the Overview card are shown when `creditData` is a non-empty array (LOA-1722: the `credit-liabilities` PostHog flag was removed; the section now gates purely on data presence).

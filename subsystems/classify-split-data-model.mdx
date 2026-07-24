@@ -21,6 +21,7 @@ One row per classification run.
 | `status` | varchar(20) default `'pending'` | CHECK ∈ `pending`, `running`, `complete`, `failed`, `skipped`, `partial` |
 | `classification_mode` | text NOT NULL default `'per_segment'` | The mode the run actually used. CHECK ∈ `per_segment`, `majority_bucket`, `two_pass` |
 | `is_dry_run` | boolean NOT NULL default `false` | True for octy dry-runs; stamped at INSERT |
+| `cost` | `jsonb` | Per-document LlamaCloud split/classify spend (migration `0271`). Same `AgentRunCost` JSONB shape as `agent_runs.cost`; lines carry `docRef = loan_document_id` so spend rolls up per source document. Written once at run completion from the usage-metrics endpoint. NULL on legacy rows. |
 | `started_at`, `completed_at`, `error_message`, `created_at` | timestamps / text | |
 
 Indexes: `uq_classify_split_runs_audit` (unique on `audit_run_id` where not null — one run per audit),
@@ -60,6 +61,7 @@ One row per **segment** — a page range with a bucket and a subtype.
 | `split_storage_path` | text nullable | Relative S3 key of the carved split PDF. Written by the `documents.materialized` return leg (`persistSplitLocations`, LOA-1337), not by the classify run |
 | `requires_review` | boolean NOT NULL default false | |
 | `split_job_id`, `classify_job_id` | text nullable | LlamaSplit / LlamaClassify job ids |
+| `classify_parse_job_id` | text nullable | The classify job's internal parse id (`pjb-…`), added by migration `0271`. This is the key its billing aggregates under in the LlamaCloud usage-metrics API (the `clj-` classify job ids have no usage rows). |
 | `classification_status` | varchar(30) NOT NULL default `'split'` | `split` → `classified` → `classification_failed` |
 | `created_at` | timestamp | |
 
