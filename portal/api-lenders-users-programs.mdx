@@ -54,6 +54,7 @@ Multipart logo upload (`FileInterceptor`). Filenames are sanitized to `[a-zA-Z0-
 || `GET /api/v1/portal/lenders/:id/api-keys` | requireInternal | List partner API keys |
 || `POST /api/v1/portal/lenders/:id/api-keys` | requireInternal | Generate (`GenerateApiKeyDto { name }`) |
 || `DELETE /api/v1/portal/lenders/:id/api-keys/:keyId` | requireInternal | Revoke key |
+|| `GET /api/v1/portal/lenders/:id/epc-credentials` | requireInternal | List EPC M2M credentials for the lender. Returns `{ workosOrganizationId, applications[] }` where each application carries `clientId`, `name`, `createdAt`, and `secrets[]` (each with `id`, `secretHint`, `createdAt`, `lastUsedAt`). Returns empty `applications: []` when the lender has no WorkOS org yet. WorkOS is the source of truth; no plaintext secrets are returned here. (LOA-1467) |
 || `POST /api/v1/portal/lenders/:id/epc-credentials` | requireInternal | Mint an EPC WorkOS M2M client secret (`MintEpcCredentialDto { name }`, HTTP 201). Ensures the lender's WorkOS org, re-asserts `LenderUpserted`, creates or reuses an M2M application, and returns the one-time plaintext secret. The `client_id` is persisted in `lender_auth_clients` with `source = 'workos_m2m'`; the plaintext secret is never written to the DB. |
 || `GET /api/v1/portal/lenders/:id/usage` | requireInternal | Usage metrics |
 

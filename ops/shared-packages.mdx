@@ -11,10 +11,10 @@ versioned dependencies. The repo is the single source of truth for cross-repo
 TypeScript contracts, reusable CDK constructs, and LocalStack dev tooling.
 
 <Note>
-The repo now tracks **all seven packages** at their current versions —
+The repo now tracks **eight packages** at their current versions:
 `shared-types@1.13.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
-`shared-auth@0.3.0`, `shared-api-auth@0.2.0`, `shared-ui@0.8.0`, and
-`shared-lambda-auth@0.2.0`. (Older snapshots of this doc warned that only three
+`shared-auth@0.3.0`, `shared-api-auth@0.2.0`, `shared-ui@0.8.0`,
+`shared-lambda-auth@0.2.0`, and `aus-db` (LOA-1961 — see below). (Older snapshots of this doc warned that only three
 packages existed on disk and that types like `RelatedTrace` were published-only;
 that is no longer true — `RelatedTrace` lives in `shared-types/src/octy.types.ts`,
 and the `cd.yml` publish matrix releases every package.) The `shared-ui` package
@@ -35,6 +35,7 @@ looks missing.
 | `@loanlight-engineering/shared-api-auth` | NestJS WorkOS auth module (incl. WorkOS Connect M2M methods) | 0.2.0 |
 | `@loanlight-engineering/shared-lambda-auth` | API Gateway authorizer handler | 0.2.0 |
 | `@loanlight-engineering/shared-ui` | Shared React UI components and design tokens (under `packages/ui/`) | 0.8.0 |
+| `@loanlight-engineering/aus-db` | AUS database migration chain + schema copy; locator API for consumers (LOA-1961) | see below |
 
 ## Who consumes what
 
@@ -180,6 +181,36 @@ The audit response/table types (`api-response.types`, `common.types`,
 `urla-completeness.types`) are the original contract surface; the credit, EPC-event,
 octy, role, portal-audits, access-policy, and field-value modules were layered on
 since.
+
+## aus-db: AUS database migration chain and schema
+
+`@loanlight-engineering/aus-db` (LOA-1961) is the single, versioned home for the **AUS database** migration chain and a copy of its Drizzle schema. It is the foundational slice of the Migration Pipeline Phase 2 work (LOA-1960).
+
+```ts
+import { migrationsDir, schemaDir, readJournal, migrationFiles } from "@loanlight-engineering/aus-db";
+
+// Point Drizzle's migrator at the shipped chain:
+await migrate(db, { migrationsFolder: migrationsDir });
+
+// Enumerate the chain (journal order):
+migrationFiles(); // ["0000_initial_schema.sql", ...]
+```
+
+`migrationsDir` and `schemaDir` are absolute paths resolved relative to the installed package so they work regardless of the consumer's working directory.
+
+**Package contents:**
+
+| Path | What it is |
+|---|---|
+| `migrations/` | Ordered Drizzle migration chain — `*.sql` files + `meta/_journal.json` (+ snapshots). The apply order is the journal. |
+| `schema/` | Copy of `loanlight-api/packages/api/src/database/schema/` shipped as raw `.ts` source. |
+| `src/index.ts` | Locator API (`migrationsDir`, `schemaDir`, `readJournal`, `migrationFiles`). |
+
+**Schema copy status:** The `_payloads/` subdirectory (LOA-1990) landed alongside this package and pulls formerly-external type imports inside the schema boundary so the copy becomes self-contained. Until all outward imports are resolved, `schemaDir` should not be compiled directly. The migration chain (the load-bearing artifact) is fully self-contained.
+
+**Known limitation:** The initial seed includes environment-specific seed rows in a small number of migrations (e.g. production lender UUIDs). The registry is private (`publishConfig.access: "restricted"`), the rows carry no secrets, and they are a verbatim copy already in `loanlight-api` git history. Extracting this layer is tracked as LOA-1963.
+
+Consumed by: the API deploy (applies the chain to Int/Prod), the Postgres release docker image build, and Octy (via LOA-1964, not yet wired). Publishing follows the standard bump-to-publish flow in `cd.yml`.
 
 ## shared-cdk: reusable constructs
 

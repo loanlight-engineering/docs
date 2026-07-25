@@ -45,6 +45,26 @@ interface AuthorVersionDto {
 
 `rules` is dynamic jsonb, so the global `ValidationPipe` is intentionally a no-op for these bodies — the service validates the payload shape itself.
 
+### Rule shape
+
+Each rule in a global rule set maps a `classificationType` to a `RoutingRule`:
+
+```ts
+interface RoutingRule {
+  classificationType: string;
+  nameTemplate: string;          // Encompass eFolder name
+  typeTemplate: string;          // EPC container-matching key (system-controlled, not lender-overridable)
+  descriptionTemplate?: string | null;
+  fileNameTemplate?: string | null; // EPC file (resource) name — LOA-1958 (see below)
+  requiredFields: string[];
+  onMissingFields: "fallback_to_default_container" | "degraded";
+}
+```
+
+Per-lender overrides (`LenderRoutingOverride`) can customise `nameTemplate`, `descriptionTemplate`, and `fileNameTemplate`. All three are three-state: absent → inherit global; `null` → explicitly clear (fall back to default); string → override.
+
+**`fileNameTemplate` (LOA-1958):** controls the EPC *file* (resource) name pushed to the Encompass eFolder, independent of the folder `nameTemplate`/`descriptionTemplate`. Supports the same field placeholders as `nameTemplate` plus optional `[...]` segments (a bracketed segment is omitted entirely when its placeholder values are empty, rather than leaving a blank slot). When absent or null on both the global rule and the lender override, the service falls back to a type-based default name. The resolved file name (before extension) is available in `RoutingDecision.fileName` for observability logging.
+
 ## Error responses
 
 | Status | Body | When |

@@ -50,7 +50,7 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | Route | Purpose |
     |---|---|
     | `/admin` | Admin dashboard (stats + audit log). |
-    | `/admin/clients` (+ `/new`, `/[clientId]`) | Lender list + detail. Detail tabs: Overview, Users, Feature Flags, Loan Programs, Rules, Key Field Review, Usage, Guideline Admin, API Keys. Has an "Impersonate" button. |
+    | `/admin/clients` (+ `/new`, `/[clientId]`) | Lender list + detail. Detail tabs: Overview, Users, Feature Flags, Loan Programs, Rules, Key Field Review, Usage, Guideline Admin, API Keys, EPC Credentials. Has an "Impersonate" button. The **EPC Credentials** tab (`client-epc-credentials-tab.tsx`) shows each lender's WorkOS M2M applications (client ID, secret hint, created/last-used), and lets admins mint new credentials (create dialog → one-time secret reveal, copy, or download). The secret is never stored by LoanLight. (LOA-1467) |
     | `/admin/users` | Cross-lender user admin. |
     | `/admin/audit-log` | Global audit log. |
     | `/admin/rule-sets` | Rule-set catalog/status. |

@@ -69,7 +69,11 @@ LOA-1722 removed the `appraisal` and `credit-liabilities` PostHog feature flags.
 </Note>
 
 <Note>
-The credit issue count on the sidebar badge and the Overview credit card is **FAIL-only** (`countCreditFindings` counts `outcome === "FAIL"`; `WARNING`, `NEEDS_INFO`, `PASS`, and `SKIPPED` are excluded). This matches the portal's credit issue count. The detail `CreditLiabilitiesView` still lists FAIL and WARNING in its own findings.
+The appraisal issue count on the sidebar badge (`countAppraisalFindings`) was corrected in LOA-1995. It now reads `complianceResults` (the rules engine) and counts `FAIL` + `WARNING` outcomes. The old path read the enrichment `findings` array, which is legitimately empty on most runs and produced false all-clear badges. Pre-migration-0021 runs where `complianceResults === null` fall back to `findings.length`. Credit issue count is FAIL-only on the badge; `WARNING`, `NEEDS_INFO`, `PASS`, and `SKIPPED` are excluded. The detail `CreditLiabilitiesView` still lists both FAIL and WARNING.
+</Note>
+
+<Note>
+The appraisal review PDF is filed into the Encompass eFolder on every completed audit regardless of the lender's `document_push` flag (LOA-1993). For `document_push`-enabled lenders it routes to the `appraisal_review_summary` container (seeded by migration 020). For non-routed lenders it travels as a bare "AUS Results" resource alongside the AUS report and property PDFs. The EPC inline audit surface should always find the appraisal PDF present on a complete audit.
 </Note>
 
 ## Component conventions

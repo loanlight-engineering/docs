@@ -8,7 +8,9 @@ The partner results viewer is a separate UI under `/results/audits/[auditId]` th
 
 ## Routes
 
-`/results/audits/[auditId]` with sub-routes `1003-check`, `credit`, `data-consistency`, `document-health`, `property-data`, and `exchange`. It renders with `@loanlight-engineering/shared-ui` `Sidebar`/`SidebarLayout` and the "audit-catalyst" theme.
+`/results/audits/[auditId]` with sub-routes `1003-check`, `credit`, `data-consistency`, `document-health`, `property-data`, `appraisal`, and `exchange`. It renders with `@loanlight-engineering/shared-ui` `Sidebar`/`SidebarLayout` and the "audit-catalyst" theme.
+
+The `appraisal` sub-route (`/results/audits/[auditId]/appraisal`) was added in LOA-1994. It renders `AppraisalSection` — the same component the overview's standalone-appraisal branch uses — so both display identically. The sidebar nav shows the appraisal item when a run is linked, the ledger reports pending or failed, or the appraisal fetch failed; it is hidden for audits with no appraisal run. The sidebar badge counts non-passing compliance outcomes (FAIL + WARNING); see [appraisal sidebar counting](#appraisal-sidebar-and-badge).
 
 <Note>
 The `credit` page now renders the shared `CreditLiabilitiesView` component (the same view used by the staff `credit-results` page), so partner and staff credit results stay in sync. Routes are unchanged.
@@ -36,6 +38,14 @@ The `urlaCompleteness` field is tri-state: `null` (not run) vs `{rules_engine_re
 - **Secret:** `PARTNER_RESULTS_JWT_SECRET` (required in prod, with a dev fallback).
 
 A short-lived exchange token is swapped for a view cookie at `/results/audits/[auditId]/exchange`. See [results and access URLs](/partner-api/results-and-access-urls) for the partner-facing exchange flow.
+
+## BFF data routes
+
+The viewer's data API proxies the portal-audits BFF. Each sub-section maps to a Next.js API route under `app/api/v2/audits/[auditRunId]/<section>/route.ts`. The `appraisal` section was added in LOA-1994: `GET /api/v2/audits/[auditRunId]/appraisal` proxies `portalApiClient.get(".../appraisal", ...)` via `proxyPortalAuditsRoute(request, context, "appraisal")`.
+
+## Appraisal sidebar and badge
+
+The appraisal sidebar item is controlled by `resolveAppraisalPresentation()` in `results-data-context.tsx`, which gates on three signals in priority order: (1) the ledger override (`appraisalEvaluation` agent status) — if `not-run`, the item is hidden; (2) `appraisalError` with no payload — the item shows so a failed projection request does not silently disappear; (3) otherwise visibility follows `appraisal != null`. The badge counts non-passing compliance outcomes (`FAIL` + `WARNING` from `complianceResults`), or falls back to `findings.length` for pre-migration-0021 runs. This matches the EPC frontend's `countAppraisalFindings` logic (LOA-1995).
 
 ## Middleware carve-out
 

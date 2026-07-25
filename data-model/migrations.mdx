@@ -139,6 +139,19 @@ Never hand-collapse migrations or hand-edit `meta/_journal.json`, the
 populated local DB, drop and rebuild, clearing the **`drizzle` schema** (not just `public`).
 </Warning>
 
+## aus-db shared package (LOA-1961)
+
+`@loanlight-engineering/aus-db` in `loanlight-shared` is the canonical, versioned distribution of the AUS database migration chain. It was created to make the chain consumable by the API deploy process, the Postgres release docker image, and Octy without each consumer duplicating the SQL files.
+
+The package ships:
+- `migrations/` — the full ordered migration chain (`*.sql` + `meta/_journal.json`).
+- `schema/` — a copy of `packages/api/src/database/schema/`, shipped as raw `.ts` source.
+- A locator API: `migrationsDir`, `schemaDir`, `readJournal`, `migrationFiles()`.
+
+The migration chain is the load-bearing artifact and is fully self-contained. The schema copy depends on the `_payloads/` refactor (LOA-1990) to become fully self-contained; until that work is complete, do not compile against `schemaDir` directly.
+
+Publishing follows the standard bump-to-publish flow. For the full package description, see [shared packages](/ops/shared-packages#aus-db-aus-database-migration-chain-and-schema).
+
 ## Two migration ledgers
 
 Do not confuse:

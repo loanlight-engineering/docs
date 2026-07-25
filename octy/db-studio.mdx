@@ -58,6 +58,18 @@ The client is rendered from `src/components/studio/`:
 - **TableTabManager** — Data / Structure / Metadata tabs per table.
 - **MetadataPanel**, **PreviewPanel**, **StudioLayout** — supporting chrome.
 
+## Prisma Studio
+
+Octy also embeds **Prisma Studio** at `/prisma-studio` (`src/app/(studio)/prisma-studio/`). Unlike the in-house DB Studio, Prisma Studio is the standard Prisma GUI rendered via `@prisma/studio-core` (patched for the Octy deployment via `patches/@prisma__studio-core@0.33.0.patch`). It connects through a dedicated read-only Postgres session defined in `src/lib/prisma-studio-db.ts`, which passes `options: "--set=default_transaction_read_only=on"` so every query runs inside a read-only transaction by default.
+
+A server-side guard (`src/lib/prisma-studio-guard.ts`, `assertReadOnlySession`) rejects tamper attempts before execution:
+
+- Queries containing `transaction_read_only` — blocks `SET`/`RESET`/`set_config` on the session flag.
+- Queries containing `\bREAD WRITE\b` — blocks explicit `BEGIN READ WRITE` or `SET TRANSACTION READ WRITE`.
+- Queries containing `pg_terminate_backend` — blocks connection abuse.
+
+Prisma Studio complements the in-house DB Studio: the in-house tool offers a richer filter/FK-expansion UI, an ER diagram, and a command-K palette; Prisma Studio provides the table browser most engineers already know from the Prisma ecosystem. Both are int-only; the middleware applies the same `@loanlight.com` WorkOS domain gate to `/prisma-studio` as it does to `/db-studio`. The API proxy route lives at `src/app/api/prisma-studio/route.ts`.
+
 ## Related pages
 
 <Columns cols={2}>
