@@ -174,6 +174,10 @@ Audit errors. `404` if not found/owned. Backed by `auditService.getAuditErrors` 
 Per-agent failures are recorded here but do **not** fail the run — the audit still completes. `failAuditRun` is reserved for infrastructure failures. A `complete` audit can still carry errors. See [lifecycle and dedup](/pipeline/lifecycle-and-dedup).
 </Note>
 
+<Warning>
+**A `failed` audit can have an empty `errors` list and `canRetry: false` on process loss (TD-040).** When a worker is killed mid-audit by an OOM, container exit, or deploy interruption, the run is terminalized by a cron reaper that writes the `failed` status but does not insert an `audit_errors` row. The result is a run with `status: "failed"`, an empty `errors` array, and `canRetry: false` — indistinguishable from a permanent data or rules failure. Operators can correlate the cause from an OOM log entry and a later cleanup warning in server logs, but the caller cannot. A fresh resubmission is required to recover. The same reaper path affects the partner error endpoint: the reaper records its reason on an `agent_runs` column that is never read by the error endpoint projection.
+</Warning>
+
 ## GET /api/v1/partner/audits/:auditId/classifications
 
 Document classifications for the run. `404` if not found/owned. Returns a `ClassificationsResponseDto` built by `buildClassificationsResponse(classifySplitPersistence.getClassificationsWithRun(auditId))`. See [classify-split](/subsystems/classify-split) for what classification produces.

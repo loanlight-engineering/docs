@@ -108,6 +108,8 @@ Public paths (shared-auth `PUBLIC_PATHS`): `/login`, `/api/auth/login`, `/api/au
 
 `ensureCsrfCookie` requires the `WORKOS_REDIRECT_URI` env at runtime.
 
+As of LOA-1992 (#3068), all 20 mutating route handlers under `packages/app/src/app/api/admin/clients/[clientId]/**` call `validateCsrf(cookieToken, headerToken)` and return `403` on a mismatch, before any auth or body handling. A family-wide test file (`[clientId]/__tests__/csrf.route.test.ts`) covers absent header, mismatched header, and valid pair for every handler. The `epc-credentials POST` was hardened earlier in LOA-1467; LOA-1992 closes the remaining gap across the family.
+
 ## Session cookies and E2E mock auth
 
 - `WORKOS_ACCESS_TOKEN_COOKIE_NAME = "workos-access-token"` is used directly only in E2E mock mode; in production the access token lives inside AuthKit's sealed session.

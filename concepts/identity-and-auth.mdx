@@ -44,6 +44,15 @@ The methods are `ensureM2MApplication(orgId, name)` (find-or-create, `applicatio
 This is an additive foundation in `shared-api-auth`. As of this window it is not yet consumed by `loanlight-api`, so no live auth surface mints per-lender M2M credentials yet.
 </Note>
 
+## User lifecycle wrappers (shared-api-auth 0.3.0)
+
+`shared-api-auth@0.3.0` (LOA-1500, loanlight-shared #110) adds two user lifecycle methods to `ApiAuthService`:
+
+- `deleteWorkosUser(workosUserId: string): Promise<void>` — calls `workos.userManagement.deleteUser`. Hard-deletes the WorkOS user record.
+- `createPasswordReset(email: string): Promise<void>` — calls `workos.userManagement.createPasswordReset({ email })`. WorkOS sends the reset email directly (the same AuthKit email path as `sendInvitation`); the returned `PasswordReset` object is discarded.
+
+Neither method is consumed by `loanlight-api` yet (it pins `shared-api-auth@0.2.0`). They are published for an upcoming user-management flow.
+
 ## OCTY_INTERNAL_API_KEY
 
 Octy calls the AUS backend over an internal NLB using a shared secret. The `InternalApiKeyGuard` reads `INTERNAL_API_KEY` from config and compares the `x-internal-api-key` header with `crypto.timingSafeEqual`.

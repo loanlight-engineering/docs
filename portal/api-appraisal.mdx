@@ -113,6 +113,10 @@ The BFF proxy is `POST /api/appraisal/[runId]/export`.
 
 `appraisal.processor.ts` drives the BullMQ extraction queue. After the first extraction pass it runs ATTOM enrichment, then re-runs the pipeline with `enrichmentData`. Because delivery is at-least-once, the processor claims work with a CAS transition `pending → running`.
 
+<Warning>
+**`completed` status does not mean all enrichment stages ran (TD-026).** Eight post-extraction stages (deny-list matching, proximity, loan context, eligibility and CRED\_024 regrade, SSR scores, custom rules, findings generation, and cross-document validation) each catch their own failures and continue — the correct fail-soft behavior for a long-running job. There is no unified per-stage outcome record. A run that completed normally and a run that completed minus several stages are indistinguishable from the `status` field alone. Only three of the eight stages leave any persisted trace, via different mechanisms (`error_message` string, `enrichmentData._errors`, and a `crossDocValidation` marker). A missing finding therefore means either the rule passed or the stage that produces it never executed — there is currently no way to distinguish them from persisted state.
+</Warning>
+
 The only appraisal orphan reaper is `sweepOrphanedRuns` in the processor. It runs at boot and on `APPRAISAL_ORPHAN_SWEEP_INTERVAL_MS`, keys off `started_at`, consults Bull live jobs before reaping, and emits an `appraisal.orphan_runs_reaped` event.
 
 <Note>
