@@ -164,5 +164,14 @@ retrieval"` is hardcoded on **every** request regardless of caller — it is a m
 label.
 </Note>
 
+<Note>
+**LlamaCloud retrieval queries are not charged.** LlamaCloud confirmed (2026-07-27) that retrieval
+queries carry no credit cost. The `recordLlamaRetrievalQuery` / `recordLlamaRetrievalFailure`
+helpers and their call sites in `langgraph/utils/retrieval.tools.ts` were removed in LOA-997
+(#3078). Pre-LOA-997 `agent_runs.cost` rows may contain `estimated: true` retrieval credit lines
+from the previous client-counted guess; those lines overstated spend and are not written on new runs.
+`totals.estimatedUsd` reads `$0` from retrieval on all runs after the change.
+</Note>
+
 Continue to [retrieval tools and PII scoping](/subsystems/retrieval-tools-and-scoping) for the
 LangChain tools and the deterministic `file_id` + page-range push-down.

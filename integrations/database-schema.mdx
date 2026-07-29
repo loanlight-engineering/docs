@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 023 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 026 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -43,6 +43,8 @@ The current schema has **14 tables**. Migration `001_baseline_schema.sql` create
 || `022_drop_epc_delivery_records` | drops `epc_delivery_records` table and `transaction_state.delivery_cancelled_after` column (LOA-1678) |
 || `023_seed_bank_statement_income_asset_routing` | DML: seeds 6 suffixed bank-statement routing types (`bank_statement_personal_asset/income`, `bank_statement_business_asset/income`, `bank_statement_income_asset/income`) into the active global config (LOA-1825 #504) |
 || `023_add_lender_api_lender_id` | `lender.api_lender_id` column (text, nullable) + partial UNIQUE index `WHERE api_lender_id IS NOT NULL`; secondary identity key so the lender consumer can match a legacy lender (no `workos_org_id`) by the API's own stable `lenders.id` (LOA-1015 follow-up) |
+|| `025_add_assigned_container_to_transaction_document` | `transaction_document.assigned_container_id` + `assigned_container_name` — the eFolder a document was filed in at ingestion; used by the delivery-decision logic (LOA-1979) |
+|| `026_add_delivery_decision_to_document_push_record` | `document_push_record.content_hash` (SHA-256 of source bytes) + `delivery_decision` (`new` \| `refile` \| `skip_already_filed` \| `skip_duplicate_delivery`); partial index on `(transaction_record_id, content_hash) WHERE content_hash IS NOT NULL` (LOA-1980) |
 || `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
@@ -154,6 +156,8 @@ One row per S3 file. UNIQUE `(transaction_state_id, doc_id)`.
 | `parent_doc_id` | text, nullable (added in 021). The `doc_id` of the parent EPC resource when this row is a synthetic member extracted from an appraisal package (UAD XML, appraisal PDF, or image). `NULL` for top-level documents. |
 | `member_role` | text, nullable, CHECK `member_role_check` (added in 021). Role of an extracted member: `uad-xml` \| `appraisal-pdf` \| `image` \| `ssr-json` \| `package`. Only `uad-xml` and `appraisal-pdf` are delivered into the audit; images and the raw ZIP are persisted only. |
 | `urn_type` | text, nullable (added in 021). The EPC resource `type` URN of the originating partner resource (e.g. UAD 3.6 package URN or UCDP SSR URN). Copied from the source resource for member traceability. |
+| `assigned_container_name` | text, nullable (added in 025, LOA-1979). Display name of the eFolder this document was sitting in at the time it was fetched from Encompass. This is the **comparison key** for the delivery-decision live check — matched by name against the routed container. NULL for unfiled documents and for rows written before migration 025. Refreshed on every re-fetch (`ON CONFLICT DO UPDATE`), which lets the live check self-heal between re-audits. |
+| `assigned_container_id` | text, nullable (added in 025, LOA-1979). Prod Encompass eFolder GUID (`assignedTo.id`). **Support/debug reference only** — instance-specific, not stable across folder renames/recreation, and has no relationship to routing `typeTemplate` slugs. Never used for delivery decisions. |
 
 ### document_push_record
 
@@ -169,6 +173,8 @@ Backs the document-push pipeline (see [Messaging](/integrations/messaging)). UNI
 || `routing_config_version`, `routing_config_lender_version` | added in 015; stamp the governing global / per-lender routing-config version on each push (`routing_config_lender_version` is NULL when no lender override applied) |
 || `outcome` | added in 020 (LOA-1715); routing resolver decision: `mapped` \| `unmapped` \| `missing_fields_fallback` \| `degraded` \| `no_config`. NULL on records predating the column. |
 || `missing_fields` | added in 020 (LOA-1715); `text[]` of required template fields that were absent (populated when `outcome` is `missing_fields_fallback` or `degraded`). |
+|| `content_hash` | added in 026 (LOA-1980); SHA-256 of the source document's bytes, carried from `documents.classified`. Stable across re-audits when bytes are unchanged — the key of the cross-run delivery dedup ledger. NULL for carved splits and on rows written before migration 026. |
+|| `delivery_decision` | added in 026 (LOA-1980); the skip/deliver/re-file answer for this document: `new` \| `refile` \| `skip_already_filed` \| `skip_duplicate_delivery`. NULL on pre-existing rows, which predate the feature and were all genuine deliveries. Not enforced by a `CHECK` constraint (same pattern as `outcome`) — the repository guards the read and coerces unknown values to NULL. |
 || `epc_resource_id`, container columns, error columns | |
 
 <Note>

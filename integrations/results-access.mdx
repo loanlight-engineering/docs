@@ -116,6 +116,8 @@ best-effort by contract — it never fails the audit. The consumer also publishe
 
 `fetchClassifications` returns a validated array via `classifications.schema.ts`; a fetch failure (network / 5xx / schema) **throws** so the SQS message redelivers (transient recovers, persistent → DLQ), while a genuinely empty response returns `[]` and the message is consumed with nothing to push.
 
+**LOA-1978 — `sourceEncompassDocId` on classifications:** Each classification row now includes `sourceEncompassDocId`, which is `loan_documents.encompass_attachment_id` — the id of the source EPC resource (`Resource.id`, a `B2.<guid>`). This is the correct join key for matching a classified segment back to the `transaction_document` row it came from. `originalDocId` (`loan_documents.id`) is an api-internal id and has no relationship to Encompass resource ids. `sourceEncompassDocId` is null for partner-upload-origin documents and is `nullish` (can be absent) on older api builds, so consumers must handle both cases.
+
 ## Encompass loan details on the results fetch
 
 `GET /api/v1/audit_runs/:id/results` accepts `includeEncompassLoanDetails=true`. The

@@ -37,16 +37,27 @@ All dollar values in the response are projected via the **largest-remainder cent
 | Field | Notes |
 |---|---|
 | `totals.usd` | Sum over priced, non-estimated lines. |
-| `totals.estimatedUsd` | Sum over client-counted lines (LlamaCloud retrieval; marked `estimated: true`). |
+| `totals.estimatedUsd` | Sum over client-counted lines (marked `estimated: true`). As of LOA-997, LlamaCloud retrieval is **not charged**, so `estimated: true` lines are no longer written for retrieval. `estimatedUsd` reads `$0` from retrieval on new runs; historical rows from before LOA-997 may still contain retrieval estimates. |
 | `totals.interactiveUsd` | Spend from interactive/comment-chat calls (`interactive: true`); included in the above totals but broken out so consumers can split pipeline cost from on-demand. |
 | `totals.unknownLines` | Billed-but-unquantifiable events (LLM errors, responses with no usage payload). Never zero-priced. |
 | `totals.runCount` | Distinct (day, source, lender) tuples with captured spend. |
 | `totals.todayUsd` | Spend since UTC midnight today, same lender/agent scope regardless of the selected range — a cockpit vital sign. |
 | `byVendor[]` | Per-vendor `{ vendor, usd, estimatedUsd, calls }`. |
-| `byOp[]` | Per-vendor · operation/model drill-down `{ vendor, op, usd, calls, credits, tokens, estimated, interactive }`. |
+| `byOp[]` | Per-vendor · operation/model drill-down `{ vendor, op, usd, calls, credits, tokens, pages, estimated, interactive }`. LlamaCloud index lines now include `pages` (vendor-reported `pages_indexed` sum, LOA-997). |
 | `byDay[]` | Trend series bucketed per `bucket` with per-vendor splits: `{ day, usd, vendors: Record<vendor, usd> }`. |
 | `byLender[]` | Per-lender `{ lenderId, lenderName, usd }`. |
 | `bySource[]` | Per-source-label `{ source, usd }` (source = `agent_type` or `infra:<capability>`). |
+
+### Run-level cost insights (octy #97)
+
+The **Vendor Costs** dashboard also surfaces run-level analytics computed at query time over both ledgers:
+
+- **Costliest runs** — top 5 runs by total cost, each with its top-3 cost drivers inline (including page counts where available). Deep-links to `/audit-runs?q=<id>&audit=<id>`.
+- **Run cost distribution** — a static-bucket histogram (`<$2 / $2–$5 / $5–$10 / $10–$20 / $20+`) plus an interpolated median, p95, and max.
+- **Outliers** — amounts render amber and bold when above the p95 threshold (range-scoped on the dashboard; a trailing-30d `percentile_cont` baseline is used in the audit-runs table).
+- **Sortable Cost column** — the audit-runs table can now sort by a per-run sum over both ledgers (`totalUsd + estimatedUsd`), probe-gated with a date fallback on pre-migration-0270 databases.
+- **Indexing unit economics** — dollars-per-page per trend bucket. Buckets where no page counts have been captured appear as gaps, never as $0.
+- **Avg \$/run** — per source label and per lender, using exact distinct-run counts.
 
 ### Vendor vocabulary
 
