@@ -73,6 +73,8 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     - linked per-agent runs: Appraisal (`/appraisal/[runId]`), Income (`/income/[runId]`)
 
     Sidebar and overview issue counts must come from the v2 `useResultsData()` projections (`dataConsistency.issueCount`, `documentHealth.issueCount`, `propertyData.redFlags.length`, `urlaCompleteness.rules_engine_result.summary.failed_count`). The "Errors" card/route was removed.
+
+    **Eligibility card (LOA-2032):** mounted as the first card on the overview, behind an access gate. The gate combines the lender's `eligibility_card` flag state with whether the viewer is a super-admin (`canSeeEligibilityCard`). It is resolved server-side by `GET /api/eligibility-card-access` (a Next.js route handler that reads the lender's feature flag and the viewer's WorkOS session) and fails closed — the card is hidden on any error or missing session. Impersonation fail-closes the gate: `GET /api/eligibility-card-access` derives `viewerIsSuperAdmin` from the live session, and the impersonating user is not a super-admin in the target lender's context. The card renders verdict fields (`effectiveMaxLtv`, `appliedCaps`, `appliedReductions`) from `GET /api/v2/audits/:auditRunId/eligibility`; see [audit results API](/portal/api-audit-results). The card is read-only; the full v1 flow (LOA-1966) is a later milestone.
   </Tab>
 </Tabs>
 
@@ -83,6 +85,10 @@ The `(auth)` group (`/login`, `/invite`, `/reset-password`) is unauthenticated a
 The `FeatureFlags` object (`src/lib/feature-flags.ts`) has these keys:
 
 `classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`.
+
+<Note>
+The **eligibility card** is **not** in this `FeatureFlags` object. Its visibility depends on both the lender's `eligibility_card` flag (a tri-state `off` / `internal` / `on` stored in `feature_value` on `lender_feature_flags`) and the viewer's super-admin status. It is resolved server-side via `GET /api/eligibility-card-access`, separate from the env-default `FeatureFlags` flow. See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements).
+</Note>
 
 `getFeatureFlags(lenderId)` GETs the backend `/lenders/${lenderId}/feature-flags`, which returns `{ featureKey, enabled }[]`; the result is transformed via `KEY_MAP` onto an env-default base. An empty array or any failure falls back to `getEnvDefaults()`.
 

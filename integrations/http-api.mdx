@@ -156,6 +156,7 @@ Response shape (`DocumentRoutingOutcomesResponse`):
       "routingConfigLenderVersion": null,
       "state": "attached",
       "epcResourceId": "...",
+      "deliveryDecision": "new",
       "errorMessage": null,
       "errorStep": null,
       "createdAt": "2026-07-07T15:00:00.000Z",
@@ -165,7 +166,11 @@ Response shape (`DocumentRoutingOutcomesResponse`):
 }
 ```
 
-`outcome` values: `mapped` | `unmapped` | `missing_fields_fallback` | `degraded` | `no_config` | `null` (null on records predating migration 020). `outcomes` returns the **latest** push outcome per document across the whole loan — it is not scoped to one specific run, because `document_push_record` links to `transaction_record` (not `transaction_state`) and is overwritten per re-push. Octy joins each outcome by `s3Key` to the classification it is rendering.
+`outcome` values: `mapped` | `unmapped` | `missing_fields_fallback` | `degraded` | `no_config` | `null` (null on records predating migration 020).
+
+`deliveryDecision` values (LOA-1981): `new` | `refile` | `skip_already_filed` | `skip_duplicate_delivery` | `null`. `null` on records predating migration 026 — those were all genuine deliveries. The two `skip_*` decisions are **terminal `completed`** rows with a null `epcResourceId`; they must not be rendered as errors. A skip means the file was either already in its routed folder (`skip_already_filed`) or a previous run already delivered it (`skip_duplicate_delivery`) — no bytes were moved either way.
+
+`outcomes` returns the **latest** push outcome per document across the whole loan — it is not scoped to one specific run, because `document_push_record` links to `transaction_record` (not `transaction_state`) and is overwritten per re-push. Octy joins each outcome by `s3Key` to the classification it is rendering.
 
 ## Admin and health
 

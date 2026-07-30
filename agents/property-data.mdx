@@ -22,7 +22,7 @@ The `ConsolidatedProperty` objects this agent produces are the primary input to 
 __start__ → extractAddresses → validateAddresses
   validateAddresses → fetchProperty   (Zillow URL + HasData scrape + ATTOM property, bundled)
   validateAddresses → fetchHazard     (ATTOM natural-hazard)
-  validateAddresses → fetchRedfin     (Redfin gap-fill; gated by ENABLE_REDFIN_SOURCE, default OFF)
+  validateAddresses → fetchRedfin     (Redfin gap-fill; gated by ENABLE_REDFIN_SOURCE; enabled in int + prod since LOA-2091)
   fetchProperty / fetchHazard / fetchRedfin → consolidate   (true barrier join)
   consolidate → aggregate → __end__
 ```
@@ -71,10 +71,8 @@ a REO loop per `reoAddresses`.
 channels, disjoint from the instrumentation channel.
 </Step>
 
-<Step title="fetchRedfin (gated, off by default)">
-A no-op unless `ENABLE_REDFIN_SOURCE === "true"`. When enabled, resolves a redfin.com URL via the
-site-aware SerpApi finder, then calls `hasData.getRedfinPropertyDetails(url)`. A null result
-degrades to a no-op merge.
+<Step title="fetchRedfin (enabled in int + prod)">
+Gated by `ENABLE_REDFIN_SOURCE === "true"`. Since LOA-2091 this variable is set `"true"` in integration and production environments — the step is no longer off by default. When active, it resolves a redfin.com URL via the site-aware SerpApi finder, then calls `hasData.getRedfinPropertyDetails(url)`. A null result degrades to a no-op merge. The Redfin merge is additive-only: `mergeRedfin()` never overwrites a non-null incumbent from HasData/Zillow or ATTOM.
 </Step>
 
 <Step title="consolidate">

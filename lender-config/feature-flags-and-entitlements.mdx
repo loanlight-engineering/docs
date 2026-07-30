@@ -44,6 +44,7 @@ There is **no central enum or registry of feature keys**. Each consuming module 
 | `APPRAISAL_VIA_ROUTER` | gate | Route appraisal via the agent router | `portal-appraisal.service.ts` |
 | `review_confidence_threshold` | stored value | Appraisal review confidence threshold (uses `feature_value`) | `portal-appraisal.service.ts` |
 | `income_review_confidence_threshold` | 0.85 | Income review confidence threshold (uses `feature_value`, parsed 0..1) | `portal-income/services/income-review.service.ts` |
+| `eligibility_card` | `off` (absent row) | Program eligibility card on the staff audit overview (LOA-2032). **Tri-state** stored in `feature_value`: `off` \| `internal` (super-admins only) \| `on` (all viewers). `enabled` is ignored; only `feature_value` is read. Gate: `canSeeEligibilityCard(flagState, viewerIsSuperAdmin)`. Impersonation fail-closes the card. | `packages/app/src/lib/eligibility-visibility.ts` |
 
 ### Thresholds via `feature_value`
 

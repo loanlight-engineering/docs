@@ -121,6 +121,27 @@ splits across two mode behaviors.
   Since LOA-1340 (#2659), each segment also exposes `originalS3Ref` (the source
   `loan_documents.storage_path`) and `contentHash` (SHA-256 dedup key, LOA-1102) — the fields
   integrations needs to carve and route classified splits.
+
+  Each segment carries a flat `ShapedDocumentMetadata` bag produced by `shapeExtractedMetadata` from
+  the `document_classifications.extracted_metadata` column. Current fields:
+
+  | Field | Source document type | Notes |
+  |---|---|---|
+  | `institution` | bank statement | |
+  | `account_last_4` | bank statement | comma-joined when multiple |
+  | `statement_period_start` | bank statement | ISO `YYYY-MM-DD`; omitted when absent (LOA-1970) |
+  | `statement_period_end` | bank statement | ISO `YYYY-MM-DD`; omitted when absent |
+  | `employer_name` | paystub / W-2 | W-2 wins if both present |
+  | `pay_period_start` | paystub | ISO `YYYY-MM-DD`; omitted when absent (LOA-1970) |
+  | `pay_period_end` | paystub | ISO `YYYY-MM-DD`; omitted when absent |
+  | `tax_year` | tax form | |
+  | `property_address` | property-related | |
+
+  `statement_period_start` and `pay_period_start` were added in LOA-1970 (#3173). Both values were
+  already extracted and stored in `extracted_metadata`; this promotes them into the flat shaped bag.
+  As a side effect, these two fields became new selectable routing tokens in the portal routing-config
+  editor (`routing-catalog.fields.ts` is typed `Record<keyof ShapedDocumentMetadata, RoutingFieldMeta>`,
+  so widening the interface automatically adds the tokens).
 - **`loanlight.documents.classified` event** — Since LOA-1340 (#2659) this is a **thin trigger**: the
   event carries only `{loanId, auditRunId, encompassLoanId, clientId}` — no embedded `documents[]`
   array. This permanently removes the EventBridge 256 KB per-entry cliff that previously risked

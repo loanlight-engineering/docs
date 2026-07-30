@@ -54,6 +54,7 @@ Controller: `portal-audits/portal-audits.controller.ts` at `api/v1/portal/audits
 | `GET /api/v1/portal/audits/:auditId/urla-completeness` | URLA completeness section |
 | `GET /api/v1/portal/audits/:auditId/checks-completed` | Checks-completed section |
 | `GET /api/v1/portal/audits/:auditId/credit` | Credit section |
+| `GET /api/v1/portal/audits/:auditId/eligibility` | `EligibilityFindingsResponse` — verdict fields (`auditRunId`, `findings[]`) from `eligibility_results`; surfaced as `effectiveMaxLtv`, `appliedCaps`, `appliedReductions` on each finding. Consumed by the portal eligibility card (LOA-2032). No migration — reads pre-existing `eligibility_results` rows. |
 | `GET /api/v1/portal/audits/:auditId/errors` | `PortalAuditErrorsResponse` |
 | `GET /api/v1/portal/audits/:auditId/documents/by-name/:filename/pdf` | Document PDF by name |
 
