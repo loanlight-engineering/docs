@@ -143,6 +143,62 @@ Two tables store authoring state for the eligibility system:
 
 This log event (LOA-1957) replaced two silent `return null` paths that were previously byte-identical in Datadog to an applied lender with zero findings. An unapplied lender is a deploy state, not a fault — hence `warn` not `error`.
 
+### Program input manifest (LOA-1967)
+
+Migration `0282` adds a nullable `input_manifest` jsonb column to `eligibility_configs`. A **program input manifest** declares, per program and per eligibility check, every input the LTV engine reads: where each value comes from, whether it is raw or derived, what effect it applies, and which source wins when more than one can supply it.
+
+The manifest is a **sibling** to the rest of `eligibility_configs` — parsed by its own Zod schema (`ProgramInputManifestSchema` in `database/schema/_payloads/eligibility-input-manifest.types.ts`) independently of `EligibilityConfigSchema`. A malformed manifest degrades the provenance card for the affected program without breaking the lender's grade.
+
+<Note>
+`NULL` is the normal state until a lender's adopter ticket stages a manifest. Eligibility grading continues without one but cannot produce a data-provenance card.
+</Note>
+
+**Schema shape.** The manifest carries `{ version: 1, programs: Record<string, ProgramChecks> }`. Version is pinned to `1`; a future shape change produces a hard parse failure on old rows and a 400 on write. Program codes are open lender vocabulary (not a closed union).
+
+Each program declares exactly one check key today. `ProgramChecks` is `{ LTV: { inputs: ProgramInput[], stacking: StackingConfig } }`. The `LTV` check is the only supported check in v1; additional checks extend this object.
+
+**Input sources (precedence = array order):**
+
+| Tag | Supplied by |
+|---|---|
+| `LOS` | LOS-delivered loan metadata (MISMO XML) |
+| `APPRAISAL_AGENT` | Appraisal-Evaluation agent output |
+| `CREDIT_AGENT` | Credit-Evaluation agent output |
+| `INCOME_AGENT` | Income agent output |
+| `LEASE_OR_FORM_1007` | Lease or Form 1007 extracted data |
+| `USER_PROVIDED` | Reviewer-entered override (ships with LOA-1987; until then a `USER_PROVIDED`-only input is a blocking gradability deferral) |
+
+**Input effects:**
+
+| Effect | Meaning |
+|---|---|
+| `SELECT` | Picks the LTV grid row. No magnitude. |
+| `CAP` | Applies a `min()` ceiling to effective max LTV. Requires a `magnitude`. |
+| `REDUCE` | Subtracts from effective max LTV. Requires a `magnitude`. Multiple REDUCE inputs stack; mode is `ADDITIVE` in v1. |
+| `DISQUALIFY` | Ends the program outright. No magnitude. Optional `appliesWhen` gate. |
+
+**Magnitude types** (for `CAP` and `REDUCE`):
+- `FIXED` — `{ type: "FIXED", valuePct: number }`. LTV percentage points, bounded `[0, 100]`.
+- `BANDED` — `{ type: "BANDED", axis: string, bands: MagnitudeBand[] }`. A step function that reads a numeric loan attribute (`axis`) and maps it to an LTV point value. Each band carries inclusive `min`/`max` bounds and a `valuePct`. Gaps between bands mean no magnitude in that range. Overlapping bands are rejected at the persistence boundary.
+
+**Provenance.** Every input carries a `provenance` discriminated union:
+- `{ kind: "RAW" }` — value comes directly from a declared source.
+- `{ kind: "DERIVED", derivation, derivedFrom: string[] }` — value is computed from operand input codes. Derivations: `DSCR | BANK_STATEMENT_INCOME | DTI | ASSET_SUFFICIENCY | VALUE_BASIS`.
+
+**Gradability.** `manifestGradability(manifest, program, check)` (`lib/loan-eligibility/input-manifest.ts`) returns whether the manifest can be graded for `program` + `check` and lists any deferrals. Blocking deferrals prevent grading entirely:
+
+| Deferral kind | Blocking | Triggered when |
+|---|---|---|
+| `NO_MANIFEST` | Yes | Column is null |
+| `PROGRAM_NOT_DECLARED` | Yes | Program code absent from manifest |
+| `NO_INPUTS_DECLARED` | Yes | `inputs` array is empty |
+| `USER_PROVIDED_ONLY` | Yes | An input has no system source (LOA-1987 pending) |
+| `USER_PROVIDED_SECONDARY` | No | `USER_PROVIDED` is present alongside a system source |
+| `UNRESOLVED_DERIVED_FROM` | Yes | A `derivedFrom` operand is not declared, or the operand chain loops |
+| `UNKNOWN_AXIS` | No | An `axis`, `magnitude.axis`, or `appliesWhen.axis` is outside the engine's emitted vocabulary |
+
+The helper is pure — it never logs, never throws, and never influences grading. It returns a report; the caller acts on it.
+
 ### Staged eligibility bundles (super-admin)
 
 A controller under `portal-eligibility-rules/staged-bundles` mounts at `api/v1/portal/admin`. Class-level `@Roles("super_admin")`. Staged bundles are pre-defined eligibility configs that internal staff apply to a lender in one atomic transaction — the `apply` endpoint writes both the `eligibility_rule_set`/`eligibility_rules` and the `eligibility_configs` row together.

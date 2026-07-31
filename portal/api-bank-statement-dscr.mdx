@@ -39,7 +39,7 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `GET /api/v1/portal/bank-statements/:id/summary` | read+ | Get AI summary |
 | `GET /api/v1/portal/bank-statements/:id/income-analysis` | read+ | Income analysis |
 | `POST /api/v1/portal/bank-statements/:id/income-analysis/recompute` | client_admin, client_user | Recompute (HTTP 200, throttle 10/min) |
-| `GET /api/v1/portal/bank-statements/:id/recurring-expenses` | read+ | Recurring-expense detection (#2517) |
+| `GET /api/v1/portal/bank-statements/:id/recurring-expenses` | read+ | Recurring-expense detection (LOA-1816–1824, #3166) |
 | `POST /api/v1/portal/bank-statements/:id/large-deposit-overrides` | client_admin, client_user | Force/suppress a deposit flag (`CreateLargeDepositOverrideDto`, HTTP 201, throttle 30/min) |
 | `DELETE /api/v1/portal/bank-statements/:id/large-deposit-overrides/:transactionId` | client_admin, client_user | Remove an override (throttle 30/min) |
 | `PATCH /api/v1/portal/bank-statements/:borrowerFileId/transactions/:transactionId/category` | client_admin, client_user | Override a single transaction's category (`PatchTransactionCategoryDto { category, reason }`, HTTP 200). Writes `transaction_category_overrides`; `transactions.category` is immutable (the override is a separate row). |
@@ -80,6 +80,47 @@ Finding signatures (`lib/bank-statement/finding-signature.ts`) now exclude volat
 </Note>
 
 `large-deposit-overrides` carries `{ transaction_id, mode }` where `mode` is `force` (surface a deposit the detector missed) or `suppress` (hide an auto-flagged one); flagging is decoupled from income inclusion. `statements/add` keys must sit under the file's own `bank-statements/{id}/` prefix and the combined batch stays within the 50-file ceiling. These overrides are the same `large_deposit` records the [Statement Analyzer](/portal/statement-analyzer) projects read-only onto an asset run.
+
+#### Recurring expenses
+
+The `GET :id/recurring-expenses` endpoint returns active recurring-expense groups detected from Plaid-enriched debit transactions (LOA-1816–1824, PR #3166). It is gated on `ENABLE_RECURRING_EXPENSES === "true"` and returns `403 { error: "RECURRING_EXPENSES_DISABLED" }` when the flag is off.
+
+The `recurring_expenses_available` field on the `GET :id` detail response controls whether the portal renders the **Expenses** tab; it is `true` only when `status === "completed"` and `ENABLE_RECURRING_EXPENSES` is on.
+
+**Response shape:**
+
+```json
+{
+  "total_monthly_amount": 2645.00,
+  "groups": [
+    {
+      "id": "<uuid>",
+      "name": "James Landlord",
+      "category": "TRANSFER_OUT_WITHDRAWAL",
+      "avg_monthly_amount": 2000.00,
+      "total_amount": 4000.00,
+      "periodicity_label": "monthly",
+      "periodicity_in_days": 30.44,
+      "transaction_count": 2,
+      "first_transaction_date": "2025-01-01",
+      "most_recent_transaction_date": "2025-02-01",
+      "transactions": [
+        {
+          "id": "<uuid>",
+          "date": "2025-01-01",
+          "description": "ZELLE PAYMENT TO JAMES LANDLORD",
+          "amount": 2000.00,
+          "account_last4": "1234"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`total_monthly_amount` sums only groups with a positive `periodicity_in_days` (cadence-confirmed groups). The monthly figure for each group uses canonical occurrences-per-month for the matched cadence bucket, not the raw median gap, to avoid over- or under-stating the obligation.
+
+See [Recurring expense tables](/data-model/financial-data-model#recurring_transaction_groups-and-recurring_transaction_group_members) for the full detection admission tiers and the DB schema.
 
 #### POST /api/v1/portal/bank-statements/enqueue
 

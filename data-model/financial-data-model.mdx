@@ -187,6 +187,44 @@ This `findings` table is the **bank-statement** family ledger (FK to `borrower_f
 
 Auto large-deposit findings are `DELETE`+`INSERT`-recomputed on every recompute, so overrides live in this dedicated table and are re-applied after each pass: the effective flag set is auto ∪ `force` − `suppress`.
 
+### recurring_transaction_groups and recurring_transaction_group_members
+
+`recurring-transaction-groups.ts` (migration `0283`, LOA-1816–1824, PR #3166). Recurring-expense detector output store for a `borrower_files` row. Rows are DELETE+INSERT-recomputed on every borrower-file recompute (mirroring `recomputeLargeDepositFindings`), so consumers must expect the id set to churn.
+
+**`recurring_transaction_groups`** — one row per detected recurring-obligation group.
+
+<ParamField path="borrower_file_id" type="uuid → borrower_files (cascade)" />
+<ParamField path="account_number_masked" type="text">Optional last-4 account scoping. Used to scope groups per account on the Expenses tab.</ParamField>
+<ParamField path="merchant_display_name" type="text NOT NULL">Resolved merchant name. On transfer-rail rows (Zelle, ACH, wire), Plaid's `merchant_name` resolves to the rail itself, so the name is extracted from the memo instead. An LLM cleanup pass (`ENABLE_MERCHANT_NAME_CLEANUP === "true"`) infers a cleaner name from raw descriptions when Plaid provided none.</ParamField>
+<ParamField path="merchant_normalized" type="text NOT NULL">Bucketing key used during detection — typically the Plaid-resolved merchant or a normalized memo token.</ParamField>
+<ParamField path="periodicity_type" type="recurring_periodicity_type (pgEnum) NOT NULL">`weekly | biweekly | semimonthly | monthly | quarterly | annual`. Loan payments admitted from a single occurrence are presumed `monthly`.</ParamField>
+<ParamField path="periodicity_days" type="numeric(8,2) NOT NULL">Observed median inter-payment gap in days. Presumed-monthly loan payments store `30.44`.</ParamField>
+<ParamField path="average_amount" type="numeric(18,2) NOT NULL">Per-occurrence average amount (median-based for collapsed loan buckets that span a wide amount spread).</ParamField>
+<ParamField path="monthly_amount" type="numeric(18,2) NOT NULL">Normalized monthly figure: `average_amount × canonical occurrences/month` for the matched cadence bucket.</ParamField>
+<ParamField path="confidence_score" type="numeric(3,2) NOT NULL">Detection confidence 0–1. Cadence-confirmed groups score 0.6–0.9 (higher with more occurrences and tighter gaps). Single-occurrence loan payments score 0.3.</ParamField>
+<ParamField path="category_hint" type="text">Most common Plaid PFC DETAILED code across the group's transactions (e.g. `RENT_AND_UTILITIES_RENT`, `LOAN_PAYMENTS_MORTGAGE`). Null when no transactions carried a detailed code.</ParamField>
+<ParamField path="first_seen_date / last_seen_date" type="date NOT NULL">Dates of the earliest and most recent member transactions.</ParamField>
+<ParamField path="status" type="recurring_group_status (pgEnum) NOT NULL">Default `active`. A group is `active` when its `last_seen_date` is within 1.5× the period from the end of the statement data; `inactive` otherwise. Status is anchored to the last transaction in the statement window, not the wall clock, so a subscription cancelled mid-window is correctly marked `inactive`.</ParamField>
+
+Indexes: `(borrower_file_id)` and `(borrower_file_id, account_number_masked)`.
+
+**`recurring_transaction_group_members`** — maps a group to its constituent transaction ids.
+
+<ParamField path="group_id" type="uuid → recurring_transaction_groups (cascade)" />
+<ParamField path="transaction_id" type="uuid NOT NULL">Intentionally **NOT** a foreign key. Transactions are DELETE+INSERTed on every statement reprocess, so a hard FK would trip on reprocess (same convention as `transaction_category_overrides.transaction_id`).</ParamField>
+
+Indexes: `(group_id)` and `(transaction_id)`.
+
+**Detection admission tiers.** The detector (`lib/bank-statement/recurring-expense-detection.ts`) admits debit transactions in three Plaid PFC tiers:
+
+1. **`LOAN_PAYMENTS_*`** — admitted from a single occurrence; presumed monthly cadence. Preserves mortgage and auto-loan signals inside short 2–3 month statement windows where three occurrences of a monthly obligation are impossible.
+2. **`RENT_AND_UTILITIES_*`** — requires ≥3 occurrences with measured cadence (≥2 gaps, coefficient of variation ≤ 35%).
+3. **Transfer-rail codes** (`TRANSFER_OUT_WITHDRAWAL`, `TRANSFER_OUT_ACCOUNT_TRANSFER`, `TRANSFER_OUT_TRANSFER_OUT_FROM_APPS`, `TRANSFER_OUT_OTHER_TRANSFER_OUT`) — admitted and then gated on counterparty identity. A debit passes when the counterparty name and account holder name cannot be confirmed to be the same person via `exactNameMatch`. This tier exists because rent paid via Zelle or wire carries a `TRANSFER_OUT_*` code instead of `RENT_AND_UTILITIES_RENT`.
+
+Structurally excluded regardless of cadence: `TRANSFER_OUT_SAVINGS` and `TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS`.
+
+**Feature gate:** `ENABLE_RECURRING_EXPENSES === "true"` gates the two read surfaces — the `recurring_expenses_available` flag on `GET :id` and the `GET :id/recurring-expenses` endpoint. Detection and persistence run unconditionally so the tables stay warm and enabling the switch is instant.
+
 ## The asset subsystem
 
 The **asset / Statement Analyzer** subsystem (migrations `0180`–`0187`, `0207`, `0228`–`0238`) extracts and qualifies borrower asset accounts from bank statements. Unlike the credit/income/appraisal ledgers it does **not** attach to `audit_runs`; an `asset_runs` row binds to a loan or, for standalone runs, to a `borrower_files` set.
