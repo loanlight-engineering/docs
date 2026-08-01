@@ -33,6 +33,53 @@ When the run is `complete`, the results endpoint spreads `AuditResultsService.ge
 | `signatureVerification` | `{ status: "completed", results: [...] }` | signature checks |
 | `propertyData` | `{ status: "completed", results: [...], properties: [...] }` | [property data](/agents/property-data) + [red flags](/agents/property-red-flags) |
 | `creditEvaluations` | `CreditReportPayload[]` (array) | [credit evaluation](/agents/credit-evaluation) |
+| `bankStatementIncome` | `BankStatementIncomeCompleted \| BankStatementIncomeSkipped \| { status: "failed", results: [] }` | [bank-statement income agent](/agents/bank-statement-income) (entitlement required) |
+
+#### bankStatementIncome block
+
+The `bankStatementIncome` key is present only when the agent was planned (entitled + requested, or entitled + `defaultOnLanes` default). A key is **never omitted silently** — if the agent was planned but did not run, a `skipped` or `failed` block is surfaced explicitly.
+
+**`completed` shape:**
+
+```json
+{
+  "status": "completed",
+  "summary": {
+    "qualifiedIncomeMonthly": 8500.00,
+    "qualifiedIncomeAnnual": 102000.00,
+    "borrowerType": "personal",
+    "incomeQualification": 12,
+    "statementCount": 12,
+    "findingsCount": 2,
+    "monthlyBreakdown": [
+      {
+        "month": "2025-01",
+        "deposit_total": 8750.00,
+        "gross_deposit_total": 9200.00,
+        "deposit_count": 4,
+        "mom_change_pct": -0.02,
+        "largest_deposit": 4800.00
+      }
+    ]
+  },
+  "detail": { },
+  "findings": [ ],
+  "findings_truncated": false,
+  "findingsTotal": 2
+}
+```
+
+The `summary` is a **frozen snapshot** taken at agent completion and stored on `agent_runs.output`. A later recalculation, settings change, or re-claim does not alter what a past audit reported. Rows completed before the snapshot feature launched fall back to live derivation.
+
+**`skipped` shape** (agent was planned but did not run):
+
+```json
+{ "status": "skipped", "reason": "no_bank_statement_income_document" }
+```
+
+Partner-visible `reason` values: `no_bank_statement_income_document`, `missing_borrower_type`, `indeterminate_income_qualification`, `not_entitled`, `missing_loan_id`, `dev_flags_skip_langgraph`, `trigger_error`, `audit_failed_before_trigger`. Unrecognized values are collapsed to `null`.
+
+**`failed` shape:** `{ "status": "failed", "results": [] }` (extraction error or ledger deadline).
 
 Each non-credit issue object carries fields such as `issueKind`, `message`, `confidenceScore`, `documentRef`, `severity`, `category`, `expirationDate`, `daysUntilExpiration`, `fieldName`, `documentName`. The [issue kind taxonomy](/pipeline/issue-kinds) explains the codes.
 

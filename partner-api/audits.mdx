@@ -18,7 +18,7 @@ Body is `CreatePartnerAuditDto`. See the [data model](/partner-api/data-model).
 The loan to audit. Validated with `@IsUUID()`.
 </ParamField>
 <ParamField body="agents" type="string[]">
-Allow-list of agents to run. If omitted, all available agents run. Example values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`.
+Allow-list of agents to run. If omitted or empty, all standard agents your organization is entitled to run. `bankStatementIncome` (bank-statement income analysis) is the exception: it runs **only** when explicitly named here, and requires an explicit per-lender entitlement row — it is never included by default. A non-empty array runs only the named agents plus their required upstream inputs. Example values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`, `bankStatementIncome`.
 </ParamField>
 <ParamField body="options" type="AuditOptionsDto">
 Optional `estimatedClosingDate` (YYYY-MM-DD), which overrides the loan's stored closing dates for date-sensitive checks.
@@ -34,22 +34,13 @@ Optional `estimatedClosingDate` (YYYY-MM-DD), which overrides the loan's stored 
 
 Poll [`GET /loans/:loanId/status`](/partner-api/loans) until the loan is ready and classification has settled before calling this endpoint.
 
-### Two execution paths
+### Routing
 
-The selection logic is gated by the per-lender feature flag `PARTNER_VIA_ROUTER` (`isAgentRouterFlagEnabled(db, lenderId, "PARTNER_VIA_ROUTER")`, fail-closed — any error means OFF). See [router and entitlements](/agents/router-and-entitlements).
+All partner audits go through `agentRouter.route({...})` (no feature flag). The router applies an entitlement filter (requested ∩ enabled), expands required upstream dependencies (a named downstream agent pulls in its phase-0/1 upstreams), and writes the [`agent_runs` ledger](/agents/runs-ledger).
 
-<Tabs>
-  <Tab title="Flag OFF (default)">
-    The direct path. `auditService.createAuditRunForPartner(lenderId, loanId, { agents })` uses the raw `agents[]` allow-list with **no entitlement filter and no closure expansion**. The response has no `denied` field, and the endpoint cannot return `403`.
-  </Tab>
-  <Tab title="Flag ON (router path)">
-    `agentRouter.route({...})` applies an entitlement filter (requested ∩ enabled), expands required upstream dependencies (a named downstream agent pulls in its phase-0/1 upstreams), and writes the [`agent_runs` ledger](/agents/runs-ledger).
-
-    <Warning>
-    If the resolved plan is empty (`plannedAgentRuns.length === 0`), the freshly-minted `audit_runs` container is torn down (FK cascade) and the endpoint throws **`403 ForbiddenException`** — `"Requested agents are not enabled for this organization: ..."` or `"No agents are enabled for this organization"`. The response on this path also carries a `denied[]` array of non-entitled requested agents.
-    </Warning>
-  </Tab>
-</Tabs>
+<Warning>
+If the resolved plan is empty (`plannedAgentRuns.length === 0`), the freshly-minted `audit_runs` container is torn down (FK cascade) and the endpoint returns **`403 ForbiddenException`** — `"Requested agents are not enabled for this organization: ..."` or `"No agents are enabled for this organization"`. The response also carries a `denied[]` array of non-entitled requested agents.
+</Warning>
 
 ### Background execution
 
@@ -73,7 +64,7 @@ Execution is fire-and-forget: `executeAudit(loan, auditId, lenderId, lenderCode,
 }
 ```
 
-`denied` is present only on the router path.
+`denied` lists requested agents filtered out by the entitlement gate. It is always present (empty when nothing was denied).
 
 <Warning>
 **`progressUrl` has no backing endpoint.** It points at `.../progress`, but neither partner controller defines a `/progress` route. Poll progress with `GET /audits/:auditId` (below) and [`GET /loans/:loanId/status`](/partner-api/loans) instead.

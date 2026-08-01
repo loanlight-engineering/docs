@@ -58,6 +58,48 @@ Controller: `portal-audits/portal-audits.controller.ts` at `api/v1/portal/audits
 | `GET /api/v1/portal/audits/:auditId/errors` | `PortalAuditErrorsResponse` |
 | `GET /api/v1/portal/audits/:auditId/documents/by-name/:filename/pdf` | Document PDF by name |
 
+## Bank-statement-income audit routes (LOA-2016)
+
+Controller: `modules/portal-audits/portal-audits-bank-statement.controller.ts` at `api/v1/portal/audits/:auditId/bank-statement-income`. Guarded by `PortalAuditsAuthGuard`. The `auditId` is an audit-run UUID; the controller resolves the underlying `borrower_files` batch server-side from the audit's `agent_runs` pointer — the client never names a batch.
+
+Three auth arms with different write permissions:
+
+| Arm | Reads | Writes | Finding dismissal | Attribution |
+|---|---|---|---|---|
+| `partner-results-view` (top-level results link) | ✅ | ✅ | ✅ | org, `userId = null` |
+| `portal-workos-session` | ✅ | `client_user`+ | `client_admin` | real `portal_users.id` |
+| `epc-results-view` | ✅ | 403 | 403 | — |
+
+The `editable` flag on the section response is server-derived and matches the write gate, so the frontend never renders a control whose save is guaranteed to fail.
+
+| Method / path | Purpose |
+|---|---|
+| `GET .../bank-statement-income` | Income section: summary + editable flag |
+| `GET .../bank-statement-income/calculations` | Computed income analysis |
+| `GET .../bank-statement-income/transactions` | Transaction list |
+| `PUT .../bank-statement-income/transactions/category` | Bulk-override transaction categories |
+| `PUT .../bank-statement-income/transactions/:transactionId/category` | Single transaction category override |
+| `POST .../bank-statement-income/transactions/classify` | Enqueue Ntropy categorization (202) |
+| `GET .../bank-statement-income/findings` | Income findings list |
+| `PATCH .../bank-statement-income/findings/:findingId` | Update finding feedback / dismiss |
+| `GET .../bank-statement-income/income-filters` | List income filters |
+| `POST .../bank-statement-income/income-filters` | Create income filter (201) |
+| `DELETE .../bank-statement-income/income-filters/:filterId` | Delete income filter |
+| `PATCH .../bank-statement-income/included-statements` | Set included statement set |
+| `GET .../bank-statement-income/summary` | AI summary |
+| `POST .../bank-statement-income/summary` | Enqueue AI summary (202) |
+| `PATCH .../bank-statement-income/settings` | Update settings |
+| `POST .../bank-statement-income/recompute` | Recompute income (200) |
+| `POST .../bank-statement-income/large-deposit-overrides` | Force/suppress a deposit flag (201) |
+| `DELETE .../bank-statement-income/large-deposit-overrides/:transactionId` | Remove override |
+| `GET .../bank-statement-income/audit-events` | Audit event log for the batch |
+
+BFF proxy routes live under `packages/app/src/app/api/v2/audits/[auditRunId]/bank-statement-income/*` and mirror the controller paths above.
+
+**Portal entry points (LOA-2016):**
+- `/loan-audits/[auditRunId]/bank-statements` — staff portal tab for a partner-API audit's income review.
+- `/results/audits/[auditId]` income section (`IncomeSection`) — rendered in the external results viewer (`partner-results-view` token).
+
 ## PortalAuditsAuthGuard
 
 Source: `portal-audits/portal-audits-auth.guard.ts`. The guard inspects an unverified `purpose` JWT claim (via `jose.decodeJwt`) for routing only, then verifies the token with the matching arm.

@@ -29,7 +29,7 @@ looks missing.
 | Package | Role | Version (repo HEAD) |
 |---|---|---|
 | `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, roles) | 1.13.0 |
-| `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 1.15.0 |
+| `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 1.18.0 |
 | `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | 0.1.0 |
 | `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.3.0 |
 | `@loanlight-engineering/shared-api-auth` | NestJS WorkOS auth module (incl. WorkOS Connect M2M and user-lifecycle methods) | 0.3.0 |
@@ -230,6 +230,10 @@ Construct families (`shared-cdk/src/`): `base` (`BaseStack`), `compute`
 (`datadog-lambda-config`), `monitoring` (Datadog Lambda/RDS log-subscription
 constructs), `environment` (`parseEnvironment`), and `common`
 (`applyStandardTags`, snapshot helpers).
+
+**`FargateService` additions (v1.18.0, LOA-2127):**
+- `public readonly scaling: ScalableTaskCount` — the service's auto-scaling handle is now exposed so consumers can attach additional policies (e.g. an SQS backlog step-policy) without calling `autoScaleTaskCount()` a second time (which CDK rejects as "AutoScaling of task count already enabled").
+- `disableUtilizationScaleIn?: boolean` — when `true`, the built-in CPU and memory target-tracking policies become scale-out-only safety nets. Use this on services scaled by an external signal (e.g. queue backlog): a target-tracking policy that sits far below its target continuously requests `minCapacity`, which conflicts with a step-policy scale-out between alarm breaches. The consumer is responsible for providing scale-in via its own policy attached to `scaling`.
 
 ## shared-local: LocalStack tooling
 

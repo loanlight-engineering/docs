@@ -35,6 +35,8 @@ Body of [`POST /api/v1/partner/loans`](/partner-api/loans). File: `create-partne
 | `lenderCode` | string | no | ≤ 100 chars |
 | `loanType` | string | no | ≤ 100 chars (see note) |
 | `loanProgramName` | string | no | ≤ 255 chars |
+| `borrowerType` | string | no | `@IsIn(["personal", "business"])` — income context for the bank-statement income agent (LOA-1698). Absent means the income-context skip decision is indeterminate. **Not derivable from other metadata.** |
+| `incomeQualification` | integer | no | `@IsIn([12, 24])` — explicit averaging window in months. Overrides the value derived from the resolved loan program (precedence: override > derived > skip). |
 
 <Warning>
 **`loanType` is free-form text (the `LoanTypeSchema` mirrors this).** The DB column is `text`; the value passes through verbatim (`loan.service.ts::resolveLoanType`). There is **no** `@IsEnum` and **no** `@Matches` regex.
@@ -60,10 +62,14 @@ Body of [`POST /api/v1/partner/audits`](/partner-api/audits). File: `create-part
 | Field | Type | Required | Validation |
 | --- | --- | --- | --- |
 | `loanId` | string (uuid) | yes | `@IsUUID()` |
-| `agents` | string[] | no | `@IsArray @IsString({each})`. Omitted → all available agents run. |
+| `agents` | string[] | no | `@IsArray @IsString({each})`. Omitted or empty → all entitled standard agents run (see note). |
 | `options` | `AuditOptionsDto` | no | `@ValidateNested @Type` |
 
-Example `agents` values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`. These are the canonical agent name strings used by `AuditAgentsExecutor`.
+Example `agents` values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`, `bankStatementIncome`.
+
+<Note>
+`bankStatementIncome` is **opt-in only**: it runs when explicitly named in `agents[]` **and** the lender holds an explicit entitlement row. It is never included when `agents[]` is omitted, regardless of entitlement. A non-empty `agents[]` runs only the named agents plus their required upstream inputs.
+</Note>
 
 ### AuditOptionsDto
 

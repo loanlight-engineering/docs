@@ -18,7 +18,13 @@ The `trigger_source` CHECK allowlist also includes `portal`, `admin_rerun`, and 
 
 This is the production revenue path. The external `loanlight-integrations` Encompass plug-in pushes the MISMO XML and PDFs to S3 and publishes an "Audit Requested" EventBridge event. That event lands on the SQS queue `audit-requested-events` (`dev-`-prefixed only when `DEPLOYED_ENVIRONMENT=dev`).
 
-`QueueConsumerService.handleAuditRequested` (`messaging/queue-consumer.service.ts`, an `@SqsMessageHandler`) drains the queue:
+`AuditQueueConsumers` (`messaging/audit-queue-consumers.ts`, an `OnModuleInit` provider) starts N independent `sqs-consumer` `Consumer` instances against the queue. Concurrency comes from the number of poll loops, not `batchSize`. Each consumer stays at `batchSize: 1` and polls on its own clock, so a finished slot refills immediately without waiting for other in-flight audits. `QueueConsumerService.handleAuditRequested` is the shared message handler each consumer calls.
+
+<Note>
+The number of consumers per task is controlled by the `AUDIT_CONSUMER_CONCURRENCY` env var (default `5`, hard max `20`). At 2 tasks the default gives **10 concurrent audits**. Raising the value requires checking `DB_POOL_MAX` per task and the Aurora ACU ceiling.
+</Note>
+
+Each message flows through the same handler:
 
 <Steps>
   <Step title="Parse the EventBridge envelope">
@@ -34,6 +40,10 @@ This is the production revenue path. The external `loanlight-integrations` Encom
     Calls `orchestration.processAuditRequest(validated)`. Any error is logged and re-thrown to trigger the SQS dead-letter queue.
   </Step>
 </Steps>
+
+<Note>
+`stop()` is called bare (never `{ abort: true }`) on shutdown, so an in-flight audit running 40 minutes deep is not killed mid-run. `AuditQueueConsumers` no longer registers through `SqsModule` (`@ssut/nestjs-sqs`) because that module cannot run N consumers against one queue without N distinct names; the `documents.materialized` leg remains unchanged in `SqsModule`.
+</Note>
 
 ### Request shape — `IntegrationAuditRequestSchema`
 
