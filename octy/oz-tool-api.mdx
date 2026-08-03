@@ -91,6 +91,21 @@ The registry groups tools into categories. The dataset id is the `[dataset]` pat
     | `red-flag-results` | `red_flag_results` | audit-run |
     | `audit-errors` | `audit_errors` | audit-run (newest first) |
   </Accordion>
+  <Accordion title="Vendor Costs">
+    `audit-run-costs` gives the complete cost picture for this audit run and doubles as the authoritative which-agents-ran record. Each row is one cost source: either an `agent_runs` ledger row (`source_kind = agent`, with `status`, `skip_reason`, `started_at`/`completed_at`, `is_billable`) or a cost-bearing infra step (`source_kind = infra`, e.g. `infra:llama_index` for LlamaCloud document indexing, whose lines carry vendor-reported `pages`). Empty for legacy runs that predate the `agent_runs` ledger.
+
+    | dataset | `table` | scope / params |
+    |---|---|---|
+    | `audit-run-costs` | `agent_runs` + `audit_infra_steps` (synthetic) | audit-run; `?agent_type=`, `?source_kind=`, `?vendor=` |
+
+    The `cost` field on each row is an `AgentRunCost` blob — `{ version, totalUsd, estimatedUsd, unknownLines, lines[] }` — or `null` when no spend was observed for that source (a `null` row is still the authoritative did-it-run record). Each `lines[]` entry is a per-`(vendor, model-or-op)` aggregate with token/credit counts and a priced `usd`; `estimated: true` lines were priced from fallback rates. `unknownLines` counts billed-but-unquantifiable events — never folded into totals as zero. The response includes top-level `totals` (`total_usd`, `estimated_usd`, `unknown_lines`, `cost_bearing_sources`) summing the returned rows.
+
+    The three query params compose (AND): `?agent_type=piiValidation` returns a single agent's row (infra rows excluded); `?source_kind=agent|infra` restricts the ledger; `?vendor=openai|anthropic|reducto|llamacloud|unknown` slices every source's `lines` to that vendor and recomputes per-source totals, dropping sources with no matching lines.
+
+    <Note>
+    Do not add `processing_cost` on `loan-documents` rows to these totals. `processing_cost` is a per-document view of spend already counted on the `preAuditClassification` agent's ledger row — summing the two would double-count.
+    </Note>
+  </Accordion>
   <Accordion title="Appraisal Evaluation">
     Appraisal evaluation is a **standalone lane** (`appraisalEvaluation`) that persists to `appraisal_runs` and its child tables, keyed by `audit_run_id`. A run may be **loanless**, and a revision shares its parent's `audit_run_id` (chained by `parent_run_id`), so these tools can return **more than one row** — correlate by `id` / `revision_number`. Start with `appraisal-runs`.
 
@@ -110,7 +125,7 @@ The registry groups tools into categories. The dataset id is the `[dataset]` pat
     | dataset | `table` | scope / params |
     |---|---|---|
     | `lender-yaml-config` | `lender_yaml_configs` | lender-scoped; `?config_section=document_expiration\|red_flags\|urla_completeness_rules`; **404 `NO_LENDER`** when the loan has no lender |
-    | `loan-documents` | `loan_documents` | loan-scoped; active + inactive, newest first, cap 500 |
+    | `loan-documents` | `loan_documents` | loan-scoped; active + inactive, newest first, cap 500; rows include `processing_cost` (this run's per-document split/classify spend, or `null`) |
     | `loan-s3-folder` | `loan_s3_folder` (synthetic) | loan-scoped; `?path=` (no `..`); lists EPC and/or partner sources, cap 500 objects/source |
     | `loan-s3-object` | `loan_s3_object` (synthetic) | loan-scoped; **required** `?key=`; returns a presigned URL valid for `PRESIGNED_URL_TTL_SECONDS = 300` |
 

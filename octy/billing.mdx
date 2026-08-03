@@ -8,7 +8,7 @@ The Billing Reports page at `/billing-reports` has two tabs: **Vendor Costs** (A
 
 ## Vendor Costs tab
 
-The Vendor Costs tab (`VendorCostsView`) aggregates AI vendor spend from the `agent_runs.cost` and `audit_infra_steps.cost` JSONB ledgers across the date range and lender/agent filter. It queries at read time — there are no rollup tables — so the view always reflects the current ledger state.
+The Vendor Costs tab (`VendorCostsView`) aggregates AI vendor spend from the `agent_runs.cost` and `audit_infra_steps.cost` JSONB ledgers across the date range and lender/agent filter. It queries at read time — there are no rollup tables — so the view always reflects the current ledger state. The default date range is **last 30 days**; URL-provided presets and custom `from`/`to` ranges override it.
 
 ### API
 
