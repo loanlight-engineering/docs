@@ -75,6 +75,23 @@ A second controller under `portal-appraisal-rules/staged-bundles` mounts at `api
 
 The `apply` endpoint upserts both `loan_programs` rows and the associated `appraisal_rules` (the credit twin `apply` does the same for `credit_rules`). As of LOA-1872 (migration `0257`), apply also seeds `loan_programs.match_program_aliases` — an array of canonical program-name residuals used by the alias-first EPC program resolver. A row whose bundle definition carries no aliases binds SQL `NULL` (not `'{}'`) so a subsequent re-apply cannot clobber previously-seeded aliases with an empty array. Re-apply is append-only: `DO UPDATE COALESCE(excluded.match_program_aliases, loan_programs.match_program_aliases)` preserves existing aliases on conflict.
 
+**Apply preview (LOA-2005/LOA-2033).** The `apply` path now executes writes inside a transaction and rolls them back (`DryRunComplete`), collecting a `RuleChangeRecord[]` diff before aborting. Each record carries:
+
+| Field | Description |
+|---|---|
+| `ruleCode` | The rule being changed |
+| `scope` | `{ kind: "lender-wide" }` or `{ kind: "program", programCode }` |
+| `field` | `"severity"`, `"thresholds"`, `"isEnabled"`, or `"rule"` (whole-row for custom writes/removals) |
+| `fieldKey?` | For `thresholds`, the individual threshold key (e.g. `"min_score"`) |
+| `before` / `after` | The stored and written values |
+| `effect` | `"applied"` (value changed) or `"no-op"` (value already matched — inert writes are reported, not dropped) |
+| `classification` | One or more of `"severity-change"`, `"threshold-change"`, `"rule-activation"`, `"rule-deactivation"`, `"rule-removal"`, `"rule-reset"`, `"shared-loan-programs"` |
+| `shadowedBy?` | Program codes whose program-scoped rows wholesale-override this lender-wide write |
+
+This shape is defined in `common/staged-bundles/rule-change-record.ts` and built by `RuleChangeLog` in `common/staged-bundles/rule-change-log.ts` — one shape across all three services (appraisal, credit, eligibility) per PRD P8.
+
+**Bundle versioning (LOA-2033/RuleOps D6).** Every bundle now carries a positive-integer `version` field plus a SHA-256 `checksum` computed over canonical bundle content (`common/staged-bundles/bundle-version.ts`). The checksum is committed to a per-service manifest (`emit-appraisal-bundle-manifest.ts`, `emit-credit-bundle-manifest.ts`, `emit-eligibility-bundle-manifest.ts`) and CI fails when bundle content and manifest disagree (`detectManifestDrift`). A content change without a version bump is also caught (`detectMissingVersionBumps`). Rule-set versions stamped from a bundle apply carry `source=bundle_apply, bundle_id=X, bundle_version=N`.
+
 ## portal-credit-rules
 
 Controller: `portal-credit-rules/portal-credit-rules.controller.ts` at `api/v1/portal/credit-rules`. The credit twin of the appraisal-rules module: templates come from `appraisal_rule_templates WHERE module='credit'`, rule sets/rules live in `credit_rule_sets` / `credit_rules`, and the evaluator is `lib/credit-pipeline/rules/evaluator.ts::evaluateWithDb`.
@@ -119,6 +136,8 @@ BFF proxies for these live under `packages/app/src/app/api/credit-rules/*`.
 | `GET /api/v1/portal/admin/staged-credit-rule-bundles` | List staged credit bundles |
 | `POST /api/v1/portal/admin/lenders/:lenderId/staged-credit-rule-bundles/:bundleId/apply` | Apply a bundle (HTTP 200) |
 
+Apply preview and bundle versioning follow the same `RuleChangeRecord` shape and checksum-gated `version` contract as the appraisal staged bundles above (LOA-2005/LOA-2033).
+
 ## portal-eligibility-rules
 
 Eligibility rules govern per-lender LTV grid eligibility (loan-amount/FICO/occupancy/DSCR matrix rows), geographic bars, and LTV modifier stacks. They run only for loan-data channels (EPC / LOS / partner integrations + API) — portal appraisal-only runs have no URLA-derived loan axes and are gated out at the engine call site.
@@ -161,7 +180,8 @@ Each program declares exactly one check key today. `ProgramChecks` is `{ LTV: { 
 
 | Tag | Supplied by |
 |---|---|
-| `LOS` | LOS-delivered loan metadata (MISMO XML) |
+| `LOS` | LOS-delivered loan metadata (MISMO XML) — values present at ingestion on the `loans` table |
+| `URLA_AGENT` | Facts the URLA-Extraction agent derives from the 1003/MISMO after ingestion (e.g. loan amount, purpose, occupancy, state, county from URLA §4; FICO from `credit_runs.extracted_data`). These are NOT on the `loans` table at ingestion; tagging them `LOS` would assert a false readiness that blocks the resolver from waiting on extraction (LOA-1983). |
 | `APPRAISAL_AGENT` | Appraisal-Evaluation agent output |
 | `CREDIT_AGENT` | Credit-Evaluation agent output |
 | `INCOME_AGENT` | Income agent output |

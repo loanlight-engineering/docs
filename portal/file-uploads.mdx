@@ -27,6 +27,8 @@ The portal accepts large document uploads for appraisal, credit, income, and ban
     <Note>
     The bank-statement **Loan ID** is free-text (≤255 chars), not a UUID (#2426, LOA-1577). On enqueue, `resolveLoanLink` links a real `loan_id` only when the value is a UUID matching a loan in the tenant; otherwise the raw value is stored verbatim in `borrower_files.loan_reference` with `loan_id` left null (migration `0195`). The separate **income** upload still requires a UUID `loanId` (`@IsUUID()` on `CreateIncomeRunDto`). `formatUploadError` surfaces per-field validation errors in the upload UI.
     </Note>
+
+    **Upload timeout (LOA-2195).** Form-data proxies that carry files use `UPLOAD_TIMEOUT_MS = 1_200_000` (20 minutes) defined in `src/lib/constants/upload.ts`. The previous value was 30 seconds, which aborted a ∼25 MB two-file upload that completed in 30.66 s after the server had already returned 200. The 20-minute ceiling covers a ∼25 MB upload at ≈0.2 Mbps effective uplink with headroom for protocol overhead. Plain JSON reads and writes must keep their own short timeouts — only `fetch` calls whose body is a `FormData` carrying files should use this constant.
   </Tab>
 </Tabs>
 

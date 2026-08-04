@@ -54,6 +54,7 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/admin/users` | Cross-lender user admin. |
     | `/admin/audit-log` | Global audit log. |
     | `/admin/rule-sets` | Rule-set catalog/status. |
+    | `/admin/rule-explorer` | Read-only view of each lender’s materialized appraisal and credit rule rows, compared against the shared catalog. Shows drift counts, reachability assessment, and links to per-rule and per-set performance windows. Backed by the `GET /api/v1/portal/admin/rule-explorer/…` API (see [Portal API: internal admin](/portal/api-admin-observability)). |
     | `/admin/staged-rules`, `/admin/staged-credit-rules` | Staged rule bundles. |
     | `/admin/staged-eligibility-rules` | Staged eligibility rule bundles. Apply a pre-defined eligibility config + rule set to a lender; supports dry-run preview before committing. |
     | `/admin/yaml-viewer` | YAML config viewer/editor (CodeMirror) with version history/diff. |

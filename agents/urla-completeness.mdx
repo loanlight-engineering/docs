@@ -22,16 +22,18 @@ Source root: `loanlight-api/packages/api/src/langgraph/agents/urlaCompletenessRu
 
 `RulesExecutor` (`engine/rules-executor.ts`) builds a registry `Map<RuleId, Rule>` plus a `Map<RuleCategory, Rule[]>`. `execute(data, options)` runs every `enabled` rule minus `disabledRuleIds`. Each rule's `evaluator(context)` returns `RuleFinding[]`; a rule that throws produces a synthetic FAIL finding (`Rule execution failed: ...`) so the engine never crashes. Per-rule options are passed as `context.ruleOptions = options.ruleOptions.get(rule.id)`.
 
-`buildSummary` returns `RuleExecutionSummary { totalFindings, passedFindings, failedFindings, infoFindings, results: RuleFinding[], executionTimeMs }`.
+`runRules` returns `RuleExecutionSummary { totalFindings, passedFindings, failedFindings, infoFindings, insufficientDataFindings, results: RuleFinding[], executionTimeMs }`.
 
 ## Finding types and shape
 
-`FindingType` is `PASS | FAIL | INFO`. A `RuleFinding` is:
+`FindingType` is `PASS | FAIL | INFO | INSUFFICIENT_DATA`. A `RuleFinding` is:
 
 ```ts
 { ruleId, ruleName, category, findingType, message,
   fieldPath?, expectedValue?, actualValue?, metadata? }
 ```
+
+`INSUFFICIENT_DATA` is emitted by the executor when a rule's URLA section came back entirely empty (an extraction gap, not a grading outcome). The rule still runs and may emit its own findings; the executor adds the `INSUFFICIENT_DATA` finding alongside them as an operational signal. See [Missing-data observability](#missing-data-observability) below.
 
 A `Rule` is `{ id, name, description, category, enabled, scope?: "borrower" | "loan", evaluator }`. `scope: "loan"` rules may read `allBorrowersData` (the cross-borrower context the [aggregate-extractions barrier](/agents/urla-extraction) guarantees is populated); the default scope is per-borrower.
 
@@ -84,6 +86,27 @@ Representative behaviors:
 - **`SECTION_4D_GIFT_FUNDS_PRESENT`** — advisory `INFO` rule (default enabled, fires once per borrower) when `section2FinancialInfo.giftsOrGrants` holds a row whose `assetType` is a gift type (`GIFT_OF_CASH` / `GIFT_OF_PROPERTY_EQUITY` / `GRANT`). The gift detail (count, asset types, sources, values) is interpolated into the `message` because the portal renders only `message`; structured `metadata` is also persisted. It does not affect the pass/fail result and co-exists with the `SECTION_4_LOAN_AND_PROPERTY_DETAILS` FAIL loop that catches *incomplete* gifts (a typeless row is caught there, not here).
 - **`DTI_EXCEEDS_50_PERCENT`** — reads `context.bottomRatioPercent` (no value → no finding); threshold is `ruleOptions.threshold` else `DEFAULT_DTI_THRESHOLD = 50`; FAIL when DTI exceeds the threshold.
 - **`REO_REFINANCE_SUBJECT_PROPERTY`** (`scope: "loan"`) — for REFINANCE, the Section-4 subject property must appear in some borrower's Section-3 owned properties (uses `allBorrowersData`).
+
+## Missing-data observability
+
+`RulesExecutor` detects when a rule ran against an empty URLA section — an extraction gap rather than a grading outcome — and tags it with an `INSUFFICIENT_DATA` finding (LOA-2136).
+
+**Category data probes.** `engine/category-data.ts` maps each `RuleCategory` to a `CategoryDataProbe` that contains a `path` (representative JSON path) and a `hasData(UrlApplicationView)` predicate. After a rule runs, the executor calls `tagIfNoData(rule, context, findings)`: if `hasData` returns false, it appends a `createInsufficientDataFinding` with `findingType: INSUFFICIENT_DATA`.
+
+Only categories that every loan must have are tagged — those marked `optional: true` in the probe are never auto-tagged, because an empty optional section (e.g. no employment for a retiree, no REO for a renter) is truthful, not a gap. Tagged categories include `SECTION_1A_PERSONAL_INFO`, `SECTION_2A_ASSETS`, `SECTION_4A_LOAN_PROPERTY`, `SECTION_5_DECLARATIONS`, `SECTION_7_MILITARY_SERVICE`, and `SECTION_8_DEMOGRAPHICS`.
+
+**Datadog metrics.** `engine/rules-metrics.ts` defines a `RulesMetricsSink` interface and two emit functions:
+
+| Metric | Tags | Description |
+|---|---|---|
+| `loanlight.rules.insufficient_data` | `scope` (`"all"` or category label) | Count of `INSUFFICIENT_DATA` findings per execution |
+| `loanlight.rules.insufficient_data.by_rule` | `rule_id`, `category` | Per-rule `INSUFFICIENT_DATA` count |
+
+The sink defaults to a no-op and is wired once at app bootstrap by `PipelineMetricsService.onApplicationBootstrap` (same pattern as `common/resilience/resilience-metrics.ts`). A broken sink is silently swallowed — observability never perturbs rule evaluation.
+
+**Log event.** When `INSUFFICIENT_DATA` findings exist the executor emits a structured `warn` log with `event: "urla.rules.insufficient_data"`, `count`, `rules` (rule-id array), and `categories` (deduplicated). The stable `@event:urla.rules.insufficient_data` facet can drive a log alert.
+
+**Persistence.** `INSUFFICIENT_DATA` is stored in the `finding_type` column of `urla_rules_findings` alongside `PASS`, `FAIL`, and `INFO`.
 
 ## Lender configuration
 

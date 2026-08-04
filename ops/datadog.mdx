@@ -211,6 +211,8 @@ Committed monitor files in `packages/api/observability/datadog/`:
 | `appraisal-reducto-circuit-opened.monitor.json` | Reducto breaker trips OPEN (vendor is down) |
 | `appraisal-break-glass-audit-write-failed.monitor.json` | Break-glass mutation applied but audit-trail insert failed |
 | `llapi-ecs-memory-oom.monitor.json` | llapi ECS Fargate task memory ≥85% of container limit (warn at 75%), grouped by `task_arn` (LOA-965) |
+| `appraisal-rules-missing-required-field.monitor.json` | Appraisal rule evaluated against missing required field (INSUFFICIENT_DATA signal via `loanlight.rules.insufficient_data`) |
+| `credit-preview-program-resolution-outage.monitor.json` | Credit apply-preview program resolution failures (program not found at preview time) |
 
 `monitors.registry.json` contains one entry per `*.monitor.json` basename with `{ "deprecated": boolean }`. Setting `deprecated: true` causes `apply-monitors.ts` to delete that monitor from Datadog on the next apply rather than updating it. The registry shape is validated by `monitor-schema.ts` (Zod) at both PR time and apply time.
 

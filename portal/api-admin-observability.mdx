@@ -6,6 +6,39 @@ icon: gauge
 
 These modules back the internal-admin and observability surface: the tenant audit log, the lender YAML config viewer, the shadow-audit divergence monitor, lender-config cache invalidation, per-finding feedback, and JIT provisioning through the WorkOS webhook. Most are super-admin only and use [`PortalAuthGuard`](/portal/api-auth); the WorkOS webhook is signature-verified instead.
 
+## Rule Explorer API
+
+Controller: `portal-admin/rule-explorer/rule-explorer.controller.ts` at `api/v1/portal/admin/rule-explorer`. Class-level `@UseGuards(PortalAuthGuard)` + `@Roles("super_admin")`. All endpoints are read-only (GET only). Backed by `portal/admin/rule-explorer` in the portal at `/admin/rule-explorer`.
+
+The Rule Explorer shows each lender’s **materialized** appraisal and credit rule rows compared against the shared cross-module catalog. It surfaces drift (live rows that differ from their catalog template), reachability assessments, and observed rule performance. It does NOT predict grading outcomes for a future run — program, source, form, and appraisal data are not available at Explorer time.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/admin/rule-explorer/lenders` | Paginated lender list with per-service summary (`RuleExplorerLendersResponse`). Query: `page`, `limit`, `search`, `service` (`appraisal\|credit`), `hasDrift`, `hasMultipleActiveSets`, `hasKnownNonGrading`, `hasUnknownReachability` (all boolean filters). |
+| `GET /api/v1/portal/admin/rule-explorer/lenders/:lenderId` | Lender detail: all services, rule sets, and top-level inventory for that lender. |
+| `GET /api/v1/portal/admin/rule-explorer/lenders/:lenderId/services/:service/rule-sets/:ruleSetId/rules` | Paginated list of materialized rules for a rule set. |
+| `GET /api/v1/portal/admin/rule-explorer/lenders/:lenderId/services/:service/rule-sets/:ruleSetId/rules/:ruleId` | Single rule detail including `CatalogComparison` (drift fields, `CatalogProvenance`, `comparable`) and `RuleExplorerGradingAssessment`. |
+| `GET /api/v1/portal/admin/rule-explorer/lenders/:lenderId/services/:service/rule-sets/:ruleSetId/rules/:ruleId/performance` | Observed rule performance over a time window (hit rate, pass/fail breakdown). |
+| `GET /api/v1/portal/admin/rule-explorer/lenders/:lenderId/services/:service/rule-sets/:ruleSetId/observed-performance` | Observed performance for an entire rule set. |
+
+**Lender summary fields** (`Summary` per service):
+- `state`: `"configured"` or `"no_active_rule_set"`
+- `selectionMode`, `defaultSelectedRuleSetId`, `activeSetCount`
+- `inventoryRows` — total materialized rows in the default rule set
+- `catalogDifferentRows` — rows with at least one field differing from the catalog template
+- `knownNonGradingRows` — rows classified as definitely non-grading (disabled, dispatch missing, etc.)
+- `unknownReachabilityRows` — rows the Explorer cannot classify without runtime context
+
+**Grading assessment** (`RuleExplorerGradingAssessment`) is a context-free V1 classification and never claims that a rule *will* grade (program, source, form, feature gates, and appraisal data are not available to a GET-only endpoint):
+- `classification`: `"known_non_grading"` or `"unknown"`
+- `nonGradingReason`: `"disabled"`, `"dispatch_missing"`, `"dispatch_unresolvable"`, or `null`
+- `uad36Policy`: UAD 3.6 conditional policy state (`"unknown"` if policy evidence is unavailable)
+
+**Catalog comparison** (`CatalogComparison`) compares each materialized rule against its catalog template:
+- `provenance`: `"catalog_live"`, `"catalog_inactive"`, `"lineage_target_missing"`, `"lineage_module_mismatch"`, or `"lineage_absent"`
+- `comparable`: whether the comparison is meaningful given the provenance
+- `differences`: array of `{ field, materializedValue, catalogValue }` for every differing field
+
 ## portal-feedback
 
 Controller: `portal-feedback/portal-feedback.controller.ts` at `api/v1/portal/feedback`. `@UseGuards(PortalAuthGuard)`. Captures per-finding feedback from reviewers.
