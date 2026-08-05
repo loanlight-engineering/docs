@@ -157,6 +157,10 @@ Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-
 
 **Income-exclusion disposition (migration `0247`, LOA-1838 #2850):** `income_excluded_reason` text, nullable. `CHECK` constrains it to `'refund' | 'self_transfer' | 'family_transfer'`. Set by the exclusion passes (`applyRefundCategories`, `applyP2pSelfTransfer`, `applyFamilyDepositExclusion`) **instead of** rewriting `transactions.category`, so the raw Plaid PFC code survives for display and the reviewer dropdown. A non-null value vetoes income inclusion regardless of `category`. `NULL` means the row was not excluded by any homegrown pass.
 
+**PFC category provenance (migration `0288`, LOA-2197):** two columns that record corrections applied after Plaid enrichment by the bank-statement-income categorize node:
+- `category_rule` text, nullable — which post-Plaid rule rewrote the category: `'wire'` | `'counter_credit'` | `'corporate_ach'` | `'counterparty_ledger'`. `NULL` means the Plaid result is unchanged.
+- `category_detailed_vendor` text, nullable — the original Plaid detailed code before a correction, preserved for display. Populated whenever `category_rule` is non-null.
+
 <Note>
 Migration `0236` dropped `borrower_files.ntropy_account_holder_id` — the column was used by the now-removed Ntropy integration and is no longer written.
 </Note>
@@ -273,6 +277,23 @@ Numeric columns: `current_balance`, `qualifying_balance`, `qualifying_percent` n
 ### asset_corrections
 
 `asset-corrections.ts`. Auditable UW-override rows for asset accounts (last-write-wins; older rows retained for audit). PK `id`, `asset_account_id` → `asset_accounts` (cascade), `field`, `old_value`, `new_value`, `changed_by` → `portal_users` (set null), `changed_at`, `reason`. Indexed on `(asset_account_id, field)`.
+
+### counterparty_category_ledger
+
+`counterparty-category-ledger.ts` (migration `0289`, LOA-2197). Per-borrower-file persistent memory of how a counterparty's credits should be categorized. Rows survive across re-runs: the same wire originator next month is categorized from this table without another Plaid round-trip. Scope is per `borrower_file_id` — the same counterparty can legitimately differ across files.
+
+PK `id`, `borrower_file_id` → `borrower_files` (cascade). Unique `(borrower_file_id, signature)`.
+
+| Column | Notes |
+|---|---|
+| `signature` | Versioned counterparty key (e.g. `v2:ach:ACME STAFFING:9200502235:PPD`). See `counterparty-signature.ts` for the key format. |
+| `category` | The Plaid PFC DETAILED code assigned to this counterparty (e.g. `TRANSFER_IN_WIRE`). |
+| `source` | `plaid` (majority-vote result) \| `rule` (deterministic correction) \| `override` (human-authored). |
+| `rule` | The `PfcCorrectionRule` that set `source = 'rule'`, or `null`. |
+| `representative_description` | Earliest transaction description for this counterparty — used for display. |
+| `created_by` | FK → `portal_users` (set null); set when a human override writes the entry. |
+
+Source priority on re-apply: `override > rule > plaid`. The rank guard prevents a lower-priority source from overwriting a higher-priority existing entry.
 
 ### statement_invites
 

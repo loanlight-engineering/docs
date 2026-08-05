@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **14 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 026 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **15 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 028 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -45,6 +45,8 @@ The current schema has **14 tables**. Migration `001_baseline_schema.sql` create
 || `023_add_lender_api_lender_id` | `lender.api_lender_id` column (text, nullable) + partial UNIQUE index `WHERE api_lender_id IS NOT NULL`; secondary identity key so the lender consumer can match a legacy lender (no `workos_org_id`) by the API's own stable `lenders.id` (LOA-1015 follow-up) |
 || `025_add_assigned_container_to_transaction_document` | `transaction_document.assigned_container_id` + `assigned_container_name` — the eFolder a document was filed in at ingestion; used by the delivery-decision logic (LOA-1979) |
 || `026_add_delivery_decision_to_document_push_record` | `document_push_record.content_hash` (SHA-256 of source bytes) + `delivery_decision` (`new` \| `refile` \| `skip_already_filed` \| `skip_duplicate_delivery`); partial index on `(transaction_record_id, content_hash) WHERE content_hash IS NOT NULL` (LOA-1980) |
+|| `027_create_document_delivery_claim` | `document_delivery_claim` table (LOA-2031) — see below |
+|| `028_add_claim_state_to_materialized_split_record` | `state`, `claimant_id`, `lease_expires_at`, `attempts` on `materialized_split_record` (LOA-2031); backfills existing rows to `state = 'delivered'` |
 || `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
@@ -240,6 +242,25 @@ De-dup ledger for the split-document materializer (added in 018; LOA-1102). One 
 | `created_at` | |
 
 The de-dup key is a unique index over `(loan_id, original_doc_id, COALESCE(page_start,-1), COALESCE(page_end,-1), COALESCE(content_hash,''))`. It deliberately does **not** key on `classification_id` (which `forceReclassify` regenerates).
+
+**Claim columns (migration `028`, LOA-2031):** `state` text (default `'delivered'` on existing rows), `claimant_id` text, `lease_expires_at` timestamptz, `attempts` integer. These give the materializer the same atomic-claim semantics as `document_delivery_claim` — an INSERT ... ON CONFLICT against the existing unique index serializes racing workers. The `state = 'delivered'` backfill ensures all pre-migration rows still block re-materialization.
+
+### document_delivery_claim
+
+Atomized de-dup ledger for the document-push pipeline (migration `027`, LOA-2031). One row per `(transaction_record_id, claim_key, container_norm)` triple. Acquired **before** the first external call (S3 fetch → EPC push), so two workers processing the same SQS redelivery both see the existing claim and only one proceeds.
+
+| Column | Notes |
+|---|---|
+| `transaction_record_id` | FK → `transaction_record` |
+| `claim_key` | Content hash (`sha256:<hash>`) when available; document id (`doc:<id>`) for carved splits with no hash. |
+| `container_norm` | Normalized eFolder name (via `normalizeFolderName`) — the same normalization the live already-filed check uses. |
+| `state` | `in_flight` (blocks until `lease_expires_at`) \| `delivered` (blocks permanently) \| `failed` (reclaimable immediately). |
+| `claimant_id` | Worker identity; a release is guarded on this so a zombie cannot clobber the succeeding worker's state. |
+| `lease_expires_at` | When the `in_flight` block expires. Deliberately **shorter** than the SQS visibility timeout (600 s vs. 900 s) so a SIGKILL'd worker's claim expires before the redelivered message is processed. |
+| `attempts` | Re-acquisition count; `> 1` signals a raced or retried delivery. |
+| `push_record_id` | Set on release — links the claim to the `document_push_record` that completed it. |
+
+Unique on `(transaction_record_id, claim_key, container_norm)`.
 
 ### lender_feature
 

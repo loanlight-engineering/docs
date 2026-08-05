@@ -65,6 +65,8 @@ Per-lender overrides (`LenderRoutingOverride`) can customise `nameTemplate`, `de
 
 **`fileNameTemplate` (LOA-1958):** controls the EPC *file* (resource) name pushed to the Encompass eFolder, independent of the folder `nameTemplate`/`descriptionTemplate`. Supports the same field placeholders as `nameTemplate` plus optional `[...]` segments (a bracketed segment is omitted entirely when its placeholder values are empty, rather than leaving a blank slot). When absent or null on both the global rule and the lender override, the service falls back to a type-based default name. The resolved file name (before extension) is available in `RoutingDecision.fileName` for observability logging.
 
+**Generated document types (LOA-1975):** three classification types produced by LoanLight itself — `aus_results`, `property_report`, and `appraisal_review_summary` — never receive a `fileName` from the resolver, regardless of any configured `fileNameTemplate`. Their file names come from the generation step itself. The resolver returns `DocTypeView.renamable = false` for these types; the portal routing config editor uses this flag to hide the file-name field for them. A `fileNameTemplate` typed into the raw JSON editor is silently inert for these three types.
+
 ## Error responses
 
 | Status | Body | When |

@@ -63,6 +63,37 @@ The port restores several extraction-time finding categories that the legacy har
 - **Balance continuity fraud** (`detectContinuityFindingsNode`): reuses `FraudDetectionService.checkContinuity`. Its input is sourced from raw `ParsedStatement` balances (pre-`?? 0` coercion) via the `deps.continuityStatements` closure, so the legacy unparseable-balance warning remains reachable.
 - **Income-basis veto** (P2 + F2): credits flagged `incomeExcludedReason ∈ {refund, self_transfer, family_transfer, account_transfer}` drop from the income basis even when `deposit_classification === "income_deposit"`, mirroring `bank-statement.processor.ts` post-#2860.
 
+## PFC category corrections and counterparty ledger
+
+Two post-categorization passes run inside the `categorize` node after Plaid PFC enrichment, in order (LOA-2197). Both apply to **credits only** and skip any row whose `category_detailed` is disposition-gated (i.e. a code the income-exclusion pass keys on, such that rewriting it would silently re-admit excluded income).
+
+### 1. Deterministic corrections (`applyPfcCategoryCorrections`)
+
+Three structural rules forcibly override any Plaid category for credits that match a known pattern. When a rule fires, `transactions.category_rule` is set to the rule name and `transactions.category_detailed_vendor` preserves the original Plaid detailed code for display.
+
+| `category_rule` | Pattern | Forced `category` / `category_detailed` |
+|---|---|---|
+| `wire` | `\bwire\b` in the description, but **not** exclusively inside an ACH payer name field | `TRANSFER_IN` / `TRANSFER_IN_WIRE` |
+| `counter_credit` | Counter-credit and branch-deposit keywords (e.g. `counter credit`, `over-the-counter`, `teller deposit`) | `TRANSFER_IN` / `TRANSFER_IN_DEPOSIT` |
+| `corporate_ach` | ACH structural marker + CCD or CTX SEC code | `TRANSFER_IN` / `TRANSFER_IN_DEPOSIT` |
+
+The `wire` rule includes a precision guard: a `wire` token that appears **only** inside an ACH payer name (e.g. a paycheck from `INSTEEL WIRE PRODUCTS`) is not treated as a wire descriptor. The guard reads the `ORIG CO NAME:` field by offset, not by text value, so a payer name that happens to print twice (once truncated in the prefix, once in full in the field) is correctly handled.
+
+### 2. Counterparty ledger (`applyCounterpartyLedger`)
+
+The counterparty ledger groups credits by **counterparty signature** — a versioned string key (prefix `v2:`) that identifies the originator by structural ACH or wire fields, not by free-text description. For credits whose signature is not yet in the per-file ledger, the pass votes the modal `category_detailed` across all that counterparty's credits in the file and seeds `counterparty_category_ledger` (migration `0289`).
+
+On subsequent bank-statement runs against the same `borrower_file_id`, existing ledger entries are re-applied without another Plaid round-trip. `transactions.category_rule` is set to `'counterparty_ledger'` on rows corrected this way.
+
+Source priority (highest wins, never downgrades a higher source):
+1. `override` — a human-authored correction persisted in the ledger
+2. `rule` — a deterministic `applyPfcCategoryCorrections` match
+3. `plaid` — the majority-vote result from this run's enriched rows
+
+<Note>
+Rule-corrected rows (`category_rule != null` and not `'counterparty_ledger'`) are excluded from ledger seeding: they already have an authoritative category and should not block a future human override from writing a `source: 'override'` entry via the normal rank guard.
+</Note>
+
 ## Dispatch and entitlement
 
 `bankStatementIncome` is dispatched on the **partner lane only** (`defaultOnLanes: ["partner"]`). It declares `requiresExplicitGrant`, so the router's zero-rows fallback that entitles un-seeded lenders to other active agents deliberately does **not** apply here.

@@ -130,6 +130,10 @@ The registry groups tools into categories. The dataset id is the `[dataset]` pat
     | `loan-s3-object` | `loan_s3_object` (synthetic) | loan-scoped; **required** `?key=`; returns a presigned URL valid for `PRESIGNED_URL_TTL_SECONDS = 300` |
 
     S3 scoping (`resolveLoanS3Scope`) resolves `loan_id`, `encompass_loan_id`, and `lender_id` from the audit run, then computes the EPC prefix and the partner prefix. `readLoanS3Object` rejects keys outside the loan's prefixes (`OUT_OF_SCOPE` → 403), buckets not in the allowlist (`BUCKET_NOT_ALLOWED` → 403), and missing objects (`NOT_FOUND` → 404). The bucket allowlist is fail-closed (`getAllowedBuckets()` over the three S3 bucket env vars). See [environment variables](/octy/environment-variables).
+
+    **Canonical-key S3 auth (LOA-2204).** When an exact prefix match fails, `readLoanS3Object` falls back to a **canonical-key lookup**: it queries the known `storage_path`, `partner_s3_key`, and `split_storage_path` columns across `loan_documents`, `document_classifications`, and `appraisal_runs` for the loan and confirms the requested key matches one of those stored canonical keys exactly. This enables access to loanless appraisal files stored under `appraisal/{lender_id}/{appraisal_run_id}/` in the portal upload bucket — files that belong to the audit’s lender but have no loan prefix. Keys from a different loan or lender never match the canonical set, so the tenant boundary is preserved. Superseded and deleted documents are accessible but labeled as such in the response.
+
+    **Loanless runs.** `loan-s3-folder` and `loan-s3-object` responses include `loanless: true` for audit runs with no associated loan. These runs scope to the lender's appraisal files via the canonical-key path rather than a loan EPC/partner prefix.
   </Accordion>
 </AccordionGroup>
 

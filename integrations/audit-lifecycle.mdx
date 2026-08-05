@@ -96,6 +96,22 @@ The decision comes from two independent checks run in order:
 Carved splits arrive with no container name and no content hash, so they fall through both checks to `new` — correct, since a split has no original Encompass counterpart to duplicate.
 
 The `document_push_record.content_hash` column (migration 026) is the ledger key; `transaction_document.assigned_container_name` (migration 025) supplies the live check. Both columns are NULL on rows predating the feature.
+
+#### Atomic delivery claims (LOA-2031)
+
+Both de-dup checks are “read — decide — write” with S3 fetch and EPC push in between. On a standard (non-FIFO) SQS queue with multiple concurrent workers, two workers can both observe “not yet delivered” and both push. The `document_delivery_claim` table (migration `027`) closes this window.
+
+Before the first external call the push service takes a claim for each `(transaction_record_id, claim_key, container_norm)` via INSERT … ON CONFLICT. If a claim is already `in_flight` or `delivered`, the new worker skips the document rather than double-filing it. Three claim states:
+
+| State | Behavior |
+|---|---|
+| `in_flight` | Held by a live worker; blocks other claimants until `lease_expires_at` |
+| `delivered` | Push reached `attached`; blocks permanently |
+| `failed` | Push failed; immediately reclaimable by the SQS retry |
+
+The lease is **shorter** than the SQS visibility timeout (600 s vs. 900 s, with a δ larger than the worst-case receive-to-acquire delay). When a worker is SIGKILL’d mid-push its claims expire before the redelivered message is picked up, so the retrying worker always finds expired claims and can re-acquire them.
+
+The split materializer gains the same semantics via migration `028`: `state`, `claimant_id`, `lease_expires_at`, and `attempts` are added to `materialized_split_record`. Existing rows are backfilled to `state = 'delivered'`.
 </Tab>
 </Tabs>
 

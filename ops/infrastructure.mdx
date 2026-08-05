@@ -84,6 +84,11 @@ conventions.
     (min 2, max 6), targetCpu 55%, targetMem 70%, graceful SIGTERM with
     `StopTimeout=120`, and a deployment circuit breaker with rollback.
 
+    **Audit queue backlog scaling (LOA-2127).** The ApplicationStack adds a step scaling policy driven by the audit SQS queue backlog (sum of visible + notVisible messages):
+    - At backlog ≥ 20 → add 1 task; at 0 → drain 1 task (down to the minimum of 2).
+    - CPU and memory target-tracking policies are set to **scale-out only** (`disableUtilizationScaleIn: true`) so a momentarily quiet queue does not prematurely shrink a cluster handling long-running jobs.
+    - The `notVisible` count is load-bearing, not defensive: `audit-queue-consumers.ts` runs `sqs-consumer` with `visibilityTimeout: 3600` s, so messages in-flight show as notVisible for up to an hour and must be included in the scaling metric to prevent the step policy from shrinking while real work is underway.
+
     It also defines API infra lambdas under `packages/api/infra/lambda/`: the API
     Gateway authorizer shims (`auth/index.ts`, `auth/encompass.ts`,
     `auth/partner.ts`) and the DB lifecycle lambdas (`db-migration`, `db-init`,

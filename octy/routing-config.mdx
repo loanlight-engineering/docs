@@ -79,6 +79,15 @@ Outcomes are fetched by `RoutingOutcomesProvider` via `getRoutingOutcomesByClass
 - **`listClassifications`** — accepts a `loanSearch` param that matches `loans.loan_number` / `loans.encompass_loan_id` (human-facing loan identifiers) to resolve the segment rows and their `split_storage_path`.
 - **`documentPush.getOutcomes`** — accepts a `correlationId` param equal to `audit_runs.id` (the EPC `transaction_state.id`). The integrations outcomes endpoint joins on `transaction_state.id` — **not** on loan number or `encompassLoanId`. Before LOA-1671 all call sites passed `encompassLoanId`, which is null for effectively all loans, so the join always missed and routing data was never shown.
 
+## Routed folder tree view (LOA-1830)
+
+The Document Explorer in Loan Lookup has a **Files | Routed** segmented control (`RoutedViewToggle`) that switches between the default flat file tree and a **Routed** view (`RoutedTreePanel`) that groups segment rows by their resolved Encompass eFolder.
+
+- **Files** — the default flat list of classified document segments, unchanged.
+- **Routed** — segments grouped by the `containerType` (eFolder system key) the router resolved. An “Unrouted” group collects segments with no outcome or no resolvable container. Each group shows a problem badge for the count of segments with a `warn` or `error` severity routing state (`failed` state → error; `unmapped` / `degraded` / `missing_fields_fallback` → warn; `no_config` → error).
+
+The Routed toggle is **disabled** when no segment in the loan's live document set has a routing outcome — so loans predating routed delivery or whose outcomes endpoint returned empty do not show an empty or misleading Routed view. Superseded and deleted segments are filtered out client-side before the toggle's enabled state and the group counts are computed.
+
 <Note>
 Pass the `correlationId` (= `audit_runs.id`) to `getOutcomes`, not the Encompass loan ID or loan number. Passing the wrong identifier silently empties the outcomes side of the join without an error.
 </Note>

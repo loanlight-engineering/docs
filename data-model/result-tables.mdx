@@ -119,6 +119,28 @@ PK `id`, `audit_run_id` (NOT NULL), `code` (NOT NULL).
 
 Indexes: unique on `(audit_run_id, lender_id, code)`, composite on `(audit_run_id, code, created_at, id)` for deterministic worst-outcome-first ordering (via `eligibilityOutcomeRankDesc()`), and on `rule_id` for overlay lookups.
 
+### eligibility_input_readiness
+
+`eligibility-input-readiness.ts` (migration `0287`, LOA-1965). Resolved **data readiness** for one `(audit_run, lender, program, check_kind)`: which declared eligibility inputs are PRESENT, MISSING, or NOT_YET_DERIVED, and whether the check is therefore `computable` or `blocked`. Written by `resolveInputReadiness` in the **same transaction** as the `eligibility_results` rows it describes, so the two tables always reflect the same run.
+
+A **sibling** of `eligibility_results`, not a child: readiness is resolved per `(program, check_kind)` while findings are per code. A re-extract that changes the resolved program prunes the stale readiness row and re-inserts — hence the natural grain is the unique key `(audit_run_id, lender_id, program, check_kind)` rather than an FK to an `eligibility_results` row.
+
+PK `id`, `audit_run_id` → `audit_runs` (ON DELETE CASCADE), `lender_id` → `lenders` (ON DELETE RESTRICT), `program` text, `check_kind` text.
+
+| Column | Notes |
+|---|---|
+| `verdict` | `computable` \| `blocked` |
+| `inputs` | jsonb — `EligibilityReadinessInput[]`; each input carries its declared name and PRESENT / MISSING / NOT_YET_DERIVED status |
+| `undeclared` | jsonb — NEEDS_INFO findings on axes no declared input claims; the \"orphan\" axis signals |
+| `deferrals` | jsonb — advisory manifest deferrals from all three input producers |
+| `source_availability` | jsonb — per-source AVAILABLE / PENDING / UNAVAILABLE map (the per-axis split behind `inputs`) |
+| `present_count` | integer count of PRESENT inputs |
+| `total_count` | integer count of all declared inputs |
+
+<Note>
+`check_kind`, never `check` — `CHECK` is a PostgreSQL reserved word. An unquoted reference in hand-written SQL is a syntax error, not a warning.
+</Note>
+
 ## audit_errors
 
 Per-agent failure ledger (`audit-runs.ts`). PK `id`, `audit_run_id` → `audit_runs` (cascade, NOT NULL).

@@ -52,12 +52,14 @@ All dollar values in the response are projected via the **largest-remainder cent
 
 The **Vendor Costs** dashboard also surfaces run-level analytics computed at query time over both ledgers:
 
-- **Costliest runs** — top 5 runs by total cost, each with its top-3 cost drivers inline (including page counts where available). Deep-links to `/audit-runs?q=<id>&audit=<id>`.
-- **Run cost distribution** — a static-bucket histogram (`<$2 / $2–$5 / $5–$10 / $10–$20 / $20+`) plus an interpolated median, p95, and max.
+- **Costliest runs** — the above-p95 tail plus two below-p95 runs for context (under the UI’s p95 divider line), each with its top-3 cost drivers inline (including page counts where available). Deep-links to `/audit-runs?q=<id>&audit=<id>`.
+- **Run cost distribution** — a static-bucket histogram (`<$2 / $2–$5 / $5–$10 / $10–$20 / $20+`) with a **bucket-share** label in each histogram tooltip (e.g. “42% of runs”) plus an interpolated median, p95, and max.
 - **Outliers** — amounts render amber and bold when above the p95 threshold (range-scoped on the dashboard; a trailing-30d `percentile_cont` baseline is used in the audit-runs table).
 - **Sortable Cost column** — the audit-runs table can now sort by a per-run sum over both ledgers (`totalUsd + estimatedUsd`), probe-gated with a date fallback on pre-migration-0270 databases.
-- **Indexing unit economics** — dollars-per-page per trend bucket. Buckets where no page counts have been captured appear as gaps, never as $0.
+- **Indexing unit economics** — dollars-per-page per trend bucket, with a chart fill behind the line. Buckets where no page counts have been captured appear as gaps, never as $0.
 - **Avg \$/run** — per source label and per lender, using exact distinct-run counts.
+
+**Time zone.** The Vendor Costs dashboard anchors date-range presets (Today, Yesterday, Last 7 days, …) to **US Central Time** (CST/CDT via `Intl.DateTimeFormat`) rather than UTC. Custom From/To inputs and the trend-series labels also display in Central Time. Other Octy date filters (audit-runs, billing) remain in browser-local time.
 
 ### Vendor vocabulary
 
