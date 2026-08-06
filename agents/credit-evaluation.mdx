@@ -251,6 +251,33 @@ LOA-1762 added five optional threshold keys to the existing four:
 
 Rows carrying only the original four keys behave byte-identically to pre-LOA-1762 behavior (the five new keys are all optional). A second-pass re-evaluator (`reevaluateCred024OnAppraisedLtv`) patches CRED_024's entry in an already-computed `complianceResults[]` after the appraisal worker completes with the true appraised-value LTV — the only rule whose basis moves between first and second pass.
 
+### Finding citations
+
+Since LOA-2213 (#3329), breach findings for several rules name the offending account(s) in the
+finding message. The new `citation.ts` module (`lib/credit-pipeline/rules/definitions/citation.ts`)
+appends a citation in the form `, including <Creditor Name> (xxxx).` — using the creditor name
+plus masked account number.
+
+Two citation shapes exist:
+
+- **Short-circuit rules (CRED_004, CRED_005)** — the first matched tradeline is named. The message
+  reads as a representative example (`"including…"`) rather than an exhaustive list, because
+  these rules stop at the first hit and may not accumulate every offending account.
+- **Accumulating rules (CRED_006, CRED_015, CRED_017, CRED_021, CRED_026)** — the full offending
+  set is already held by the rule (these rules filter rather than short-circuit), so up to
+  `MAX_CITED_ACCOUNTS` (3) accounts are cited, sorted by amount descending. Overflow is expressed
+  as `+N more`. Rules that cite by dollar amount also sort entries deterministically to avoid
+  diff churn across re-evaluations.
+
+The AI summary generator (`generateCreditSummary`) strips account citations before sending text to
+OpenAI, preserving the egress control: tradeline identity never leaves the LoanLight boundary.
+
+<Note>
+The citation text is appended to the existing finding sentence; it does not change the rule verdict
+(`FAIL` / `WARNING`), the rule code, or any persisted schema field. The `complianceResults`
+shape and the credit rules table columns are unchanged.
+</Note>
+
 ### Rule evaluation
 
 `evaluateWithCreditRules` (`rules/evaluator.ts`, delegating to `evaluateWithDb`) is DB-backed:

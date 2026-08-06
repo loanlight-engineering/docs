@@ -43,6 +43,16 @@ A short-lived exchange token is swapped for a view cookie at `/results/audits/[a
 
 The viewer's data API proxies the portal-audits BFF. Each sub-section maps to a Next.js API route under `app/api/v2/audits/[auditRunId]/<section>/route.ts`. The `appraisal` section was added in LOA-1994: `GET /api/v2/audits/[auditRunId]/appraisal` proxies `portalApiClient.get(".../appraisal", ...)` via `proxyPortalAuditsRoute(request, context, "appraisal")`.
 
+Since LOA-2085 (#3227), a `POST` write route is also present:
+
+| Route | Purpose |
+|---|---|
+| `POST /api/v2/audits/[auditRunId]/bank-statement-income/export` | Bank-statement income QI export for partner/staff audit surfaces. Proxies `proxyPortalAuditsWrite(request, context, "bank-statement-income/export")`. CSRF-gated; authenticates with the view token or session. |
+
+This route is used by the **Export** button on the `/results/audits/[auditId]` income section (LOA-2085). The button is visible on any `status === "completed"` audit, even when `editable: false`. For read-only viewers (read_only staff, EPC), the export modal hides the notes field (`canAuthorNotes={false}`) to prevent a 403 from the notes-write path; the export itself still works.
+
+The section `"bank-statement-income/export"` is listed in `PORTAL_AUDITS_WRITE_SECTIONS` (the CSRF allowlist in `packages/app/src/lib/portal-audits-write-sections.ts`).
+
 ## Appraisal sidebar and badge
 
 The appraisal sidebar item is controlled by `resolveAppraisalPresentation()` in `results-data-context.tsx`, which gates on three signals in priority order: (1) the ledger override (`appraisalEvaluation` agent status) — if `not-run`, the item is hidden; (2) `appraisalError` with no payload — the item shows so a failed projection request does not silently disappear; (3) otherwise visibility follows `appraisal != null`. The badge counts non-passing compliance outcomes (`FAIL` + `WARNING` from `complianceResults`), or falls back to `findings.length` for pre-migration-0021 runs. This matches the EPC frontend's `countAppraisalFindings` logic (LOA-1995).

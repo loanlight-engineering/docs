@@ -120,7 +120,13 @@ splits across two mode behaviors.
   `GET /api/v1/partner/audits/:auditId/classifications` (both via `buildClassificationsResponse`).
   Since LOA-1340 (#2659), each segment also exposes `originalS3Ref` (the source
   `loan_documents.storage_path`) and `contentHash` (SHA-256 dedup key, LOA-1102) — the fields
-  integrations needs to carve and route classified splits.
+  integrations needs to carve and route classified splits. Since LOA-2206 (#3348), each segment
+  also carries `sourceFileName`: the lender's original PDF filename, with any Encompass
+  attachment-ID prefix stripped (the leading `{encompass_attachment_id}_` token is removed so
+  only the human-facing name remains; filenames with no such prefix are passed through unchanged).
+  `null` when the source `loan_document` row cannot be resolved. `loanlight-integrations` uses
+  this to name pushed EPC documents after the lender's original file when no `fileNameTemplate`
+  is configured.
 
   Each segment carries a flat `ShapedDocumentMetadata` bag produced by `shapeExtractedMetadata` from
   the `document_classifications.extracted_metadata` column. Current fields:
