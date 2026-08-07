@@ -1,0 +1,81 @@
+---
+title: Loan lookup and audit-run modal
+description: Octy's Lookup page, the audit-run modal sections, and the Audit Runs table.
+icon: search
+---
+
+The **Lookup** page at `/lookup` and the **Audit Runs** page at `/audit-runs` are the two Octy surfaces where engineers drill into a specific audit run. The Lookup is for targeted search (by loan number, audit run id, or lender); the Audit Runs table is a cross-lender paginated list of all runs. Both open the same **audit-run modal** for a selected run.
+
+## Audit Runs table (`/audit-runs`)
+
+A paginated, filterable table of `audit_runs` rows. Columns: run id, loan, lender, trigger source, status, cost, agent mix, issues, and **Findings / Errors** (see [Billing reports](/octy/billing#audit-runs-page)). Clicking any row opens the audit-run modal.
+
+## Audit-run modal
+
+The modal opens with the run's overview and a sidebar that lists the available sections. Each section maps to a `SectionKey` and a set of LangSmith trace-prefix patterns that drive the **Report Bug** and **Trace** pill buttons. Sections are validated at parse time from a single source (`isSectionKey` in `lib/audit-section-traces.ts`), so a `?section=X` deep-link silently falls back to `overview` only for genuinely unknown keys.
+
+Current sections (in sidebar order):
+
+| Section | `SectionKey` | Data source |
+|---|---|---|
+| Overview | `overview` | loanlight-api results payload |
+| Document Health | `document-health` | loanlight-api results payload |
+| Data Consistency | `data-consistency` | loanlight-api results payload |
+| URLA (1003) | `urla` | loanlight-api results payload |
+| Appraisal Evaluation | `appraisal` | Octy DB (`appraisal_runs` + `appraisal_rule_compliance`) |
+| Credit | `credit` | loanlight-api results payload (credit block) |
+
+### Overview section
+
+The Overview rollup counts findings across all sections. The appraisal and credit buckets contribute the canonical, override-excluding counts, so the rollup stays reconcilable with the Findings badge in the Audit Runs table (which reads `audit_runs.finding_count`).
+
+### Appraisal Evaluation section (octy #100, #103)
+
+The Appraisal Evaluation section surfaces `appraisalEvaluation` agent results that were previously invisible in Octy. Data is fetched from a dedicated route, `GET /api/audit-runs/[id]/appraisal`, which joins Octy's vendored `appraisal_runs` and `appraisal_rule_compliance` tables.
+
+<Note>
+An empty revision chain (no `appraisal_runs` rows) is the normal case for most audit runs — it means no appraisal was submitted, not an error. `deployed: false` is the separate signal that `appraisal_runs` is absent from the connected DB entirely (schema drift); the UI shows a distinct message for each case.
+</Note>
+
+**Revision chain selector.** When a loan has multiple revisions, a picker lists them oldest-first so you can compare before/after.
+
+**Run meta.** Status, timestamps, and a LangSmith trace link.
+
+**Mandatory-field coverage.** The `coveragePercent` field (0–100) is displayed as a coverage bar. It is display-only and deliberately excluded from the Appraisal issue count — low coverage is an extraction metric, not a compliance finding.
+
+**Rule outcomes.** Rules are grouped by category with fails first, then warnings, then other non-passing outcomes. Each outcome carries its code, label, and severity pill. Overridden rules display a purple badge showing the rule's un-overridden outcome, so the reviewer can see what the agent originally found before a human disposition was applied — Octy is an agent-QA surface and a disposition must not erase the finding a reviewer came to inspect.
+
+**Market findings.** Rental-data and property findings are sorted worst-first.
+
+The appraisal issue count fed into the Overview rollup is computed by `summarizeAppraisal()` in `src/lib/appraisal-summary.ts`. That function is a **cross-repo contract** (LOA-2113): loanlight-api's `audit_runs.finding_count` appraisal bucket is specified to match `summarizeAppraisal()` exactly. Changing the severity set, the outcome threshold, or the newest-revision rule here breaks the loanlight-api count.
+
+### Credit section (octy #103)
+
+The Credit section was previously missing from Octy: the data arrived in the results payload but was dropped at the type boundary. The section reports Credit-Evaluation rule outcomes, including rules overridden by a human reviewer (purple pill). Its contribution to the Overview rollup uses the canonical override-excluding count.
+
+Credit's issue predicate (`outcome NOT IN PASS/SKIPPED`) differs from appraisal's (`FAIL` outcomes only). This divergence is an open design question tracked in LOA-2113.
+
+## Lookup page (`/lookup`)
+
+The Lookup page lets you search for a loan or lender and view its audit runs. Selecting a run opens the same audit-run modal as the Audit Runs table.
+
+## Section key routing
+
+The modal's active section is URL-encoded as `?section=<SectionKey>`. Both the Audit Runs page and the Lookup page parse section keys through `parseSectionKey`, which falls back to `overview` for any unrecognised value. Adding a new section requires a `SectionKey` type union entry and a corresponding `SECTION_AGENT_PREFIXES` entry in `lib/audit-section-traces.ts` — the map is a `Record<SectionKey, string[]>`, so TypeScript rejects an incomplete addition at compile time.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Bug Reports console" href="/octy/bug-reports-console" icon="bug">
+Triage the issue queue, delegate Oz runs, and review summaries.
+</Card>
+<Card title="Billing reports" href="/octy/billing" icon="receipt">
+Vendor Costs, Audit Runs table details, and the Findings / Errors column.
+</Card>
+<Card title="Appraisal-Evaluation agent" href="/agents/appraisal-evaluation" icon="house">
+The source-of-truth for what the appraisal agent computes.
+</Card>
+<Card title="Financial data model" href="/data-model/financial-data-model" icon="database">
+The `appraisal_runs` and `credit_runs` tables Octy reads.
+</Card>
+</Columns>
