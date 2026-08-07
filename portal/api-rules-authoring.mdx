@@ -24,6 +24,10 @@ Compound (multi-condition) custom appraisal rules are gated by `isCompoundRulesE
 
 Credit has its own independent compound gate, `isCreditCompoundEnabled` (`credit_compound`, also default-OFF). Both live in `lib/appraisal-pipeline/rules/feature-gates.ts`. See [authentication and authorization](/portal/api-auth) for the full gate list.
 
+**Condition depth cap (LOA-2227, #3351):** `MAX_AUTHORED_DEPTH` in
+`dto/compound-condition.validator.ts` was raised from **3 → 9** to unblock the First Colony staged
+bundle. The write-time validator rejects condition trees deeper than 9 (`condition_depth_exceeded_authoring`). The evaluation-time walker uses `MAX_CONDITION_DEPTH = 10`; the 9/10 split ensures anything the validator accepts is also evaluable (the walker charges +1 depth on `each→element` branches). History: 2 (LOA-775) → 3 (LOA-1763) → 9 (LOA-2227). The parity spec `KNOWN_BLOCKED` is now empty — all staged bundle customs are evaluable.
+
 <Note>
 The `use_client_rule_sets` subsystem was fully removed (LOA-820 T3). Anything referencing client-rule-set opt-out or `isClientRuleSetsExplicitlyDisabled` is stale. The only remaining rule write-gate is the compound gate above.
 </Note>

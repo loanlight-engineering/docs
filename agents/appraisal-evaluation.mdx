@@ -1,10 +1,10 @@
 ---
 title: Appraisal-Evaluation agent
-description: The 12-node appraisal agent and its processor-side rule evaluation.
+description: The 11-node appraisal agent and its processor-side rule evaluation.
 icon: house
 ---
 
-The Appraisal-Evaluation agent (`appraisalEvaluation`) is a fully implemented, 12-node compiled
+The Appraisal-Evaluation agent (`appraisalEvaluation`) is a fully implemented, 11-node compiled
 LangGraph that extracts and enriches appraisal data. Unlike
 [Credit-Evaluation](/agents/credit-evaluation), rule evaluation does **not** run inside the
 graph — it runs in the processor, after the graph returns.
@@ -59,28 +59,31 @@ stay closure-delivered and are never placed in graph state or serialized progres
 ## The graph
 
 ```text
-__start__ → prepare → classify → detectScanned
-  → (routeExtractionStrategy) → ocr? → reductoExtract
+__start__ → prepare → parse → classify → reductoExtract
   → resolveFields → normalizeAdapter → computeCoverage
   → (attomGate) → attomFetch? → (routeAttomReplay) → validateProject
   → mashvisorFetch → aggregate → __end__
 ```
 
-The canonical node order is pinned in `APPRAISAL_EVALUATION_NODE_IDS`. There is no
-`spatialGenerate` node — the legacy pdfjs spatial-candidate path was removed when extraction was
-consolidated onto Reducto (PR #2463), so `reductoExtract` is now the only extractor and
-`resolveFields` merges Reducto candidates with XML and corrections.
+The canonical node order is pinned in `APPRAISAL_EVALUATION_NODE_IDS`. `parse` runs first —
+before `classify` — so classification reads Reducto-parsed document text instead of the local PDF
+text layer. This is what lets an image-only UAD 3.6 appraisal identify its own form type on
+content rather than misrouting on the absence of a font table (LOA-2190, #3307).
+
+There is no `spatialGenerate` node (the legacy pdfjs spatial-candidate path was removed when
+extraction was consolidated onto Reducto, PR #2463), and there is no `detectScanned` or `ocr`
+node — the scan-detection routing that previously gated extraction strategy was removed when
+`parse` took over the single upload. `reductoExtract` reuses the `jobid://` handle the `parse`
+node produced; Reducto OCRs scanned PDFs natively regardless.
 
 Routing:
 
-- `routeExtractionStrategy(detectScanned)`: `scannedPdf === true ? "ocr" : "reductoExtract"`;
-  `ocr → reductoExtract`.
 - `attomGate(computeCoverage)`: route to `attomFetch` only when **not** in `enrichmentPass`,
   `ENABLE_ATTOM_ENRICHMENT === "true"`, the second pass fits the lock budget
   (`attomSecondPassExceedsLockBudget`), and `hasAttomAddressInputs`; otherwise go straight to
   `validateProject`.
 - `routeAttomReplay(attomFetch)`: when `hasReplayableEnrichmentData` (any of `avmDetail`,
-  `attomAvmDetail`, `avmHistory`, `comparableSales`, `salesTrend`), back-edge to `detectScanned`
+  `attomAvmDetail`, `avmHistory`, `comparableSales`, `salesTrend`), back-edge to `reductoExtract`
   for a second extraction pass; otherwise go to `validateProject`.
 - After `validateProject` the graph always runs `mashvisorFetch`, then `aggregate`.
 
@@ -91,20 +94,33 @@ milestones.
 <Accordion title="prepare">
 Seeds XML candidates.
 </Accordion>
+<Accordion title="parse">
+The single upload + parse call for the run (LOA-2190). Uploads the PDF bytes to Reducto and
+runs one `parse` job, producing a `ParsedDocumentText` (page-keyed text map) and a
+`jobid://` reuse handle. The parsed text travels to `classify` through a per-build closure
+(`parsedTextHandle`), never through graph state — the appraisal graph has no anonymizer, and
+a state channel here would POST GLBA NPI to LangSmith on every node hop.
+
+Fails gracefully: upload failures, parse-job failures, oversized URL-form results, and
+unrecognized payload shapes each produce a distinct named warning, leave `parseHandle: null`,
+and allow the graph to continue without parse text. Every vendor call runs inside the shared
+Reducto circuit breaker (LOA-1078).
+
+The parse cost is recorded as its own ledger line (`cost_component: "parse"`) because the
+charge is separate from the extract credits now that parse runs independently. `aggregate`
+sums `parseCostDollars` back into the run total.
+</Accordion>
 <Accordion title="classify">
-Detects the appraisal form type from the PDF bytes.
-</Accordion>
-<Accordion title="detectScanned">
-Decides digital vs scanned to pick the extraction strategy.
-</Accordion>
-<Accordion title="ocr — inert">
-Inert except for an inert `boostScannedLlamaExtractCandidates`. The `ocrmypdf` preprocessing was
-removed (LOA-1101); Reducto OCRs scanned PDFs natively.
+Detects the appraisal form type from the parsed document text produced by `parse`. When
+`parsedText` is null (parse degraded), `classify` falls back to no-evidence detection — the
+same path image-only UAD 3.6 appraisals used before LOA-2190, which caused misrouting to the
+legacy 1004 form type.
 </Accordion>
 <Accordion title="reductoExtract">
 Reducto deep extraction — the standard extractor since the legacy pdfjs path was removed (PR #2463).
-Forwards `enrichmentData` and a cached `_reductoResult` on ATTOM replay, and preserves the
-canonical form type (`1025` vs `1004` schema).
+Reuses the `jobid://` handle from `parse` (no second upload or parse charge); on the ATTOM
+replay second pass it reuses its own cached `_reductoResult`. Preserves the canonical form type
+(`1025` vs `1004` schema).
 
 <Note>
 A **super-admin-gated Textract lane** exists as an alternative extraction path
@@ -125,7 +141,16 @@ Syncs `formType` to the normalized `extractedData.form_type` before the coverage
 gates — recovers `1025`/`1073`/`1075`/`2055`.
 </Accordion>
 <Accordion title="computeCoverage">
-Coverage percent plus the missing mandatory fields.
+Coverage percent plus the missing mandatory fields. Coverage is scored per form type: the
+redesigned UAD 3.6 contract (`REDESIGNED_FIELD_EXCLUSIONS`) removes FEMA site fields from the
+denominator that the 2.6 form does not carry, so a correctly-routed 3.6 run is not penalised for
+unfillable fields (LOA-2190 F1, fixed 2026-08-04).
+
+Coverage thresholds (LOA-2190, also pinned in code and tests):
+- **Portal reviewer banner**: fires when `coveragePercent < 70%` (was 50% before LOA-2190).
+- **Datadog `appraisal-low-coverage` monitor**: fires below **90%** for legacy 2.6 runs; below
+  **75%** for redesigned 3.6 runs. The 3.6 alert threshold is deliberately lower: one production
+  image-only 3.6 run scored 81%, and the legacy 90 would false-page every correctly-routed 3.6 run.
 </Accordion>
 <Accordion title="attomFetch">
 ATTOM property enrichment, ceiling 2 minutes.
@@ -208,21 +233,25 @@ Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-p
 
 When an EPC audit is appraisal-gated, the orchestration service (`integration-orchestration.service.ts`) used to rely solely on the appraisal processor's own `tryCompleteAuditRun` call to close the audit. That single attempt no-oped if appraisal finished before its barrier-awaited siblings, leaving the audit permanently stuck in `processing`. Since LOA-1751 (#2709), after `orchestrator.run` resolves the gated branch unconditionally retries `tryCompleteAuditRun` (1 initial + 2 retries at 100ms and 300ms), closing the gap without risking double-emission of `workflow:complete`. The follow-up durable backstop was delivered in LOA-1752 (#2719) as `AuditCompletionReaperService` — see [Orphan reapers](/agents/runs-ledger#orphan-reapers).
 
-### agenticRefine has been deleted
+### agenticRefine, detectScanned, and ocr have been deleted
 
 The `agenticRefine` node (factory and spec) was removed entirely in LOA-1043 — it OOM-killed a
 production worker on scanned multi-page documents. Do not reintroduce an agentic refine pass
 without addressing that memory profile. The `spatialGenerate` node was likewise removed when the
-legacy pdfjs extraction path was retired.
+legacy pdfjs extraction path was retired. The `detectScanned` and `ocr` nodes were removed in
+LOA-2190 (#3307): with `parse` running first, all extraction paths reuse the same Reducto parse
+handle and no per-strategy upload or routing is needed.
 
 ### ATTOM budgeting and deadlines
 
 `APPRAISAL_GRAPH_DEADLINE_MS` defaults to 89 minutes (`envMinutesMs`) and sits strictly between
 the legitimate enrichment floor and the worker lock
 (`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, about 90 minutes). The floor
-(`APPRAISAL_GRAPH_DEADLINE_LEGIT_FLOOR_MS`) is now split 85 min (`SUBSCHEMA_OVERALL_CEILING_MS`) +
-2 min ATTOM + 1 min Mashvisor (`MASHVISOR_ENRICHMENT_CEILING_MS`, LOA-1449) = 88 minutes, so the
-pinned ordering invariant is `upload(10) < single-call(60) < split+ATTOM+mashvisor(88) <
+(`APPRAISAL_GRAPH_DEADLINE_LEGIT_FLOOR_MS`) is now 26 min (`REDUCTO_PARSE_NODE_CEILING_MS`) +
+59 min (`SUBSCHEMA_OVERALL_CEILING_MS`) + 2 min ATTOM + 1 min Mashvisor
+(`MASHVISOR_ENRICHMENT_CEILING_MS`, LOA-1449) = 88 minutes (LOA-2190 hoisted the parse cost out
+of `SUBSCHEMA_OVERALL_CEILING_MS`, which shrank from 85 → 59 min; the total is unchanged).
+The pinned ordering invariant is `single-call(60) < parse+split+ATTOM+mashvisor(88) <
 graph(89) < lock(90)`. `ATTOM_SECOND_PASS_CEILING_MS = SINGLE_CALL_DXT_CEILING_MS +
 SINGLE_CALL_DXF_TIMEOUT_MS`. `attomSecondPassExceedsLockBudget` budgets against elapsed time since
 `graphStartedAt` (a missing value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`,

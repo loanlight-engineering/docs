@@ -52,11 +52,11 @@ All dollar values in the response are projected via the **largest-remainder cent
 
 The **Vendor Costs** dashboard also surfaces run-level analytics computed at query time over both ledgers:
 
-- **Costliest runs** — the above-p95 tail plus two below-p95 runs for context (under the UI’s p95 divider line), each with its top-3 cost drivers inline (including page counts where available). Deep-links to `/audit-runs?q=<id>&audit=<id>`.
-- **Run cost distribution** — a static-bucket histogram (`<$2 / $2–$5 / $5–$10 / $10–$20 / $20+`) with a **bucket-share** label in each histogram tooltip (e.g. “42% of runs”) plus an interpolated median, p95, and max.
+- **Costliest runs** — the above-p95 tail plus two below-p95 runs for context (under the UI's p95 divider line), each with its top-3 cost drivers inline (including page counts where available). Deep-links to `/audit-runs?q=<id>&audit=<id>`.
+- **Run cost distribution** — a static-bucket histogram (`<$2 / $2–$5 / $5–$10 / $10–$20 / $20+`) with a **bucket-share** label in each histogram tooltip (e.g. ‘42% of runs”) plus an interpolated median, p95, and max.
 - **Outliers** — amounts render amber and bold when above the p95 threshold (range-scoped on the dashboard; a trailing-30d `percentile_cont` baseline is used in the audit-runs table).
 - **Sortable Cost column** — the audit-runs table can now sort by a per-run sum over both ledgers (`totalUsd + estimatedUsd`), probe-gated with a date fallback on pre-migration-0270 databases.
-- **Indexing unit economics** — dollars-per-page per trend bucket, with a chart fill behind the line. Buckets where no page counts have been captured appear as gaps, never as $0.
+- **Per-run cost by source** (octy #104, replaces the former LlamaCloud indexing unit economics chart) — one dashed line per source (agents + infra) tracking dollars-per-run per trend bucket, with legend checkbox toggles. A solid neutral-ink line shows the blended all-source $/run (total spend ÷ distinct runs, same scope as the selected client rail). Legend items carry each source's range-total spend, replacing the former "Spend by source" meter grid. Absent sources render as gaps, never as $0. Line hues are fixed per agent from a colorblind-validated 8-slot palette.
 - **Avg \$/run** — per source label and per lender, using exact distinct-run counts.
 
 **Time zone.** The Vendor Costs dashboard anchors date-range presets (Today, Yesterday, Last 7 days, …) to **US Central Time** (CST/CDT via `Intl.DateTimeFormat`) rather than UTC. Custom From/To inputs and the trend-series labels also display in Central Time. Other Octy date filters (audit-runs, billing) remain in browser-local time.
@@ -68,6 +68,17 @@ Four closed vendors are tracked: `openai`, `anthropic`, `reducto`, `llamacloud`.
 ### Cost sources and double-counting
 
 `classify_split_runs.cost` is **excluded** from this view: it is a per-document breakdown of spend already counted on the `preAuditClassification` agent run in `agent_runs`. Including it would double-count. Use `classify_split_runs.cost` only for per-document attribution (cost per source file), not fleet-level totals.
+
+## Audit Runs page
+
+The Audit Runs page at `/audit-runs` is a cross-lender table of `audit_runs` rows with cost, status, agent mix, and issue counts. It is the operator surface for spotting high-cost runs, investigating failures, and deep-linking into the audit-run modal (see [Loan Lookup and audit-run modal](/octy/loan-lookup)).
+
+The rightmost column is **Findings / Errors** (LOA-2111, octy #103). It carries two badges in a single cell:
+
+- **Amber — findings**: sourced from `audit_runs.finding_count`, the canonical nine-bucket count maintained by loanlight-api (LOA-2113). A `NULL` value renders `—` ("not yet computed"), never 0, so a missing migration does not masquerade as a clean run. The column read sits behind the same `columnExists` probe as the cost columns, degrading to “not computed” rather than 500-ing on environments where the column has not yet landed.
+- **Rose — agent errors**: sourced from `audit_errors` (the per-agent exception log). Deliberately excluded from `finding_count`; the separate badge and distinct colour (WCAG 1.4.1) keep the two axes distinguishable.
+
+A click on the row opens the audit-run modal at the overview section.
 
 ## Billing tab
 

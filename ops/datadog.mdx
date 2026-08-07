@@ -12,22 +12,23 @@ doctrine.
 
 ## Service names: APM vs logs
 
-The single most important Datadog fact for LoanLight is that **APM service names do
-not match log service tags.**
+The APM service name and the log service tag were historically mismatched for
+`loanlight-api` because the AWS `Service` resource tag (`Service=LLApi`) fed the Datadog
+log `service` facet through the CloudWatch forwarder, overriding the `dd.service: loanlight-api`
+value that dd-trace injected into the log body. LOA-2126 (#3226) aligned the CDK `Service`
+tag with `DD_SERVICE`, so both planes now index as `loanlight-api`.
 
 | Repo | APM `DD_SERVICE` | Log service tag |
 |---|---|---|
-| loanlight-api | `loanlight-api` | `llapi` |
+| loanlight-api | `loanlight-api` | `loanlight-api` |
 | loanlight-integrations | `loanlight-integrations` | `llintegrations` |
 
-<Warning>
-When you query logs, filter on the **log** tag (`llapi`, `llintegrations`), not the
-APM service name. The committed dashboard
-(`packages/api/observability/datadog/README.md`) notes that appraisal milestone
-logs surfaced under `service:llapi`, so its log panels query
-`service:(llapi OR loanlight-api)` to be safe. Mirror that pattern in ad-hoc
-queries.
-</Warning>
+<Note>
+Logs produced **before LOA-2126 deployed** indexed as `service:llapi`. When querying
+historical logs that span the deploy date, include both:
+`service:(loanlight-api OR llapi)` for safety. New logs (post-deploy) index only under
+`service:loanlight-api`.
+</Note>
 
 ### Log status and levels
 
