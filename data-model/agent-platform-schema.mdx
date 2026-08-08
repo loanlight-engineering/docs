@@ -199,6 +199,14 @@ PK `(experiment_id, audit_run_id, agent_type)`. A partial unique index `uq_llm_e
 
 Migration `0203` adds `appraisal_runs.audit_run_id` (`uuid`, nullable, FK `audit_runs(id)` ON DELETE SET NULL) so the appraisal agent attaches to its parent audit run. Legacy rows stay NULL, and a `createUpdatedRun` revision legitimately shares its parent's `audit_run_id` (so there is no partial-unique). Indexes: `idx_appraisal_runs_audit_run_id` on `(audit_run_id)` and `idx_appraisal_runs_loan_audit` on `(loan_id, audit_run_id)`.
 
+**`uad_version`** (migration `0280_appraisal_runs_uad_version`, LOA-2253): `text`, nullable, CHECK-pinned to `'legacy' | 'redesigned'`. Indicates the appraisal-form generation the run was extracted and graded under: `'legacy'` = UAD 2.6 URAR, `'redesigned'` = UAD 3.6. Written by loanlight-api from the resolved Reducto schema contract.
+
+NULL is a **third state** — it means the row predates the column, not that the form is legacy. Octy therefore tests `= 'redesigned'` (equality) rather than `!= 'legacy'` when filtering for UAD 3.6 runs — a NULL row passes through the equality test as unknown rather than being misclassified as redesigned.
+
+<Note>
+Image-only UAD 3.6 scans processed before the LOA-2190 parse-first fix (deployed 2026-08-07) were misclassified and stored as `'legacy'`. Those rows are indistinguishable from genuine 2.6 runs in this column.
+</Note>
+
 ## Related
 
 <Columns cols={2}>

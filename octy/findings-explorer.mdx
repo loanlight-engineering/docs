@@ -1,0 +1,132 @@
+---
+title: Findings Explorer
+description: Cross-loan view of every agent finding, grouped by signal, for false-positive triage.
+icon: scan-search
+---
+
+The Findings Explorer at `/findings` shows every agent finding across all loans, grouped by the *signal* that produced it rather than by loan. A rule that misfires on 40 loans only becomes visible as a rate — opening 40 individual audit runs to notice the pattern is how false positives go untriaged for weeks. This page exposes the rate.
+
+It is distinct from the [Bug Reports console](/octy/bug-reports-console): the Bug Reports console is for per-issue investigation (known-bad run → Oz → root-cause PR). The Findings Explorer is for discovering whether a rule itself is broken (signal → distribution → triage decision).
+
+The page lives in `src/app/(app)/findings/` and its backing library in `src/lib/findings/`.
+
+## Sources
+
+A **source** is one table (or one JSONB column) that emits findings. Eight sources are currently read:
+
+| Source | Agent | Grouping key |
+|---|---|---|
+| `pii` | PII Validation | Field name + issue kind |
+| `doc-expiration` | Document Health | `issue_kind` |
+| `doc-completeness` | Document Health | `issue_kind` |
+| `doc-signature` | Document Health | Signature `status` |
+| `red-flags` | Property Red Flags | Rule id |
+| `urla-rules` | URLA Extraction | Rule id |
+| `appraisal-rules` | Appraisal Evaluation | Rule id |
+| `agent-errors` | (per-row agent name) | Error type |
+
+<Note>
+`creditEvaluation` is not yet a source. Its result tables are not vendored into Octy's schema (LOA-2089). When that lands, adding it is a single new entry in `SOURCE_QUERIES` in `src/lib/findings/sources.ts`.
+</Note>
+
+### Excluded runs
+
+The following runs are **unconditionally excluded** — no toggle:
+
+- **Shadow runs** (`audit_runs.is_shadow = true`) — parity runs distort volume and inflate rates for rules that fire on every loan.
+- **LLM-experiment runs** (`llm_experiment_audit_runs`) — comparing experiment arms belongs in [LLM experiments](/octy/llm-experiments).
+- **Octy Test Lender runs** — synthetic by construction.
+
+The exclusions are stated on the page so a missing signal is never confused with a quiet one.
+
+## Rollup
+
+The page fetches all instances for the active query window and rolls them up **client-side** into per-signal rows.
+
+Each **signal** is one `(source, signalKey)` pair. For every signal the rollup computes:
+
+- Instance count, distinct loan count, distinct lender count, and a **per-loan ratio** (instances ÷ loans; > 1 means the signal fires more than once per loan).
+- `firstSeen` and `lastSeen` timestamps.
+- A **14-bucket sparkline** of daily instance counts anchored on the query window's edges (not the signal's own min/max — so two signals are visually comparable even if one stopped firing three weeks ago).
+- A **message pattern**: the shared stem, shape classification, numeric slot analysis, and categorical slot distribution derived from all the signal's raw messages.
+
+Shapes that represent a genuinely different code path (rather than a different value through the same path) are **promoted** into their own rollup row underneath the parent signal.
+
+### Message pattern analysis
+
+`src/lib/findings/shapes.ts` classifies every signal's messages into one of eight shape kinds:
+
+| Kind | Meaning |
+|---|---|
+| `template` | One skeleton, values vary |
+| `variants` | Shared stem, a handful of differing tails |
+| `clauses` | Base message plus independently-appended optional clauses |
+| `arity` | Stem plus a repeated block (one per page / comp) |
+| `compound` | Derivable prefix, undecomposable tail (LLM prose, raw exception) |
+| `constant` | No interpolation |
+| `sentinel` | Hardcoded stand-in for absent data |
+| `heterogeneous` | No derivable skeleton |
+
+Numeric and categorical slots are extracted from templates. A numeric slot is analyzed for impossible values (outside the quantity's physical range) and pinned distributions (clustered against an arithmetic bound the value can never exceed). A categorical slot is analyzed for dominance (one value holds nearly the whole distribution) and fallback dominance (the dominant value is a hardcoded default — `82% "preforeclosure filing"` is 82% missing data, not 82% consensus).
+
+### Status
+
+Each signal carries one status on one axis: **is there evidence this rule is misfiring?**
+
+The only status today is `suspect` — a machine inference, not human testimony. A signal is marked suspect when any of these checks trip:
+
+- `impossible-value` — a numeric slot's observed range is impossible for the quantity (e.g. a percentage outside 0–100%).
+- `pinned-distribution` — values cluster against an arithmetic bound.
+- `dominant-category` — one categorical value holds nearly the entire distribution.
+- `fallback-dominant` — the dominant value is a hardcoded stand-in for absent data.
+- `sentinel-share` — more than 5% of instances come from a `sentinel`-shaped message.
+
+A `suspect` is a lead, not a verdict. The severity of the rule (`HIGH`, `MEDIUM`, etc.) is **not** part of the status — a medium-severity rule can be the most broken thing on the page while a high-severity rule fires correctly on 40 loans and needs no triage at all. Severity is available as a filter.
+
+## Filters
+
+All filters are URL-driven; a filtered view is shareable.
+
+| Filter | Notes |
+|---|---|
+| Date range | Default: last 30 days. Maximum: 180 days (`MAX_WINDOW_DAYS`). `All time` is clamped to the 180-day maximum. |
+| Agents | Multi-select. Shows only signals from those agents' sources. |
+| Sources | Multi-select. Narrows to specific sources within an agent (e.g. only `doc-expiration` within Document Health). |
+| Lenders | Multi-select (same lender scope selector as `/audit-runs`). |
+| Severities | Multi-select. |
+
+Any filter change resets the open drill-down panel and the page number, since those are relative to the current result set.
+
+## Instance drill-down
+
+Clicking a signal row opens a right-hand **Instance Panel** showing the individual findings. Each instance shows:
+
+- The raw message (untruncated), signal key, and agent.
+- Ordered key/value detail rows (field name, extracted value, comparison, etc.) rendered with `bad` or `fallback` tone where applicable.
+- A **deep-link** to the per-loan audit modal at the appropriate section (e.g. `document-health` for expiration findings), when the source maps to a modal section.
+- The loan number, lender name, audit run label, and timestamp.
+
+The instances API route (`GET /api/findings/instances`) uses the same `deriveOptionsForSource` options as the rollup — so the shape partition is consistent and the drill-down shows the same instances as the rollup row that opened it.
+
+The instance panel supports pagination (default 50 per page).
+
+## Creating a bug report
+
+From the instance panel you can select up to 5 instances (`MULTI_INSTANCE_CAP`) and create a bug report that pre-populates the Bug Reports console with those instances as context. This bridges the discovery workflow (Findings Explorer) and the investigation workflow (Bug Reports → Oz).
+
+## Related
+
+<Columns cols={2}>
+<Card title="Bug Reports console" href="/octy/bug-reports-console" icon="bug">
+Per-issue investigation and Oz delegation.
+</Card>
+<Card title="LLM experiments" href="/octy/llm-experiments" icon="flask-conical">
+Shadow A/B experiments — a separate surface for comparing model behaviour.
+</Card>
+<Card title="Agent platform schema" href="/data-model/agent-platform-schema" icon="boxes">
+The `agent_runs` ledger that backs most finding sources.
+</Card>
+<Card title="Appraisal evaluation" href="/agents/appraisal-evaluation" icon="bot">
+The agent behind the `appraisal-rules` source.
+</Card>
+</Columns>

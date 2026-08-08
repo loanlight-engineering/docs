@@ -266,6 +266,7 @@
             "group": "Octy application",
             "pages": [
               "octy/bug-reports-console",
+              "octy/findings-explorer",
               "octy/loan-lookup",
               "octy/llm-experiments",
               "octy/epc-simulator",

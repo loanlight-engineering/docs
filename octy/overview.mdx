@@ -58,12 +58,15 @@ Beyond the Oz loop, Octy gives engineers a set of read-and-configure surfaces ov
   <Card title="EPC Simulator" href="/octy/epc-simulator" icon="play-circle">
     Trigger simulated Encompass/EPC audit runs from the browser — local-only dev tool.
   </Card>
+  <Card title="Findings Explorer" href="/octy/findings-explorer" icon="scan-search">
+    Cross-loan view of every agent finding grouped by signal — triage false positives by rate, not loan by loan.
+  </Card>
   <Card title="Doc Refreshes" href="/octy/doc-refreshes" icon="book-open-check">
     The ledger of nightly documentation-refresh runs reported by the Oz `octy-docs-refresh` skill.
   </Card>
 </Columns>
 
-There is also a Dashboard (issue and run aggregates), **Lookup** (`/lookup` — by loan or lender), Audit Runs, and a **Lenders** config editor. The Lenders editor now carries per-lender **Agent Entitlements** (which catalog agents a lender runs), **Feature Flags**, and **YAML config** tabs; entitlements proxy to loanlight-api's agent-platform API (`/api/lenders/[id]/agent-entitlements`, backed by the `agents` and `lender_agent_entitlements` read-mirrors). See [environment variables](/octy/environment-variables) and [infrastructure](/octy/infrastructure) for how Octy is wired and deployed.
+There is also a Dashboard (issue and run aggregates), **Lookup** (`/lookup` — by loan or lender), **Audit Runs** (`/audit-runs` — a paginated ledger of every `audit_runs` row with finding count, agent status chips, and a **UAD 3.6 only** filter that narrows to runs where `appraisal_runs.uad_version = 'redesigned'`; see [`uad_version` in the agent platform schema](/data-model/agent-platform-schema)), and a **Lenders** config editor. The Lenders editor now carries per-lender **Agent Entitlements** (which catalog agents a lender runs), **Feature Flags**, and **YAML config** tabs; entitlements proxy to loanlight-api's agent-platform API (`/api/lenders/[id]/agent-entitlements`, backed by the `agents` and `lender_agent_entitlements` read-mirrors). See [environment variables](/octy/environment-variables) and [infrastructure](/octy/infrastructure) for how Octy is wired and deployed.
 
 ## What Octy connects to
 
