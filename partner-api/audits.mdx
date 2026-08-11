@@ -18,7 +18,16 @@ Body is `CreatePartnerAuditDto`. See the [data model](/partner-api/data-model).
 The loan to audit. Validated with `@IsUUID()`.
 </ParamField>
 <ParamField body="agents" type="string[]">
-Allow-list of agents to run. If omitted or empty, all standard agents your organization is entitled to run. `bankStatementIncome` (bank-statement income analysis) is the exception: it runs **only** when explicitly named here, and requires an explicit per-lender entitlement row — it is never included by default. A non-empty array runs only the named agents plus their required upstream inputs. Example values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`, `bankStatementIncome`.
+Allow-list of agents to run. If omitted or empty, all standard agents your organization is entitled to run. Two agents require explicit naming:
+- `bankStatementIncome` — bank-statement income analysis; also requires an explicit per-lender
+  entitlement row (`requiresExplicitGrant`). Never included by default.
+- `appraisalEvaluation` — appraisal extraction and rules. Never runs by default on the partner
+  lane. Naming it **holds the audit open** (~50 min typical, ~120 min worst case) until the
+  appraisal finishes. A classified appraisal report must be present; if not, the agent is
+  skipped. Does not require `requiresExplicitGrant`, so a lender with no entitlement rows is
+  still entitled when the agent is explicitly named.
+
+A non-empty array runs only the named agents plus their required upstream inputs. Other example values: `piiValidation`, `documentHealth`, `urlaExtraction`, `propertyData`, `redFlags`, `creditEvaluation`.
 </ParamField>
 <ParamField body="options" type="AuditOptionsDto">
 Optional `estimatedClosingDate` (YYYY-MM-DD), which overrides the loan's stored closing dates for date-sensitive checks.
@@ -168,6 +177,21 @@ Per-agent failures are recorded here but do **not** fail the run — the audit s
 <Warning>
 **A `failed` audit can have an empty `errors` list and `canRetry: false` on process loss (TD-040).** When a worker is killed mid-audit by an OOM, container exit, or deploy interruption, the run is terminalized by a cron reaper that writes the `failed` status but does not insert an `audit_errors` row. The result is a run with `status: "failed"`, an empty `errors` array, and `canRetry: false` — indistinguishable from a permanent data or rules failure. Operators can correlate the cause from an OOM log entry and a later cleanup warning in server logs, but the caller cannot. A fresh resubmission is required to recover. The same reaper path affects the partner error endpoint: the reaper records its reason on an `agent_runs` column that is never read by the error endpoint projection.
 </Warning>
+
+## GET /api/v1/partner/audits/:auditId/appraisal
+
+Appraisal results for the run (LOA-1704). Requires `appraisalEvaluation` to have been named in the
+`agents[]` when the audit was created. `404` if the audit is not found or not owned.
+
+```json
+{ "data": { "status": "complete", "complianceResults": [...], "findings": [...], ... } }
+```
+
+Returns `{ "data": null }` when no `appraisal_runs` row exists (the agent was not requested or
+no classified appraisal report was present). A failed or still-running appraisal is
+distinguishable via `data.status` — the endpoint never returns `404` for a run the audit owns.
+Four internal fields are stripped at the partner boundary: `interpretedLogic`, `ruleSource`,
+`failedElements`, `reasonCode`. Status codes: `200`, `401`, `404`.
 
 ## GET /api/v1/partner/audits/:auditId/classifications
 

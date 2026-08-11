@@ -28,6 +28,13 @@ Unique constraint `lender_feature_flags_lender_id_feature_key_unique` on `(lende
 There is **no central enum or registry of feature keys**. Each consuming module defines its own key as a string constant. Most gates are opt-in and **fail closed**: an absent row resolves to disabled, and `agent-router-flags.ts` even catches DB errors to fail closed. A few gates in `lib/appraisal-pipeline/rules/feature-gates.ts` let DB errors propagate instead.
 </Warning>
 
+New gates use the shared `isLenderFlagEnabled(db, lenderId, featureKey, defaultEnabled)` helper
+(`common/feature-flags/lender-flag.ts`, LOA-2267). It wraps the single-row
+`lender_feature_flags` lookup and propagates DB errors rather than swallowing them. Two older
+copies (`appraisal-pipeline/rules/feature-gates.ts` and
+`lender-guideline-documents/feature-gate.ts`) are left in place; new gates should use this helper
+rather than adding a third copy.
+
 | `feature_key` | Default when absent | Gates | Defined in |
 |---|---|---|---|
 | `enable_guideline_uploads` | false | Guideline document upload/list/stream/delete | `lender-guideline-documents/feature-gate.ts` |
@@ -44,6 +51,8 @@ There is **no central enum or registry of feature keys**. Each consuming module 
 | `APPRAISAL_VIA_ROUTER` | gate | Route appraisal via the agent router | `portal-appraisal.service.ts` |
 | `review_confidence_threshold` | stored value | Appraisal review confidence threshold (uses `feature_value`) | `portal-appraisal.service.ts` |
 | `income_review_confidence_threshold` | 0.85 | Income review confidence threshold (uses `feature_value`, parsed 0..1) | `portal-income/services/income-review.service.ts` |
+| `pfc_corrections_enabled` | false (opt-in) | Enables `applyPfcCategoryCorrections` in the bank-statement `categorize` node — deterministic Plaid PFC overrides for wire, counter-credit, and corporate-ACH patterns. Absent row = off. | `lib/bank-statement/pfc-corrections-flag.ts` |
+| `redfin_source_enabled` | true (killswitch) | Gates Redfin as a property-data source. Absent row = on (Redfin was live for all lenders before the flag shipped; a fail-closed default would have switched a running production feature off on deploy). | `langgraph/agents/propertyData/redfin-source-flag.ts` |
 | `eligibility_card` | `off` (absent row) | Program eligibility card on the staff audit overview (LOA-2032). **Tri-state** stored in `feature_value`: `off` \| `internal` (super-admins only) \| `on` (all viewers). `enabled` is ignored; only `feature_value` is read. Gate: `canSeeEligibilityCard(flagState, viewerIsSuperAdmin)`. Impersonation fail-closes the card. | `packages/app/src/lib/eligibility-visibility.ts` |
 
 ### Thresholds via `feature_value`

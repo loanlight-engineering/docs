@@ -128,6 +128,23 @@ splits across two mode behaviors.
   this to name pushed EPC documents after the lender's original file when no `fileNameTemplate`
   is configured.
 
+  Since LOA-2211 (#535), a document whose Phase-2 classification failed (`classificationType ===
+  "unknown"`) is now named after its Phase-1 split bucket when pushed to the EPC eFolder, instead
+  of the literal string `unknown`. `resolveBucketFallbackName` maps the api's 15-value
+  `DocumentBucket` vocabulary to a display label via an explicit table (e.g. `INCOME` →
+  `"Income"`, `BUSINESS` → `"Business"`); it returns `null` for `UNKNOWN` or blank buckets so a
+  genuinely untypeable document keeps falling through to manual review unchanged. The bucket label
+  is also forwarded onto carved splits. A `bucketNameApplied` warn fires in the integrations
+  service when the bucket name is used, providing the first signal for how often Phase-2 fails
+  and on which buckets (evidence needed for LOA-2226).
+
+  <Note>
+  The gate is `classificationType === "unknown"`, not `classificationStatus`. This covers both
+  a Phase-2 failure and `classification_status = 'split'` (Phase 2 never ran). A successfully
+  classified carved segment (e.g. `paystub`) is never renamed — only genuinely unknown
+  classification falls through to the bucket label.
+  </Note>
+
   Each segment carries a flat `ShapedDocumentMetadata` bag produced by `shapeExtractedMetadata` from
   the `document_classifications.extracted_metadata` column. Current fields:
 

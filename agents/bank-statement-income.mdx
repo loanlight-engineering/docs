@@ -42,7 +42,26 @@ Runs large-deposit, anomaly, and income-basis (audit P2) analysis via `AnomalyDe
 <Accordion title="checkIncomeTrend">
 Checks the month-over-month income trend (audit F2). Threads `incomeExcludedReason` and `borrowerType` through the `toTrendStatements` adapter so the eligibility matrix is borrower-type-aware. No DB access — all inputs come from graph state.
 
-Income is bucketed by **representative month** (`getRepresentativeMonthForDate` using each statement's `periodStart`/`periodEnd`), not by calendar month. The divisor for qualified monthly income is the count of **distinct documented months** — the set of representative months across the included statements, regardless of how many transactions fell in each month. Every documented month is present as a zero-filled row when it has no eligible deposits, so `months_analyzed == monthly_data.length == included_months` by construction. This prevents the prior bug where months with no eligible income were silently omitted from the denominator, overstating the average.
+Income is bucketed by **sequenced month** derived from `statement-month-sequence.ts` (LOA-8ae7017
+/ LOA-2280), not by per-statement midpoint heuristic. The sequencer anchors once per account on
+the first statement and assigns each contiguous successor the next calendar slot — N contiguous
+statements occupy N consecutive months by construction. A gap advances the cursor by the cycles
+the elapsed time implies, so genuine missing months still fire. Parallel `detectAnomalies` uses
+the same sequencing so the two nodes agree.
+
+The divisor for qualified monthly income is the count of **distinct sequenced months** across the
+included statements. Every documented month appears as a zero-filled row when it has no eligible
+deposits, so `months_analyzed == monthly_data.length == included_months` by construction.
+
+<Note>
+Before LOA-2280, month identity came from `getRepresentativeMonth` (calendar month containing the
+statement period’s midpoint). On an account whose cycle closes mid-month, consecutive periods
+collapsed onto one label — e.g. `2025-09-17–2025-10-16` and `2025-10-17–2025-11-15` both
+labelled October — producing false “Statement missing” rows, an under-counted divisor, and
+overstated qualifying income (~20% on the reported file). Both API and app implementations
+derive month identity from the same sequencer; a cross-package sync spec (`statement-month-
+sequence-sync.spec.ts`) keeps them aligned.
+</Note>
 </Accordion>
 <Accordion title="aggregate (terminal)">
 Assembles the `AggregateWritePlan` — per-table write-batches for `borrower_files`, `bank_statements`, `transactions`, `income_filters`, and `findings` — and returns it. The node itself performs **no DB write** (IC-3/D9). Two additional detectors run inline inside aggregate's glue wrapper (NOT registered StateGraph nodes, so the topology stays at 9 nodes): `detectBalanceFindingsNode` (NSF + negative-balance at extraction time) and `detectContinuityFindingsNode` (balance-continuity fraud). Their outputs thread into `AggregateInput` directly.
@@ -63,11 +82,20 @@ The port restores several extraction-time finding categories that the legacy har
 - **Balance continuity fraud** (`detectContinuityFindingsNode`): reuses `FraudDetectionService.checkContinuity`. Its input is sourced from raw `ParsedStatement` balances (pre-`?? 0` coercion) via the `deps.continuityStatements` closure, so the legacy unparseable-balance warning remains reachable.
 - **Income-basis veto** (P2 + F2): credits flagged `incomeExcludedReason ∈ {refund, self_transfer, family_transfer, account_transfer}` drop from the income basis even when `deposit_classification === "income_deposit"`, mirroring `bank-statement.processor.ts` post-#2860.
 
-## PFC category corrections and counterparty ledger
+### Portal upload defaults
+
+Two portal defaults changed in the same fix (LOA-2280):
+- **Upload modal** — `EMPTY_BANK_STATEMENT_CONFIG.borrowerType` is now `business` (was `personal`). The modal and its reset path both derive from this constant, so the Business-only Expense Factor and Ownership inputs render by default (prefilled at 50% / 100%).
+- **Transactions table** — the initial filter on the bank-statements explorer, statement-analyzer tab, and `/results` income editor is now **All Deposits** (credits only). Clearing the chip falls back to All Transactions.
+
+### PFC category corrections and counterparty ledger
 
 Two post-categorization passes run inside the `categorize` node after Plaid PFC enrichment, in order (LOA-2197). Both apply to **credits only** and skip any row whose `category_detailed` is disposition-gated (i.e. a code the income-exclusion pass keys on, such that rewriting it would silently re-admit excluded income).
 
 ### 1. Deterministic corrections (`applyPfcCategoryCorrections`)
+
+Gated on the `pfc_corrections_enabled` lender feature flag (opt-in, default off — see
+[Feature flags](/lender-config/feature-flags-and-entitlements)).
 
 Three structural rules forcibly override any Plaid category for credits that match a known pattern. When a rule fires, `transactions.category_rule` is set to the rule name and `transactions.category_detailed_vendor` preserves the original Plaid detailed code for display.
 

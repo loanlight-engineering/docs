@@ -1,10 +1,10 @@
 ---
 title: Appraisal-Evaluation agent
-description: The 11-node appraisal agent and its processor-side rule evaluation.
+description: The 12-node appraisal agent and its processor-side rule evaluation.
 icon: house
 ---
 
-The Appraisal-Evaluation agent (`appraisalEvaluation`) is a fully implemented, 11-node compiled
+The Appraisal-Evaluation agent (`appraisalEvaluation`) is a fully implemented, 12-node compiled
 LangGraph that extracts and enriches appraisal data. Unlike
 [Credit-Evaluation](/agents/credit-evaluation), rule evaluation does **not** run inside the
 graph — it runs in the processor, after the graph returns.
@@ -36,12 +36,40 @@ fires, the orchestrator enumerates classified appraisal documents (`appraisal_st
 `desk_review`) from the S3 manifest, copies the appraisal PDF into the portal bucket, mints an
 `appraisal_runs` row stamped with `loan_id`, `lender_id`, and `audit_run_id`, and dispatches
 the job by identity. The EPC audit completes synchronously; the appraisal job runs as a
-detached best-effort task (up to ~89 min) and does not gate `WORKFLOW.COMPLETE`.
+detached best-effort task (up to ~95 min) and does not gate `WORKFLOW.COMPLETE`.
 
 Read the EPC-linked run via `GET /api/v1/audit_runs/:id/appraisal` — returns `PortalAppraisalPayload`
 or `{ data: null }` (never 404). The `AppraisalAuditProjectionService` applies the manual-override
 overlay (LOA-1685) to the projection. See [Integration orchestration pipeline](/integrations/orchestration-pipeline)
 and [Reading audit results](/pipeline/results).
+
+### Partner API path (LOA-1704)
+
+The agent runs on the partner audit path when **all three** conditions hold: the request names
+`appraisalEvaluation` in `agents[]`, the lender is entitled, and a classified appraisal report
+(`appraisal_standard` or `desk_review`) is present. Explicit opt-in is required — the agent
+never runs by default on the partner lane.
+
+Naming `appraisalEvaluation` holds the audit open until the appraisal is terminal (~50 min
+typical, ~120 min worst case) before the other agents' results become available via `/results`.
+This is the same completion-deferral `bankStatementIncome` already applies.
+
+Partner-specific endpoints:
+- `GET /api/v1/partner/audits/:auditId/appraisal` — returns the `PortalAppraisalPayload` for the
+  run, or `{ data: null }` when no run exists. Ownership via `getAuditRunByLender`; a missing or
+  cross-tenant audit returns `404`.
+- `GET /api/v1/partner/audits/:auditId/results` — includes an `agents.appraisalEvaluation` block
+  (the same `AuditAppraisalProjection`). Partner-boundary fields `interpretedLogic`, `ruleSource`,
+  `failedElements`, and `reasonCode` are stripped before the response. Summary counts
+  (`totalIssues`, `criticalIssues`, `warnings`) fold in appraisal compliance outcomes — FAIL →
+  `criticalIssues`; WARNING/NEEDS_INFO/PENDING → `warnings`; PASS/SKIPPED excluded.
+
+<Note>
+`appraisalEvaluation` does not declare `requiresExplicitGrant`, so the router's zero-rows
+fallback (all active agents for an un-seeded lender) applies — unlike `bankStatementIncome`. The
+operational consequence is that Priority Financial's integration must send `agents:
+["appraisalEvaluation"]` on any audit that should include one.
+</Note>
 
 `PortalAppraisalPayload` includes `rentalData: AppraisalRentalData | null` (LOA-1954). The EPC/partner
 surface gets the **display subset only**: `AppraisalAuditProjectionService` pipes rental data through
@@ -62,7 +90,7 @@ stay closure-delivered and are never placed in graph state or serialized progres
 __start__ → prepare → parse → classify → reductoExtract
   → resolveFields → normalizeAdapter → computeCoverage
   → (attomGate) → attomFetch? → (routeAttomReplay) → validateProject
-  → mashvisorFetch → aggregate → __end__
+  → mashvisorFetch → marketCompsFetch → aggregate → __end__
 ```
 
 The canonical node order is pinned in `APPRAISAL_EVALUATION_NODE_IDS`. `parse` runs first —
@@ -160,13 +188,31 @@ Project / condo validations.
 </Accordion>
 <Accordion title="mashvisorFetch">
 STR/LTR rental-data enrichment via Mashvisor (LOA-1449, PR #2285). Runs between `validateProject`
-and `aggregate`. The gate (exported as `shouldEnrichRental`) fires when **either** the loan program
-is DSCR (`programDocType ∈ DSCR_PROGRAM_CODES`) **or** `state.formType === "1025"` (Form 1025,
-Small Residential Income Property, 2–4 unit) — see LOA-1837. The 1025 disjunct exists because
-portal appraisal uploads frequently carry no loan program (`loan_program_id` null →
-`programDocType` null), so a DSCR-only gate never fires for portal-uploaded income properties.
-Fires on any Form 1025, including owner-occupied 2–4 units (blanket product decision). A null /
-non-DSCR program on a non-1025 form returns `{ rentalData: null }` with no fetch.
+and `marketCompsFetch`.
+
+The gate fires when `unitCount === 1` **and** `isDscrLoan`, fail-closed on any indeterminate input
+(LOA-2109). Unit count is `max(improvements.units, units[].length)`; when `improvements.units` is
+absent and `units[]` holds exactly one entry, the gate fails closed (the adapter repairs a null
+scalar on every recognized single-unit form but not on a 1025, so a missing scalar beside a
+one-entry array is more likely an under-extracted 2–4 unit). DSCR is detected via
+`match_doc_type` (deterministic override) or `matchesDscrProgramName()` — a lender-agnostic
+pattern match against `loans.loan_program_name` and `loan_programs.name`, with a negation guard
+that rejects names containing `non`+DSCR or `ineligible` before the positive match fires.
+
+<Note>
+The Form 1025 disjunct (`formType === "1025"`) was removed in LOA-2109. Previously the gate fired
+on any Form 1025 (2–4 unit) and on DSCR programs; the DSCR branch was effectively dead in
+production (`loan_programs.match_doc_type` is NULL on every non-luxury program row), so nearly
+all enriched runs were 2–4 unit properties where Mashvisor's single-address lookup produces a
+correct per-unit figure but a misleading building total. Single-unit DSCR is the population where
+the math is valid.
+</Note>
+
+A non-null `rentalData` on the run always carries a `_gate` marker (`{ unitCount, isDscrLoan }`)
+stamped by the node. At read time (six surfaces: staff/EPC redactors, `getRunDetail`, audit
+projection, export builder, `listRuns` findings count) the marker is re-checked against the
+current extraction — a staleness mismatch suppresses the card and its RF-* findings without a DB
+write, preserving the payload on disk for if the gate is later loosened.
 
 With the gate open the node guards on a complete subject street/city/state, then calls
 `MashvisorService.getRentalData(addr, signal)` with an abort signal capped at
@@ -196,8 +242,8 @@ The raw List Comps response is filtered and ranked before it reaches the portal:
 - **Location column** — shows a real `"City, State"` locality string (e.g. `"Brooklyn, NY"`) instead of a placeholder repeated on every row.
 
 Two discriminators flow from backend → DTO → portal:
-- `strCompsFilteredEmpty` — list-comps returned results but bedroom/entire-home filters left none. The finding is relabelled **"Rental Comps Filtered"** (never asserts "no rental market").
-- `bedTargetsResolved` — whether subject bedroom count was derivable. Gates "matched" vs. "nearby comparable listings" copy so legacy/underivable rows do not falsely claim a bedroom match.
+|- `strCompsFilteredEmpty` — list-comps returned results but bedroom/entire-home filters left none. The finding is relabelled **"Rental Comps Filtered"** (never asserts "no rental market").
+|- `bedTargetsResolved` — whether subject bedroom count was derivable. Gates "matched" vs. "nearby comparable listings" copy so legacy/underivable rows do not falsely claim a bedroom match.
 
 The `RentalDataResult` shape is:
 - `strPerformance` — STR aggregate (from Lookup), or `null` on miss.
@@ -206,6 +252,9 @@ The `RentalDataResult` shape is:
   by haversine distance, nearest-first; comps without coordinates keep API order at the tail).
   Added in LOA-1869 (#2849) — a median over the full unbounded page-1 slice (up to 30
   unranked comps) was noisy. The bound is cardinality, not sort-only: the sort picks which 10.
+  Each `LtrComp` carries `city`, `state`, and `zipcode` (LOA-2108, nullable — coverage verified
+  on one market fixture; absent on redacted captures). The shared-ui address composer uses these
+  fields to render a `"City, ST 00000"` locality string in the portal Rent Comparables table.
 - `sampleSize` — number of STR comps behind the Lookup aggregate (`null` on miss). Replaces
   the retired `confidence` field — no real confidence score exists in the Mashvisor API.
 
@@ -223,6 +272,34 @@ The node never throws (per-endpoint failures surface in `_errors`; a timeout on 
 request yields the null-sentinel for all fields). The result rides graph state as `rentalData`;
 the processor merges rental findings (`mergeRentalFindings`) and persists
 `appraisal_runs.rental_data`.
+</Accordion>
+<Accordion title="marketCompsFetch">
+Market-comps enrichment via Zillow for-sale listings and ATTOM recently-sold sales (LOA-2068,
+migration `0293`). Runs between `mashvisorFetch` and `aggregate`, ceiling 6 minutes
+(`MARKET_COMPS_CEILING_MS`). The gate is fail-closed: enrichment runs only when `ENABLE_ZILLOW_COMPS
+=== "true"` (default `false`) **and** the subject resolves an address with city/state/zip.
+
+The two parallel pipelines:
+- **Zillow for-sale** (via HasData) — active listings; price is an asking price, not a closed sale.
+- **ATTOM recently-sold** — closed sales within a rolling window anchored to the appraisal
+  effective date.
+
+Each pipeline is reserved up to 5 of the 10-comp cap before the remainder is filled by haversine
+distance, so both sale types appear in the output even when one pipeline returns many more
+candidates. The full `MarketCompsResult` shape (types in
+`database/schema/_payloads/market-comps.types.ts`) includes:
+- `outcome` — `ok | disabled | ineligible_subject | underspecified_subject |
+  no_qualifying_comps | fetch_failed`
+- `comps[]` — up to 10 `CompListing` rows, discriminated on `saleType: "forSale" |
+  "recentlySold"`. For-sale rows carry `listPrice`; sold rows carry `salePrice` + `soldDate`.
+  A `pairKey` links the two legs of one property when both pipelines returned it.
+- `distinctProperties` — count of distinct dwellings (unit-stripped) across all rows.
+- `diagnostics.forSale` / `diagnostics.recentlySold` — per-pipeline drop counts and
+  `requestCount` (logical passes to the vendor).
+- `fetchedAt`, `requestCount`, `estimatedCreditsUsed`.
+
+The result is persisted in `appraisal_runs.market_comps` (jsonb, nullable — null when the flag
+is off or the subject is ineligible).
 </Accordion>
 <Accordion title="aggregate">
 Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-pass warnings.
@@ -244,17 +321,21 @@ handle and no per-strategy upload or routing is needed.
 
 ### ATTOM budgeting and deadlines
 
-`APPRAISAL_GRAPH_DEADLINE_MS` defaults to 89 minutes (`envMinutesMs`) and sits strictly between
+`APPRAISAL_GRAPH_DEADLINE_MS` defaults to 95 minutes (`envMinutesMs`) and sits strictly between
 the legitimate enrichment floor and the worker lock
-(`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, about 90 minutes). The floor
-(`APPRAISAL_GRAPH_DEADLINE_LEGIT_FLOOR_MS`) is now 26 min (`REDUCTO_PARSE_NODE_CEILING_MS`) +
+(`APPRAISAL_EXTRACTION_LOCK_DURATION_MS`, 100 minutes). The floor
+(`APPRAISAL_GRAPH_DEADLINE_LEGIT_FLOOR_MS`) is 26 min (`REDUCTO_PARSE_NODE_CEILING_MS`) +
 59 min (`SUBSCHEMA_OVERALL_CEILING_MS`) + 2 min ATTOM + 1 min Mashvisor
-(`MASHVISOR_ENRICHMENT_CEILING_MS`, LOA-1449) = 88 minutes (LOA-2190 hoisted the parse cost out
-of `SUBSCHEMA_OVERALL_CEILING_MS`, which shrank from 85 → 59 min; the total is unchanged).
-The pinned ordering invariant is `single-call(60) < parse+split+ATTOM+mashvisor(88) <
-graph(89) < lock(90)`. `ATTOM_SECOND_PASS_CEILING_MS = SINGLE_CALL_DXT_CEILING_MS +
-SINGLE_CALL_DXF_TIMEOUT_MS`. `attomSecondPassExceedsLockBudget` budgets against elapsed time since
-`graphStartedAt` (a missing value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`,
+(`MASHVISOR_ENRICHMENT_CEILING_MS`, LOA-1449) + 6 min market comps (`MARKET_COMPS_CEILING_MS`,
+LOA-2068) = **94 minutes**. The market-comps node added genuinely new wall-clock spend;
+LOA-2190 had previously hoisted the parse cost out of `SUBSCHEMA_OVERALL_CEILING_MS` (85 → 59
+min) without changing the floor total. The floor increase forced the deadline 89 → 95 and the
+worker lock 90 → 100 min (95 min + 30 s cleanup grace requires a 100-min lock to stay safely
+below expiry). The pinned ordering invariant is
+`single-call(60) < parse+split+ATTOM+mashvisor+comps(94) < graph(95) < lock(100)`.
+`ATTOM_SECOND_PASS_CEILING_MS = SINGLE_CALL_DXT_CEILING_MS + SINGLE_CALL_DXF_TIMEOUT_MS`.
+`attomSecondPassExceedsLockBudget` budgets against elapsed time since `graphStartedAt` (a missing
+value means refuse). Relevant env: `ENABLE_ATTOM_ENRICHMENT`, `ENABLE_ZILLOW_COMPS`,
 `APPRAISAL_GRAPH_DEADLINE_MS`.
 
 <Warning>
@@ -451,7 +532,9 @@ revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status
 `photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`,
 `selectedAgencySources[]`, `loanNumber` (migration `0215_appraisal_runs_loan_number`, persisted
 from the EPC audit path by LOA-1681), `rentalData` (Mashvisor STR/LTR enrichment, migration
-`0179_add_appraisal_runs_rental_data`), and `cross_doc_validation` jsonb (source values from the
+`0179_add_appraisal_runs_rental_data`), `marketComps` (Zillow + ATTOM market-comps enrichment,
+migration `0293_appraisal_runs_market_comps`, nullable — null when `ENABLE_ZILLOW_COMPS` is off
+or the subject is ineligible), and `cross_doc_validation` jsonb (source values from the
 cross-document validation step, migration `0264_appraisal_runs_cross_doc_validation`).
 </ResponseField>
 

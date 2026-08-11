@@ -90,7 +90,7 @@ config of `false` is disabled; `true` or an object is enabled. Thresholds come f
 | `ZESTIMATE_MISMATCH` | HIGH | list price vs zestimate percent diff > `thresholds.zestimate_variance_percent` (default 10) |
 | `NOT_LISTED_FOR_SALE` | HIGH | PURCHASE and subject is not listed for sale |
 | `LISTED_FOR_SALE` | HIGH | REFINANCE and subject is listed for sale |
-| `HOME_VALUE_CHANGE` | MEDIUM | price-history change in a tier window exceeds the tier percent |
+| `HOME_VALUE_CHANGE` | MEDIUM | PURCHASE only: list price vs Zillow last-sold price (within 24 months) exceeds `thresholds.home_value_change.percent` in either direction (LOA-2090); enabled under `rules.loan_purpose.PURCHASE` in lender YAML |
 | `RENTAL_VALUE_CHANGE` | MEDIUM | rental price-history change exceeds the tier |
 | `ACTIVE_FORECLOSURE` | CRITICAL | preforeclosure records within last 3 years (appends upcoming auction within ±90 days) |
 | `ZONING_MISMATCH` | HIGH | `lot.zoning` is not residential |
