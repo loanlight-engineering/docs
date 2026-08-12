@@ -1,0 +1,62 @@
+---
+title: Alerts
+description: The Datadog alert center in Octy — alert feed, monitors board, and nav badge.
+icon: bell
+---
+
+The **Alerts** page at `/alerts` is Octy's Datadog alert center. It surfaces monitor-triggered and recovered events with resolved loan/lender context and deep links, so engineers can act on an alert without manually correlating run IDs in Slack or Datadog.
+
+The page was added in octy PR #108 to address a recurring pattern: a Datadog alert fires, an engineer searches `#alerts` to find the `run_id` in the notification template, then manually looks it up in the Loan Lookup page. Alerts does that resolution automatically.
+
+## Alert feed
+
+The feed consumes Datadog's Events API (`source:alert`) and shows monitor Triggered / Recovered transitions, newest first. Each event is parsed into a single-line chip with hover tooltips for detail.
+
+**Identifier resolution.** The feed parser (`src/lib/datadog/parse.ts`) extracts recognizable identifiers from the event title and message body — appraisal run IDs, audit run IDs, agent run IDs, loan IDs (UUID or loan number), document IDs, and lender identifiers. Each detected ID is then resolved against the Octy DB (`src/lib/datadog/resolve.ts`) to produce lender name, loan number, and deep links:
+
+- Lender name (from `lenders`)
+- Loan number
+- Link to the appraisal run (doc explorer, audit-run mode)
+- Link to the audit run (Audit Runs page or Loan Lookup modal)
+- Link to Bug Reports for the relevant run
+
+Resolved context appears as linked chips in the feed row; unresolved detected IDs remain visible with a copy button and a Datadog log search link so nothing is lost.
+
+**Detail panel.** Clicking an alert row opens a side panel with the full event message and, when an appraisal input document is resolved, a PDF preview (uses the existing pre-sign route).
+
+## Monitors board
+
+The monitors board shows all active Datadog monitors grouped by status — **Alert → Warn → No Data → OK** — in a card grid with color-coded status accents. Each card shows the monitor name, query, creator, and tags.
+
+## Nav badge
+
+The app shell polls `GET /api/alerts/badge` every 60 seconds for an unseen count of monitors in Alert or Warn state. The Alerts nav item shows a red badge when the count is non-zero. Visiting the Alerts page clears the badge via a `localStorage` high-water mark (alerts are disposable — no server-side read state).
+
+## Datadog client
+
+The Datadog integration is a zero-dependency HTTP client (`src/lib/datadog/client.ts`) that reuses the already-deployed `OCTY_DATADOG_API_KEY` and `OCTY_DATADOG_APPLICATION_KEY` env vars. The app key needs `events_read` and `monitors_read` scopes. Responses are cached for 60 seconds. When the keys are unset, the page degrades gracefully to a "Datadog not configured" notice.
+
+<Note>
+The badge and feed are client-side only — there is no server-side read-state. Clearing `localStorage` or opening Octy in a new browser resets the watermark. This is intentional: alert disposability over persistence.
+</Note>
+
+## Navigation reorganization (PR #108)
+
+The main nav was reorganized alongside Alerts: core product pages first, then a divider, then ops/integrations pages (**GitOps**, **Alerts**, **Docs**, **EPC Sim**, **Prisma Studio**).
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Loan lookup and audit-run modal" href="/octy/loan-lookup" icon="search">
+Deep-link from an alert directly into the relevant audit run.
+</Card>
+<Card title="Bug Reports console" href="/octy/bug-reports-console" icon="bug">
+File a bug from the alert context.
+</Card>
+<Card title="Observability (ops)" href="/ops/datadog" icon="activity">
+Datadog monitors and dashboards for loanlight-api.
+</Card>
+<Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+OCTY_DATADOG_API_KEY and OCTY_DATADOG_APPLICATION_KEY configuration.
+</Card>
+</Columns>

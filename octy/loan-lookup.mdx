@@ -16,14 +16,15 @@ The modal opens with the run's overview and a sidebar that lists the available s
 
 Current sections (in sidebar order):
 
-| Section | `SectionKey` | Data source |
-|---|---|---|
-| Overview | `overview` | loanlight-api results payload |
-| Document Health | `document-health` | loanlight-api results payload |
-| Data Consistency | `data-consistency` | loanlight-api results payload |
-| URLA (1003) | `urla` | loanlight-api results payload |
-| Appraisal Evaluation | `appraisal` | Octy DB (`appraisal_runs` + `appraisal_rule_compliance`) |
-| Credit | `credit` | loanlight-api results payload (credit block) |
+|| Section | `SectionKey` | Data source |
+||---|---|---|
+|| Overview | `overview` | loanlight-api results payload |
+|| Document Health | `document-health` | loanlight-api results payload |
+|| Data Consistency | `data-consistency` | loanlight-api results payload |
+|| URLA (1003) | `urla` | loanlight-api results payload |
+|| Appraisal Evaluation | `appraisal` | Octy DB (`appraisal_runs` + `appraisal_rule_compliance`) |
+|| IRIS Photos | *(sub-section of Appraisal)* | Octy DB (`appraisal_photos` + `appraisal_iris_taxonomy`) |
+|| Credit | `credit` | loanlight-api results payload (credit block) |
 
 ### Overview section
 
@@ -44,6 +45,10 @@ An empty revision chain (no `appraisal_runs` rows) is the normal case for most a
 **Mandatory-field coverage.** The `coveragePercent` field (0–100) is displayed as a coverage bar. It is display-only and deliberately excluded from the Appraisal issue count — low coverage is an extraction metric, not a compliance finding.
 
 **Rule outcomes.** Rules are grouped by category with fails first, then warnings, then other non-passing outcomes. Each outcome carries its code, label, and severity pill. Overridden rules display a purple badge showing the rule's un-overridden outcome, so the reviewer can see what the agent originally found before a human disposition was applied — Octy is an agent-QA surface and a disposition must not erase the finding a reviewer came to inspect.
+
+**IRIS Photos.** When the `appraisalIris` entitlement is active for the lender, the Appraisal Evaluation section includes an IRIS Photos sub-section (`IrisPhotosSection`). It displays the photo honeycomb — one hexagonal cell per photo, colored by IRIS risk level — with per-photo analysis on click (scene, elements, conditions, quality, and bbox spotlight on the source-PDF page). The section also supports fullscreen, zoom, and severity/scene/element/condition filters via the shared `CombToolbar`. A `?photo=<id>` deep-link opens a photo directly in the lightbox.
+
+Octy is the **primary** viewing surface for IRIS — the lender portal Photos tab ships dark behind `SHOW_IRIS_PHOTOS = false` and is not yet visible to lenders.
 
 **Market findings.** Rental-data and property findings are sorted worst-first.
 

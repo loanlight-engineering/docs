@@ -265,6 +265,7 @@
           {
             "group": "Octy application",
             "pages": [
+              "octy/alerts",
               "octy/bug-reports-console",
               "octy/findings-explorer",
               "octy/loan-lookup",

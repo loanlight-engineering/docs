@@ -14,11 +14,15 @@ Defined in `constants/queue-names.ts` and provisioned by `worker-stack.ts`. Cons
 ||---|---|---|---|---|
 ||| Health check | `health-check` | 30 s | `handleHealthCheck` (SELECT 1) | `WorkerService.enqueueHealthCheck` |
 ||| Transaction events | `transaction-event-handling` | 900 s | `handleTransactionEvent` | `WorkerService` (from webhook) |
-||| AUS updates | `handle-aus-updates` | 30 s | `handleAusUpdate` | EventBridge `AusUpdateRule` |
+||| AUS updates | `handle-aus-updates` | 900 s | `handleAusUpdate` | EventBridge `AusUpdateRule` |
 ||| Document push | `document-push` | 900 s | `handleDocumentPush` | EventBridge `DocumentPushRule` |
 ||| Lender events | `lender-event` | 30 s | `handleLenderEvent` | EventBridge `LenderEventRule` (LOA-1015) |
 
 Queue config env vars are validated at boot: `SQS_{HEALTH_CHECK,TRANSACTION_EVENT,AUS_UPDATE,DOCUMENT_PUSH,LENDER_EVENT}_QUEUE_{URL,NAME}` plus `AWS_REGION`.
+
+<Note>
+**`handle-aus-updates` timing (LOA-2250, PR #533).** The AUS-update queue was at 30 s with no heartbeat, while `handleAusUpdate` does the heaviest work of any queue in the service. Deliveries past 30 s triggered SQS redelivery mid-flight — with no delivery claim on this queue, a second worker could re-upload and double-attach. Since LOA-2250 the queue uses a **900 s CDK `visibilityTimeout`** and a **200 s consumer heartbeat**, both derived from a single shared constant (`constants/queue-timing.ts`) so the CDK stack and the consumer cannot drift. A 30-minute `handleMessageTimeout` caps the handler itself — without it, a wedged handler would renew the heartbeat forever and never redeliver. Every blocking call on the handler path (S3 drain, EPC upload, EPC token, loanlight-api audit data) is individually bounded. Two Datadog monitors (`aus-update-dlq-depth`, `aus-update-queue-age`) are the paging path.
+</Note>
 
 The `WORKER_TYPES` enum (`messaging/constants.ts`) names the job types carried in messages: `handle-health-check`, `handle-transaction-created-event`, `handle-transaction-updated-event`, `handle-aus-updates`.
 

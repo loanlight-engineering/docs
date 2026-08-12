@@ -310,6 +310,63 @@ Assembles the final `result`, preserves `_reductoResult`, and keeps the latest-p
 
 When an EPC audit is appraisal-gated, the orchestration service (`integration-orchestration.service.ts`) used to rely solely on the appraisal processor's own `tryCompleteAuditRun` call to close the audit. That single attempt no-oped if appraisal finished before its barrier-awaited siblings, leaving the audit permanently stuck in `processing`. Since LOA-1751 (#2709), after `orchestrator.run` resolves the gated branch unconditionally retries `tryCompleteAuditRun` (1 initial + 2 retries at 100ms and 300ms), closing the gap without risking double-emission of `workflow:complete`. The follow-up durable backstop was delivered in LOA-1752 (#2719) as `AuditCompletionReaperService` — see [Orphan reapers](/agents/runs-ledger#orphan-reapers).
 
+## IRIS — image risk interpretation system (LOA-1901)
+
+IRIS gives appraisal review "eyes" via per-photo Claude vision analysis. It is a separate entitlement-gated subsystem that runs alongside the main extraction graph, not a new node inside it. IRIS co-requires `appraisalEvaluation` and is seeded as non-billable.
+
+### Entitlement and triggering
+
+The entitlement key is `appraisalIris` (`agent_entitlements.agent_type`). The row requires `explicit: true`, meaning the lender must be explicitly seeded — the router's zero-rows fallback does not grant it. IRIS runs automatically on every appraisal extraction that the entitled lender submits (auto-trigger via the `appraisal-iris-worker`), and also on demand via `POST /api/v1/portal/appraisals/:id/iris/analyze`.
+
+The `iris-figure-broker` service shares the Reducto figure-detection result between the main graph and the IRIS analysis so both reuse one parse call without a second upload.
+
+### The IRIS analysis pipeline
+
+For each extracted photo the agent runs:
+
+1. **Reducto figure detection** — detects figure bounding boxes in the source PDF.
+2. **Crop** — cuts the photo from the source PDF using the bbox; the normalized bbox (`[0,1]` coordinates) is stored in `appraisal_photos.bbox`.
+3. **Claude vision conversation** — a prompt-cached conversation per photo using `inspect_closer`-named grid regions (never model-emitted coordinates). The model classifies the photo against the active taxonomy vocabulary.
+4. **Expectation-matrix anomaly scan** — pure-code post-processing that checks each detected element/condition against `applicable_scenes` in the taxonomy and stamps `out_of_scene` findings.
+5. **Aggregation** — results written to `appraisal_runs.iris_facts`.
+
+The LLM step is declared as `appraisalEvaluation.irisVisionCatalog` in the llm-config and frozen onto `agent_runs.llm_config`.
+
+<Note>
+**Rules evaluation is deferred to Phase 3.** IRIS_001–014 (`injectIrisEvalInputs`) exist in the architecture but are deliberately not evaluated yet per `docs/loa-1901-vision-rules-architecture.md §13`. No compliance findings are produced by IRIS in the current phase.
+</Note>
+
+### Taxonomy as data (`appraisal_iris_taxonomy`)
+
+The IRIS vocabulary is stored in `appraisal_iris_taxonomy` (migration `0296`). Each row is a scene, element, or condition — 108 seeded rows total (38 scenes / 52 elements / 18 conditions). The agent loads `active = true` rows at run time and builds its prompt and Zod validators from them, so severity tuning and vocabulary changes take effect without a deploy. Rows are global (no `lender_id`). Retired entries use `active = false`, never `DELETE` — photo observation payloads reference codes.
+
+Key columns:
+
+- `kind` — `'scene' | 'element' | 'condition'` (CHECK constraint)
+- `code` — unique within a kind (ON CONFLICT target for idempotent seed INSERTs)
+- `description` — model-facing text rendered verbatim into the IRIS system prompt
+- `flaggable` / `default_severity` — whether the taxonomy entry surfaces as a finding and at what severity (`info | low | medium | high | critical`)
+- `applicable_scenes` — used post-detection for the out-of-scene anomaly scan, **not** a detection filter
+- `out_of_scene_severity` — severity for an out-of-scene finding when applicable
+
+Drift between the schema and the seed SQL is enforced by `__tests__/appraisal-iris-taxonomy.spec.ts`.
+
+### Photo table (`appraisal_photos`)
+
+`appraisal_photos` (migration `0297`, bbox in `0298`) is the single photo store. One row per extracted photo; the IRIS observation columns (`scene`, `attribution`, `quality`, `elements`, `conditions`) are `NULL` until the agent catalogs the photo (`analyzed_at` is the marker). Rows use a deterministic UUIDv5 id (source signature + page + figure index) so a re-analysis of the same source upserts in place — no id churn, no orphan crops.
+
+<Note>
+**The legacy `photo_manifest` column and 8-value category contract are retired.** `PhotoClassifierService` and `ImageExtractionService` were deleted as part of LOA-1901. All photo data is now served from `appraisal_photos`. The `photo_manifest` column drop deliberately trails the `appraisal_photos` table creation by one deploy.
+</Note>
+
+### Portal and Octy surfaces
+
+The portal **Photos** tab ships dark behind `SHOW_IRIS_PHOTOS = false` — it is not yet visible to lenders. Octy's audit-run modal is the primary viewing surface for IRIS data: the **IRIS Photos** section shows the photo honeycomb and per-photo analysis. See [Loan lookup and audit-run modal](/octy/loan-lookup).
+
+Octy also provides a dedicated `/appraisals-iris` admin page with two tabs:
+- **IRIS Taxonomy** — browse and inspect the seeded taxonomy rows.
+- **Dry Run** — internal multi-model compare harness; send a source PDF through multiple vision models side by side (`POST /api/appraisals-iris/dry-run`, SSE endpoint).
+
 ### agenticRefine, detectScanned, and ocr have been deleted
 
 The `agenticRefine` node (factory and spec) was removed entirely in LOA-1043 — it OOM-killed a
@@ -529,13 +586,27 @@ revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status
 `fieldStatusMap`, `fieldSourceLocationMap`, `coverageResult`, `coveragePercent`,
 `commentSummary`/`commentKeywords`, `extractionCost`, `extractionStep`, `errorCategory`,
 `isScanned`), `complianceResults`, `enrichmentData`, `findings`, `parentSnapshotData`,
-`photoManifest`, `loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`,
+`loanProgramId`, `ruleSetId`/`ruleSetVersion`, `auditRunId`,
 `selectedAgencySources[]`, `loanNumber` (migration `0215_appraisal_runs_loan_number`, persisted
 from the EPC audit path by LOA-1681), `rentalData` (Mashvisor STR/LTR enrichment, migration
 `0179_add_appraisal_runs_rental_data`), `marketComps` (Zillow + ATTOM market-comps enrichment,
 migration `0293_appraisal_runs_market_comps`, nullable — null when `ENABLE_ZILLOW_COMPS` is off
 or the subject is ineligible), and `cross_doc_validation` jsonb (source values from the
-cross-document validation step, migration `0264_appraisal_runs_cross_doc_validation`).
+cross-document validation step, migration `0264_appraisal_runs_cross_doc_validation`), and
+`iris_facts` jsonb (IRIS aggregated analysis results, migration `0297`, nullable — null until
+the `appraisalIris` entitlement runs).
+<Note>
+`photo_manifest` (the legacy 8-value photo category column) is scheduled for removal after the
+`appraisal_photos` migration fully propagates. Do not write new code that reads it.
+</Note>
+</ResponseField>
+
+<ResponseField name="appraisal_iris_taxonomy" type="table">
+The IRIS taxonomy vocabulary: 108 seeded rows (`scene`, `element`, `condition` kinds). Global (no `lender_id`), drift-guarded by spec. See [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
+</ResponseField>
+
+<ResponseField name="appraisal_photos" type="table">
+One row per extracted appraisal photo. `id` is a deterministic UUIDv5 (source signature + page + figure index). Identity: `page_number`, `caption`, `width`, `height`, `s3_key`, `bbox` (normalized 0–1 bbox, nullable on pre-IRIS rows). IRIS observation columns (nullable until `analyzed_at` is set): `scene`, `attribution`, `quality`, `elements`, `conditions`. Replaces the retired `photo_manifest` column and 8-value category contract.
 </ResponseField>
 
 <ResponseField name="rules, overrides, corrections" type="tables">
@@ -551,7 +622,7 @@ All under `api/v1/portal/appraisals` (`PortalAppraisalController`). Selected rou
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/` | List runs |
+| GET | `/` | List runs (search + status + date-range filters, LOA-2041) |
 | POST | `/run` | Create a run |
 | GET | `/loan-lookup` | Loan lookup |
 | GET | `/metrics`, `/executive-metrics` | Metrics |
@@ -566,7 +637,8 @@ All under `api/v1/portal/appraisals` (`PortalAppraisalController`). Selected rou
 | GET | `/:id/comparison` | Compare revisions |
 | DELETE | `/:id` | Delete a run |
 | GET | `/:id/pdf`, `/:id/pdf-url` | Source PDF |
-| GET | `/:id/photos`, `/:id/pages/:pageNumber/image`, `/:id/photos/:photoId/image` | Images |
+| GET | `/:id/photos`, `/:id/photos/:photoId/image` | Photos (from `appraisal_photos`; `/:id/pages/:pageNumber/image` removed in LOA-1901) |
+| POST | `/:id/iris/analyze` | On-demand IRIS analysis for an entitled lender |
 | GET / POST / DELETE | `/:id/corrections[/:correctionId]` | Corrections |
 | POST | `/:id/mark-reviewed`, `/:id/revert-approval` | Review state |
 | GET | `/:id/audit-events` | Run audit trail |

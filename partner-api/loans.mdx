@@ -30,6 +30,10 @@ Supporting PDFs. Each document has `fileName`, `content` (base64), `mimeType` (r
 <ParamField body="metadata" type="LoanMetadataDto">
 Optional loan metadata: `estimatedClosingDate` (YYYY-MM-DD), `lenderCode`, `loanType`, `loanProgramName`.
 </ParamField>
+
+<Note>
+**Lender identity comes from authentication, not `metadata.lenderCode` (LOA-2276, PR #3430).** The interceptor resolves the lender from the API key on every request; `metadata.lenderCode` is accepted in the DTO but ignored for config resolution — passing it has no effect, and a value that diverges from the authenticated identity is warn-logged. This applies to both the `createLoan` path here and the `POST /loans/:loanId/documents` upload path (which carries no metadata by design; the handler hydrates lender identity, `loan_type`, and `loan_program_name` server-side from the authenticated request and the persisted loan row). Lenders whose `lenders.config_profile` is `NULL` (never onboarded) are explicitly excluded from resolution — their bank-statement classification behavior is unchanged.
+</Note>
 <ParamField body="skipClassification" type="boolean" default="false">
 When `true`, documents are still uploaded and registered but classification is skipped.
 </ParamField>

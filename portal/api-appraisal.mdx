@@ -69,14 +69,17 @@ The updated-run flow is gated by an appraisal feature flag. When it is off, all 
 
 ### PDF, photos, and page images
 
-| Method / path | Purpose |
-|---|---|
-| `GET /api/v1/portal/appraisals/:id/pdf` | Stream the source PDF inline (200MB ceiling; PDF-vs-XML invariant; sanitized `Content-Disposition`) |
-| `GET /api/v1/portal/appraisals/:id/pdf-url` | Signed URL |
-| `GET /api/v1/portal/appraisals/:id/photos` | Photo list (`Cache-Control: no-store`) |
-| `GET /api/v1/portal/appraisals/:id/pages/:pageNumber/image` | Rendered page image (`ParseIntPipe`) |
-| `GET /api/v1/portal/appraisals/:id/photos/:photoId/image` | Photo image |
+|| Method / path | Purpose |
+||---|---|
+|| `GET /api/v1/portal/appraisals/:id/pdf` | Stream the source PDF inline (200MB ceiling; PDF-vs-XML invariant; sanitized `Content-Disposition`) |
+|| `GET /api/v1/portal/appraisals/:id/pdf-url` | Signed URL |
+|| `GET /api/v1/portal/appraisals/:id/photos` | Photo list from `appraisal_photos` (`Cache-Control: no-store`) |
+|| `GET /api/v1/portal/appraisals/:id/photos/:photoId/image` | Photo image |
+|| `POST /api/v1/portal/appraisals/:id/iris/analyze` | On-demand IRIS analysis for an entitled lender (SSE) |
 
+<Note>
+`GET /api/v1/portal/appraisals/:id/pages/:pageNumber/image` was removed in LOA-1901. Photo data now comes from `appraisal_photos` rows via the `/:id/photos` endpoint.
+</Note>
 ### Corrections, review, rule overrides, key-field reviews
 
 | Method / path | Roles | Purpose |
@@ -123,7 +126,7 @@ The only appraisal orphan reaper is `sweepOrphanedRuns` in the processor. It run
 The old `lib/appraisal-pipeline/stale-cleanup.ts` reaper was deleted in LOA-1052. `sweepOrphanedRuns` is the single source of truth for reaping stuck appraisal runs.
 </Note>
 
-Supporting services: `appraisal-findings.service.ts`, `image-extraction.service.ts`, `photo-classifier.service.ts`, `reducto-figure.service.ts`, `appraisal-pdf-size.ts`.
+Supporting services: `appraisal-findings.service.ts`, `reducto-figure.service.ts`, `appraisal-pdf-size.ts`, `iris-figure-broker.ts`. `ImageExtractionService` and `PhotoClassifierService` were deleted in LOA-1901 when the photo pipeline moved to `appraisal_photos`.
 
 ## portal-appraisal-ssr
 
