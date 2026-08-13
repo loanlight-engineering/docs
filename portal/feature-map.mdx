@@ -103,7 +103,7 @@ Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (
 
 ## List pagination
 
-The shared `<Pagination>` component (`components/ui/pagination.tsx`) and the `useListPagination` hook (`lib/hooks/use-list-pagination.ts`) are wired into five list views: appraisal runs, credit runs, clients (admin), loan programs, and statement-analyzer runs. The income list is intentionally not paginated this way.
+The shared `<Pagination>` component (`components/ui/pagination.tsx`) and the `useListPagination` hook (`lib/hooks/use-list-pagination.ts`) are wired into six list views: appraisal runs, credit runs, income runs, clients (admin), loan programs, and statement-analyzer runs. The income list uses the same `page` + `limit=20` pattern as the others, reading `total` and `statusCounts` from the API response rather than the page length so the stat cards stay portfolio-wide while paging (LOA-2063).
 
 ## Standalone-run dashboard routing
 

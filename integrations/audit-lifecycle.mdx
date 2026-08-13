@@ -66,7 +66,18 @@ The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResour
 
 <Tabs>
 <Tab title="Combined (default — flag OFF)">
-One AUS Report PDF is generated via `deliverComplete` and attached in a single PATCH. No property PDFs, no document-push routing. This is the default for every lender until the `document_push` flag is enabled.
+One AUS Report PDF is generated via `deliverComplete`. No property PDFs, no document-push routing. This is the default for every lender until the `document_push` flag is enabled.
+
+In the common case the report is attached in a **single** Complete PATCH. When `aus_results` and `appraisal_review_summary` both resolve to the same Encompass eFolder (a lender-overridable `nameTemplate` applies to each), `deliverComplete` batches into multiple PATCHes to prevent Encompass silently orphaning the earlier document into the loan’s default folder (LOA-2230, third in the LOA-2207 collision stack). Batches are separated by resource type via `deliveryBatchIndexByType` / `partitionIntoBatches` — the same utilities used on the split path.
+
+Batch throw semantics differ from the split path deliberately:
+
+| Case | Behaviour |
+|---|---|
+| Single batch, PATCH unconfirmed | Throws — SQS/DLQ retries. Safe because nothing was attached, so a retry attaches once. |
+| Multiple batches, any PATCH unconfirmed | Does **not** throw. Logs a `split_delivery_degraded` event and returns. The local `transaction_state` is left un-completed if the terminal batch is unconfirmed; `findStuckCompletedDeliveries` will pick it up. If the terminal batch confirmed, local state is written to `completed`. |
+
+When zero resources are present (LOA-1003: a missing document must not fail the audit), the batching produces no non-empty batches; an explicit fallback sends a bare terminal Complete so the audit is not left un-completed.
 </Tab>
 <Tab title="Routed (flag ON — LOA-948)">
 When `document_push` is enabled and the audit state is `Complete`, `deliverSplit` generates one main AUS PDF plus one PDF **per property**. Both the AUS report and each property PDF are routed through the table-driven `document_push_routing_config` via `buildRoute` — the same routing table used for classified document delivery. Each property lands in its own eFolder container named from its address (identical addresses collapse per the EPC-1379 duplicate rule). All files are stored in S3 under `audit-deliveries/{transactionStateId}/`.

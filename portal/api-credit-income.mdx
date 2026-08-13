@@ -84,7 +84,7 @@ The income module mirrors the agent-run surface family. Income is implemented as
 | `POST /api/v1/portal/income/_testing/ensure-stub-loan` | client_admin | Test-only stub loan |
 | `GET /api/v1/portal/income/settings/review-threshold` | read | Read review threshold |
 | `PATCH /api/v1/portal/income/settings/review-threshold` | client_admin | Update review threshold |
-| `GET /api/v1/portal/income` | auth | List runs |
+| `GET /api/v1/portal/income` | auth | List runs (paginated; accepts `page` and `limit`; default `limit=20`) |
 | `GET /api/v1/portal/income/:id` | auth | Run detail |
 | `GET /api/v1/portal/income/:id/status` | auth | Poll status |
 | `GET /api/v1/portal/income/:id/documents` | auth | List documents |
@@ -95,6 +95,35 @@ The income module mirrors the agent-run surface family. Income is implemented as
 | `PATCH /api/v1/portal/income/:runId/documents/:extractionId/corrections` | client_admin, client_user | Apply corrections |
 | `GET /api/v1/portal/income/:runId/documents/:extractionId/pdf` | client_admin, client_user | Stream document PDF |
 | `GET /api/v1/portal/income/:runId/documents/:extractionId/pdf-url` | client_admin, client_user | Signed URL |
+
+#### GET /api/v1/portal/income
+
+Returns a paginated page of income runs for the authenticated lender.
+
+**Query params:** `page` (1-based, default 1), `limit` (default 20).
+
+**Response shape:**
+
+```ts
+{
+  data: IncomeRunSummary[]; // runs on this page
+  total: number;           // lender-wide total (sum of all statusCounts buckets)
+  page: number;
+  limit: number;
+  statusCounts: {          // lender-wide counts, not page-specific
+    pending: number;
+    running: number;
+    completed: number;
+    failed: number;
+  };
+}
+```
+
+`statusCounts` describes the lender's **entire** portfolio (not the returned page) so the dashboard stat cards stay consistent while the user pages. Both `income_runs` and `borrower_files` (bank-statement runs) contribute to these counts. `total` equals `statusCounts.pending + statusCounts.running + statusCounts.completed + statusCounts.failed`.
+
+<Note>
+Both sources (`income_runs` and `borrower_files`) are merged and re-sorted in memory before slicing, so neither can be offset in SQL. Per-page cost grows with page depth (page N at limit 20 reads `N × 20` rows from each table). This is documented at the query as a known trade-off; a SQL-level pagination rewrite is tracked as LOA-2252.
+</Note>
 
 Income rule authoring (templates, rule sets, custom rules) lives in [rules authoring](/portal/api-rules-authoring) via `portal-income-rules`.
 

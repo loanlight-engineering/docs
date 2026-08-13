@@ -46,7 +46,19 @@ An empty revision chain (no `appraisal_runs` rows) is the normal case for most a
 
 **Rule outcomes.** Rules are grouped by category with fails first, then warnings, then other non-passing outcomes. Each outcome carries its code, label, and severity pill. Overridden rules display a purple badge showing the rule's un-overridden outcome, so the reviewer can see what the agent originally found before a human disposition was applied — Octy is an agent-QA surface and a disposition must not erase the finding a reviewer came to inspect.
 
-**IRIS Photos.** When the `appraisalIris` entitlement is active for the lender, the Appraisal Evaluation section includes an IRIS Photos sub-section (`IrisPhotosSection`). It displays the photo honeycomb — one hexagonal cell per photo, colored by IRIS risk level — with per-photo analysis on click (scene, elements, conditions, quality, and bbox spotlight on the source-PDF page). The section also supports fullscreen, zoom, and severity/scene/element/condition filters via the shared `CombToolbar`. A `?photo=<id>` deep-link opens a photo directly in the lightbox.
+**IRIS Photos.** When the `appraisalIris` entitlement is active for the lender, the Appraisal Evaluation section includes an IRIS Photos sub-section (`IrisPhotosSection`). The section has three views, selected via a `SegmentedControl`:
+
+- **Findings (default)** — a findings-first risk report (`IrisFindingsReport`). The unit is the *finding*, not the photo: flagged detections are folded by scene × floor/unit hint × kind × code (`buildFindings()`) and grouped by display group → scene cluster, each level ordered worst-severity-first with the taxonomy's `sort_order` as tie-break. Severity owns colour; confidence gets a neutral three-bar meter. Weak-evidence findings are separated into a "Worth a look" tier and excluded from the badge count. Out-of-scope detections appear in a callout above the bands with no inference drawn. While the run is still processing, the section shows an "Analysing · N of M photos" line so a running count cannot read as a final one. Cleared photos are counted in a collapsed strip at the foot, never browsed.
+- **Gallery** — the honeycomb layout: one hexagonal cell per photo, colored by IRIS risk level, with `CombToolbar` filters, zoom ladder, fullscreen takeover, and `PhotoLightbox` — unchanged from before the Findings view was added.
+- **Property features** — non-flagged elements (`buildFeatureInventory()`): an inventory view of observed conditions, not a risk report.
+
+The `buildIrisPhotosView()` derivation runs once in `AuditRunModal` and is shared with the sidebar rollup so the badge count and the report body cannot drift.
+
+The overview rollup contributes an amber **findings** badge (not rose issues) — `SectionStatus` gains a `findings` member rather than repurposing `issues`, so no other section's badge changes.
+
+**PhotoLightbox.** The lightbox now shows **Analysis / PDF Spotlight tabs** instead of a bottom sheet. Both the source-PDF spotlight and photo crops are streamed same-origin (no 302-redirect to S3) via dedicated Next.js route handlers (`/api/audit-runs/[id]/iris/source-pdf` and `/api/audit-runs/[id]/iris/photos/[photoId]/image`). A `?photo=<id>` deep-link still opens a photo directly in the lightbox.
+
+**Scene applicability picker.** The taxonomy tab's applicability picker now shows its full scene list at once and supports bulk select.
 
 Octy is the **primary** viewing surface for IRIS — the lender portal Photos tab ships dark behind `SHOW_IRIS_PHOTOS = false` and is not yet visible to lenders.
 
