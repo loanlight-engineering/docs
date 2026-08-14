@@ -110,6 +110,17 @@ A separate base URL and key from the loanlight-api pair — integrations is a di
 
 See [Doc Refreshes](/octy/doc-refreshes).
 
+## DB Studio (LOA-1944)
+
+| Variable | Purpose |
+|---|---|
+| `STUDIO_GRANTS_TABLE` | DynamoDB table name for session grants. Composite key: `userId` (partition) + `mode` (sort). |
+| `STUDIO_KILL_SWITCH_PARAM` | SSM parameter name for the break-glass switch. Absent or any value other than `"enabled"` disables Studio fail-closed. |
+| `RECONCILE_API_KEY` | Shared secret the EventBridge nightly deprovisioning task sends as `x-internal-api-key` to `POST /api/studio/reconcile-roles`. Distinct from `OCTY_INTERNAL_API_KEY`. From Secrets Manager (`Octy/ReconcileApiKey`). |
+| `WORKOS_ORGANIZATION_ID` | Fallback WorkOS org id for audit events when no user token is present (e.g. the reconcile cron). |
+
+In deployed environments CDK sets all four automatically (`getEnvironment()` / `getSecrets()` in `infra/lib/application-stack.ts`). Locally, none need to be set: `IS_DEPLOYED !== "true"` bypasses the kill switch and grant lookup, and `resolveStudioSql()` falls back to the shared `DATABASE_URL` connection. See [DB Studio](/octy/db-studio).
+
 ## LlamaCloud
 
 | Variable | Purpose |

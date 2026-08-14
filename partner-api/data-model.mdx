@@ -35,8 +35,36 @@ Body of [`POST /api/v1/partner/loans`](/partner-api/loans). File: `create-partne
 | `lenderCode` | string | no | ≤ 100 chars |
 | `loanType` | string | no | ≤ 100 chars (see note) |
 | `loanProgramName` | string | no | ≤ 255 chars |
-| `borrowerType` | string | no | `@IsIn(["personal", "business"])` — income context for the bank-statement income agent (LOA-1698). Absent means the income-context skip decision is indeterminate. **Not derivable from other metadata.** |
-| `incomeQualification` | integer | no | `@IsIn([12, 24])` — explicit averaging window in months. Overrides the value derived from the resolved loan program (precedence: override > derived > skip). |
+| `bankStatementIncome` | `BankStatementIncomeMetadataDto` | no | Nested object carrying all bank-statement income context. Supersedes any top-level income fields an older integration may send when present. See below. |
+
+<Note>
+The flat top-level fields `borrowerType` and `incomeQualification` are **de-documented as of LOA-2096** — they no longer appear in the published OpenAPI document or Redoc. They remain accepted (with their original validation) so integrations built against the old shape keep working, but `bankStatementIncome` is the documented and forward path. The nested object wins whenever both are present.
+</Note>
+
+### BankStatementIncomeMetadataDto
+
+`LoanMetadataDto.bankStatementIncome` — the only documented way to send bank-statement income context. File: `create-partner-loan.dto.ts`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `basis` | `"personal" \| "business"` | no | Borrower type for income qualification. Explicit only — not derivable from other metadata. Absent leaves the income-context skip decision indeterminate. |
+| `months` | `12 \| 24` | no | Explicit averaging window in months. Overrides the value derived from the resolved loan program (precedence: override > derived > skip). |
+| `expenseFactor` | string | no | Business-only expense haircut, 0–1 decimal with **at most 4 decimal places** (e.g. `"0.1500"`). Applied as `qualified = deposits × ownershipPercentage × (1 − expenseFactor)`. Ignored unless the effective basis is `"business"`. String-typed deliberately — a JSON number is coerced to a string, but the 4-decimal cap is enforced either way to prevent silent rounding into the `numeric(5,4)` column. |
+| `ownershipPercentage` | string | no | Business-only ownership share, 0–1 decimal with at most 4 decimal places (e.g. `"1.0000"`; 1 = 100%). Omitted or absent means 100% ownership. Same typing rationale as `expenseFactor`. |
+
+**Example:**
+```json
+{
+  "bankStatementIncome": {
+    "basis": "business",
+    "months": 12,
+    "expenseFactor": "0.3500",
+    "ownershipPercentage": "1.0000"
+  }
+}
+```
+
+**Persisted columns (migration `0300`):** `loans.expense_factor` / `loans.ownership_percentage` (nullable `numeric(5,4)` — `NULL` means the partner never supplied a value, which is the provenance signal). `borrower_files.expense_factor_source` / `borrower_files.ownership_percentage_source` track which component supplied the value in use (`'partner' | 'default' | 'viewer_edit'`).
 
 <Warning>
 **`loanType` is free-form text (the `LoanTypeSchema` mirrors this).** The DB column is `text`; the value passes through verbatim (`loan.service.ts::resolveLoanType`). There is **no** `@IsEnum` and **no** `@Matches` regex.

@@ -239,6 +239,54 @@ The portal admin UI for this lives at `/admin/staged-eligibility-rules`. The BFF
 | `GET /api/admin/staged-eligibility-rule-bundles` | list bundles |
 | `POST /api/admin/staged-eligibility-rules/apply` | apply with `{ lenderId, bundleId, dryRun }` |
 
+## RuleOps: automatic bundle application and rule exports
+
+**RuleOps Trigger 1** (commit `c2f8b1d`, PRD `packages/api/docs/ruleops-trigger1-export-build-prd.md`) automates post-deploy appraisal bundle reconciliation so engineers no longer need to re-apply staged bundles by hand in a narrow window after each production deploy.
+
+### How it works
+
+A lender assignment declaration maps lender slugs to an ordered array of bundle IDs. After each deploy, a standalone CDK reconciler task runs inside the VPC on the deployed image, resolves each lender by slug (with an `expectedName` cross-check), applies bundles in the declared order, and verifies convergence with a two-pass gate: pass 2 must see exclusively `no-op` records before the run is declared converged.
+
+Key design decisions:
+- **Appraisal only.** Credit bundles are additive-only and cannot reach a fixed convergence point, so credit is out of scope.
+- **A converged apply is not an empty diff.** `RuleChangeLog.push` emits a record for every declared write and labels it `no-op`. The convergence test is *every record is `no-op`*, never `changes.length === 0`.
+- **A reconcile failure alerts; it does not fail the deploy.** Rule convergence is a separate operational concern; the alerting discriminator is `reconcile_incomplete`, not a negation of `reconcile_converged` (which fires on every healthy rule rollout).
+- **Composition is not atomic across bundles.** One transaction per `applyBundle` call; a mid-composition failure leaves earlier members committed. The failure event names the partial state.
+
+### Current deployment state
+
+<Warning>
+The assignment declaration **ships empty** in both `int` and `prod`. Populating it requires the LOA-2260 blast-radius gate (impact budget, per-dimension diff scoring, `refused_budget`) as a precondition. Until that gate lands, the reconciler runs successfully and exits having resolved zero lenders. The mechanism is fully built and tested; going live is a separate gated step tracked as **LOA-2260**.
+</Warning>
+
+### Rule-system export
+
+Each bundle apply captures a versioned snapshot of the lender's rule state and ships it to S3 (`rule_set_exports` table, migration `0301`). The export:
+
+- Is serialized **inside the apply transaction** (CPU only, no network), then shipped to S3 post-commit. This closes the race a post-commit re-read would open while keeping an S3 round-trip out of an open Postgres transaction.
+- The capture sits inside a **SAVEPOINT**, not a bare `try`/`catch` — a bare catch would return a success summary over a database that kept nothing (Postgres aborts the whole transaction on the first statement error and runs the eventual `COMMIT` as a ROLLBACK without raising).
+- Migration `0302` backfills `luxury-wse-credit`'s lender slug, required for the assignment declaration.
+
+`rule_set_exports` schema:
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | uuid | Primary key |
+| `lender_id` | uuid | FK to `lenders` (cascade delete) |
+| `rule_set_id` | uuid | The rule set this export covers |
+| `rule_set_version` | integer | Version at time of capture |
+| `s3_bucket` | text | Versioned S3 export bucket (3-year retention) |
+| `s3_key` | text | Object key |
+| `s3_version_id` | text | S3 object version |
+| `content_sha256` | text | SHA-256 of the exported content |
+| `created_at` | timestamp | When the export was taken |
+
+### Datadog monitors
+
+Two monitors ship with the reconciler (`observability/datadog/`):
+- `ruleops-reconcile-failed` — fires on `reconcile_incomplete` events.
+- `ruleops-rule-export-lost` — fires when an S3 export does not land within the expected window.
+
 ## portal-income-rules
 
 Controller: `portal-income-rules/portal-income-rules.controller.ts` at `api/v1/portal/income-rules`. Same template-adoption pattern via `IncomeRuleSetsService`.

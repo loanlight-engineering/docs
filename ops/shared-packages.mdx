@@ -212,6 +212,31 @@ migrationFiles(); // ["0000_initial_schema.sql", ...]
 
 Consumed by: the API deploy (applies the chain to Int/Prod), the Postgres release docker image build, and Octy (via LOA-1964, not yet wired). Publishing follows the standard bump-to-publish flow in `cd.yml`.
 
+### aus-db checksum manifest (LOA-1997)
+
+`aus-db` now ships a committed `manifest.json` at the package root and an offline integrity gate that detects drift between the published package and the authoritative API repo.
+
+**What the manifest records:**
+
+| Field | Description |
+|---|---|
+| `manifestVersion` | Schema version (currently `1`). |
+| `algorithm` | Hash algorithm (`"sha256"`). |
+| `provenance.repo` | The authoritative source repo (`loanlight-engineering/loanlight-api`). |
+| `provenance.commit` | The API commit whose trees the package matches. |
+| `provenance.relation` | `"copied-from"` — the trees are a verbatim byte-copy of the API source at that commit. |
+| `provenance.sources` | Where each shipped tree came from inside the API repo (`migrations/` and `schema/`). |
+| `trees.migrations` | File count, a `sha256:<hex>` tree digest, and per-file sha256 hashes. |
+| `trees.schema` | Same for the schema copy. |
+
+The tree digest (`treeDigest()`, `src/manifest.ts`) is sha256 over a line-oriented canonical serialization (`<hex>  <path>\n` per file, lexicographically ordered), so any file reorder or rename moves the digest. Symlinks and newlines in paths are refused outright.
+
+**Verification API (`src/verify-against-api.ts`):** a cross-repo tool compares the shipped migration chain against the API repo's live chain and reports `missing`, `unexpected`, `modified`, `count-mismatch`, `digest-mismatch`, and `journal-prefix-violation` failures. The last failure kind is the only one that is not a pure hash comparison: it reports a shipped journal entry that the compared-against journal contradicts at the same position.
+
+`diffTrees()` accepts `allowExtra: true` to allow the actual tree to hold files the recorded one does not — used when comparing against a newer API state where later migrations legitimately exist upstream.
+
+**Exclusions:** `*.spec.ts`, `CLAUDE.md`, and `__tests__/` are excluded from the hashed trees by default (`DEFAULT_EXCLUSIONS`). The manifest is regenerated on every package publish via `generate-manifest` before the bundle step; CI fails on manifest drift (`detectManifestDrift` in the bundle versioning infrastructure).
+
 ## shared-cdk: reusable constructs
 
 `shared-cdk` is consumed by each repo's `infra/` app to build identical, hardened

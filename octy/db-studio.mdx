@@ -1,66 +1,18 @@
 ---
 title: DB Studio
-description: The read-only Postgres explorer (int-only).
+description: Per-user, least-privilege, audited production database access via Prisma Studio.
 icon: database
 ---
 
-DB Studio at `/db-studio` is a read-only Postgres explorer for the shared LoanLight Aurora database. It is meant for engineers inspecting schema and data while triaging an issue — an ER diagram, a filterable data grid, foreign-key expansion, and a command-K jump palette.
+DB Studio is **Prisma Studio** embedded at `/prisma-studio` (`src/app/(studio)/prisma-studio/`). It gives `@loanlight.com` engineers direct, read-only access to the LoanLight Aurora database in both `int` and production environments, with a per-user Postgres role provisioned just-in-time on unlock and revoked nightly by a reconcile job (LOA-1944).
 
-<Warning>
-DB Studio is **int-only**. The middleware returns a **404** for any `/db-studio` path when `DEPLOYED_ENVIRONMENT === "prod"`, and the nav link is appended only when `!isProd`. Do not expect it in production.
-</Warning>
+<Note>
+**The previous in-house DB Studio (`/db-studio` with its custom DataGrid, SchemaSidebar, ERNode, and companion API routes) was removed in LOA-1944.** All `src/components/studio/*` components and the `/api/studio/schemas`/`/tables`/`/enums`/`/er-schema`/`/fk-record` routes no longer exist. `/prisma-studio` is the only Studio path.
+</Note>
 
-## Read-only guarantees
+## How it works
 
-DB Studio never writes. It uses a dedicated raw `pg` pool (`src/lib/studio-db.ts`, separate from the Drizzle app pool, `max: 3`) and routes every query through `studioQuery()`, which calls `assertReadOnly()` before execution:
-
-- The statement must start with `SELECT` (after trimming) — anything else throws.
-- A disallowed-keyword regex rejects `DELETE`, `UPDATE`, `INSERT`, `TRUNCATE`, `DROP`, `ALTER`, `CREATE`, `COPY`, and `WITH ... (DELETE|UPDATE|INSERT)` CTEs.
-- A multi-statement guard rejects a semicolon followed by any non-whitespace.
-- Every query carries a 5-second `query_timeout`.
-
-```ts
-const DISALLOWED =
-  /^\s*(WITH\s+.+?(DELETE|UPDATE|INSERT)|DELETE|UPDATE|INSERT|TRUNCATE|DROP|ALTER|CREATE|COPY)/i;
-const HAS_EXTRA_STMT = /;\s*\S/; // semicolon followed by non-whitespace = multiple statements
-```
-
-Every Studio API route is also wrapped by `withStudioAuth`, which applies the same WorkOS `@loanlight.com` domain gate as the rest of the app. See [Authentication and access control](/octy/auth-and-access).
-
-## API surface
-
-The Studio routes live under `src/app/api/studio/*`:
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/studio/schemas` | Schemas, tables, views, enums + rule/policy counts + per-table row counts (30s cache). |
-| `GET /api/studio/tables/[schema]/[table]/data` | Paginated rows with filtering and sorting. |
-| `GET /api/studio/tables/[schema]/[table]/structure` | Column definitions for a table. |
-| `GET /api/studio/tables/[schema]/[table]/count` | Row count. |
-| `GET /api/studio/enums` | Enum types and values. |
-| `GET /api/studio/er-schema` | Graph data for the ER diagram. |
-| `GET /api/studio/fk-record` | Resolve a single foreign-key target row (for FK expansion). |
-
-### Column allowlisting on the data route
-
-The data route does not trust client-supplied column names. It validates the table, then builds a column allowlist from `information_schema.columns` and rejects any unknown sort or filter column with a 400. Supported filter operators: `equals`, `not_equals`, `contains`, `starts_with`, `ends_with`, `is_null`, `is_not_null`, `gt`, `lt`, `gte`, `lte`, `like`, `ilike`, `not_like`, `in`. A global text search runs across the table's text columns. The response returns rows, total, and column metadata (including PK/FK info). Page sizes are 25/50/100/150/500.
-
-## UI
-
-The client is rendered from `src/components/studio/`:
-
-- **SchemaSidebar** — navigate schemas and tables.
-- **DataGrid** — TanStack Table data grid with the filter operators above.
-- **AdvancedFilterPanel** — compose column filters.
-- **SchemaVisualizer** / **SchemaVisualizerInner** — React Flow ER diagram (laid out with `dagre`).
-- **QuickJumpPalette** — command-K palette to jump to any table.
-- **FKExpander** — expand a foreign-key value into its target row.
-- **TableTabManager** — Data / Structure / Metadata tabs per table.
-- **MetadataPanel**, **PreviewPanel**, **StudioLayout** — supporting chrome.
-
-## Prisma Studio
-
-Octy also embeds **Prisma Studio** at `/prisma-studio` (`src/app/(studio)/prisma-studio/`). Unlike the in-house DB Studio, Prisma Studio is the standard Prisma GUI rendered via `@prisma/studio-core` (patched for the Octy deployment via `patches/@prisma__studio-core@0.33.0.patch`). It connects through a dedicated read-only Postgres session defined in `src/lib/prisma-studio-db.ts`, which passes `options: "--set=default_transaction_read_only=on"` so every query runs inside a read-only transaction by default.
+Prisma Studio is rendered via `@prisma/studio-core` (patched for the Octy deployment via `patches/@prisma__studio-core@0.33.0.patch`). The API proxy at `src/app/api/prisma-studio/route.ts` forwards each query to a per-user Postgres connection opened by `connection-cache.ts` and authenticated via RDS IAM.
 
 A server-side guard (`src/lib/prisma-studio-guard.ts`, `assertReadOnlySession`) rejects tamper attempts before execution:
 
@@ -68,7 +20,80 @@ A server-side guard (`src/lib/prisma-studio-guard.ts`, `assertReadOnlySession`) 
 - Queries containing `\bREAD WRITE\b` — blocks explicit `BEGIN READ WRITE` or `SET TRANSACTION READ WRITE`.
 - Queries containing `pg_terminate_backend` — blocks connection abuse.
 
-Prisma Studio complements the in-house DB Studio: the in-house tool offers a richer filter/FK-expansion UI, an ER diagram, and a command-K palette; Prisma Studio provides the table browser most engineers already know from the Prisma ecosystem. Both are int-only; the middleware applies the same `@loanlight.com` WorkOS domain gate to `/prisma-studio` as it does to `/db-studio`. The API proxy route lives at `src/app/api/prisma-studio/route.ts`.
+The per-user connection also carries `default_transaction_read_only = true` as a session parameter, so every query runs inside a read-only transaction by default.
+
+## Access control
+
+Three layers gate every request:
+
+1. **WorkOS domain guard** — the middleware only allows `@loanlight.com` AuthKit sessions to reach `/prisma-studio` or any `/api/studio/*` route.
+2. **WorkOS permission** — the user's access token must carry `db-studio:prod:read` (read access) or `db-studio:prod:write` (write, reserved for LOA-2249). `readPermissionsFromToken()` (`src/lib/studio/authz.ts`) decodes this from the `permissions` claim without re-verifying the token signature. Add the permission to a user via their role in the WorkOS dashboard; they must re-authenticate for it to take effect.
+3. **Kill switch** — `isKillSwitchEngaged()` (`src/lib/studio/session-grant.ts`) reads an SSM parameter (`STUDIO_KILL_SWITCH_PARAM`). If the parameter is absent, unreadable, or set to any value other than `"enabled"`, Studio is inaccessible — fail-closed by design. Setting it to `"disabled"` takes effect immediately with no redeploy.
+
+## Unlock flow
+
+A user with `db-studio:prod:read` unlocks Studio at `/prisma-studio` by supplying a reason (and an optional ticket reference). `POST /api/studio/unlock`:
+
+1. Verifies the kill switch is not engaged.
+2. Verifies the user holds the required permission.
+3. Calls `ensureRoleExists()` (`src/lib/studio/db-role.ts`) as `octy_provisioner` to create `octy_ro_<user>` if it does not already exist and grant it `octy_readonly` membership. The role name is derived from the user's email (`john.breland@loanlight.com` → `octy_ro_john_breland`). `CREATE ROLE` takes no bind parameters, so the derivation is strictly allowlisted and re-validated at the interpolation point.
+4. Writes a DynamoDB session grant (`STUDIO_GRANTS_TABLE`): read sessions expire after **30 minutes**, write sessions after **15 minutes**. DynamoDB TTL deletion is eventual, so the endpoint re-checks the expiry timestamp on every request rather than trusting the TTL.
+5. Emits a `db_studio.session.unlocked` WorkOS audit event (`src/lib/studio/workos-audit.ts`). A failed audit delivery is swallowed by design (`auditBestEffort`) — the unlock still succeeds, and the `console.log` before the call always reaches CloudWatch.
+
+Subsequent Studio requests go through `withStudioSession` (`src/lib/studio/with-studio-session.ts`), which re-checks the kill switch and the DynamoDB grant on every call.
+
+## Per-user Postgres roles
+
+Each unlocked user gets their own Postgres role created by `octy_provisioner` (a `CREATEROLE LOGIN` role with `rds_iam`). Three privilege-holding roles are bootstrapped by `loanlight-api`'s `db-init` Lambda:
+
+| Role | Purpose |
+|---|---|
+| `octy_readonly` (NOLOGIN) | `USAGE` on `public`, `SELECT` on all tables, plus default privileges for future tables. |
+| `octy_readwrite` (NOLOGIN) | Same plus `INSERT`/`UPDATE`/`DELETE`. Reserved for LOA-2249; no per-user role holds this today. |
+| `octy_provisioner` (LOGIN CREATEROLE) | Authenticates via RDS IAM; runs `CREATE ROLE` / `GRANT` / `DROP ROLE`. Holds `octy_readonly` and `octy_readwrite` with `ADMIN TRUE, INHERIT FALSE, SET FALSE` — admin-only so it can grant membership onward, but never inherits those privileges itself. |
+
+User roles follow the pattern `octy_ro_<local_part>` (read) or `octy_rw_<local_part>` (write). `octy_provisioner` connects through `getProvisionerSql()` (`src/lib/studio/connection-cache.ts`); user sessions connect through `getUserSql()`, which maintains a per-user pool of up to 3 connections with a 1-hour recycle and a fresh IAM token per physical connection.
+
+<Note>
+**`octy_provisioner` and the three privilege holders are created by `loanlight-api`'s `db-init` Lambda** (commit `0eb9757`, `packages/api/infra/lambda/db-init/index.ts`). They must exist before the first unlock — `ensureRoleExists()` fails with `permission denied to grant role` if they do not. Verify with the `pg_auth_members` query in `octy/docs/db-studio-prod-access.md`.
+</Note>
+
+## Nightly reconcile (deprovisioning)
+
+`POST /api/studio/reconcile-roles` is called by an EventBridge-scheduled CDK task (`Octy/ReconcileApiKey` authenticates it). The job:
+
+1. Lists all `octy_ro_*` / `octy_rw_*` roles in Postgres via `listPerUserRoles()`.
+2. Lists the users currently authorized (i.e., holding `db-studio:prod:read`) by resolving the permission to roles in the WorkOS directory (`listAuthorizedEmails()`, `src/lib/studio/workos-directory.ts`).
+3. Calls `rolesToDrop()` (`src/lib/studio/reconcile.ts`) to compute the diff. **Fails safe on an empty authorized list** — if WorkOS returns no users, nothing is dropped (an empty response is far more likely to be an API failure than a genuine "nobody has access").
+4. Drops stale roles with `dropRole()` as `octy_provisioner`.
+
+## Audit trail
+
+WorkOS Audit Logs captures every significant event:
+
+| Event | Trigger |
+|---|---|
+| `db_studio.session.unlocked` | Successful unlock |
+| `db_studio.query.attempted` | Query sent to Studio |
+| `db_studio.query.blocked` | Query rejected by the guard |
+| `db_studio.access.denied` | Permission or kill-switch denial |
+| `db_studio.role.provisioned` | Per-user role created |
+| `db_studio.role.revoked` | Per-user role dropped by the reconcile job |
+
+Events are defined in `src/lib/studio/audit.ts` and `workos-audit.ts`. Configure a WorkOS → Datadog log stream in the WorkOS dashboard to make them searchable alongside application logs. A delivery failure is swallowed and logged to CloudWatch (`db_studio.audit.delivery_failed`); there is no retry and no Octy-side database table backing this trail.
+
+## Environment variables
+
+See [Environment variables](/octy/environment-variables) for the full list. Variables added by LOA-1944:
+
+| Variable | Purpose |
+|---|---|
+| `STUDIO_GRANTS_TABLE` | DynamoDB table name for session grants. |
+| `STUDIO_KILL_SWITCH_PARAM` | SSM parameter name for the break-glass switch. |
+| `RECONCILE_API_KEY` | Shared secret the EventBridge reconcile task sends as `x-internal-api-key`. Distinct from `OCTY_INTERNAL_API_KEY`. |
+| `WORKOS_ORGANIZATION_ID` | Fallback WorkOS org id for audit events when no user token is present (e.g. the reconcile cron). |
+
+In deployed environments CDK sets all four automatically. Locally, none need to be set: `IS_DEPLOYED !== "true"` bypasses the kill switch and grant lookup entirely, and Studio falls back to the shared `DATABASE_URL` connection.
 
 ## Related pages
 
@@ -77,6 +102,6 @@ Prisma Studio complements the in-house DB Studio: the in-house tool offers a ric
 The domain gate that also protects Studio.
 </Card>
 <Card title="Environment variables" href="/octy/environment-variables" icon="settings">
-`DATABASE_URL` and `DEPLOYED_ENVIRONMENT`.
+Full variable reference including the four DB Studio vars.
 </Card>
 </Columns>

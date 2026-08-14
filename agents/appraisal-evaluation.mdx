@@ -71,6 +71,8 @@ operational consequence is that Priority Financial's integration must send `agen
 ["appraisalEvaluation"]` on any audit that should include one.
 </Note>
 
+`PortalAppraisalPayload` now includes `marketComps: AppraisalMarketComps | null` (LOA-2324, `shared-types@1.21.0`) alongside the existing `rentalData` field. The EPC embedded portal renders market comps — Zillow for-sale listings and ATTOM recently-sold sales from the `marketCompsFetch` graph node — in the appraisal comparables table via `AppraisalComparablesTable` (`shared-ui@0.15.0`). A `CompSourcePill` distinguishes "Appraisal" (extracted from the PDF), "SSR" (submission support), and "LoanLight Data" (market-enrichment) rows. The `marketComps` field is `null` when `ENABLE_ZILLOW_COMPS` is off or the subject is ineligible.
+
 `PortalAppraisalPayload` includes `rentalData: AppraisalRentalData | null` (LOA-1954). The EPC/partner
 surface gets the **display subset only**: `AppraisalAuditProjectionService` pipes rental data through
 `toAppraisalRentalData()` before returning, stripping the `_`-prefixed internal diagnostic fields
@@ -443,6 +445,10 @@ The rule definitions live in `lib/appraisal-pipeline/rules/definitions` (registr
 `REC_` (3), `INCOME_` (2), `RENT_` (2), `GEN_` (1), `UNIT_` (1). The rules are agency-aware
 (`AgencySource`: `fannie_mae`, `freddie_mac`), support compound conditions (`compound-walker`,
 `condition-schema`), and use `feature-gates`.
+
+<Note>
+**SITE_005 gas-unreported behavior (LOA-2188, migrations `0304`/`0305`):** Gas reported as `"None"` now returns `NEEDS_INFO` rather than `FAIL`. The rule previously could not distinguish an all-electric property from an unreadable checkbox, so a `FAIL` on `"None"` was misleading. All other utilities with `"None"` remain a hard `FAIL`, with a per-utility message. The `CONDO_003` owner-occupancy threshold was corrected from `< 51%` to `<= 50%` to match Fannie Mae's established-project standard (strictly greater than 50% owner-occupied is required to pass). Both changes were also published to adopted lender rules via the guarded migrations, so already-adopted lenders received the corrected descriptions and thresholds automatically.
+</Note>
 
 <Note>
 **SUBJ_015 removed globally (LOA-2201, migration `0290`).** SUBJ_015 (Filename vs Address
