@@ -198,6 +198,15 @@ The subject row is `"subject"` (`source_order: 0`); REO rows are `"investment"`.
 `current_home` row is persisted whenever borrower data was fetched, regardless of loan purpose.
 </Warning>
 
+## `PropertyDataResponse` — `locationType`
+
+`locationType?: string | null` was added to `PropertyDataResponse` in `shared-types@1.21.1` (LOA-1952). The field carries an Urban / Suburban / Rural classification derived by joining ATTOM's county FIPS + census tract against USDA's RUCA reference table. Two distinct absent states:
+
+- `null` — the field was never measured (a row written before the feature shipped).
+- `"Unknown"` — the classifier ran but could not resolve the property's identifiers to a census tract.
+
+The two states are deliberately distinguishable, matching the existing pattern established by `floodZone`.
+
 ## Related
 
 <Columns cols={2}>

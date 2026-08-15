@@ -39,6 +39,8 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/settings/rules` | all roles (`/new` admin-only) |
     | `/settings/rules/agency` | under rules layout |
     | `/settings/rules/credit` (+ `/new`) | all roles (create admin-only) |
+    | `/settings/rules/1003-check` | all roles (read-only catalog view of URLA-Completeness checks) |
+    | `/settings/rules/property-data` | all roles (read-only catalog view of Property-Data checks) |
     | `/settings/key-field-review` | all roles |
     | `/settings/document-routing` | `client_admin`; gated on `flags.documentRouting` (default-OFF, env `FEATURE_DOCUMENT_ROUTING`). Lets client admins customize the eFolder name and description for each routed document type. Backed by `GET /api/v1/portal/routing-config/catalog` (doc-type categories + field labels) and the portal routing-config CRUD endpoints (LOA-1602). |
     | `/settings/appraiser-deny-list` | all roles; hidden from a global super admin unless impersonating |

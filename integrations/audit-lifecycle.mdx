@@ -50,6 +50,8 @@ The AUS publishes EventBridge events (Source `loanlight.aus`). The `AusUpdateRul
 </Step>
 <Step title="Render the AUS Report PDF">
 `AusUpdateService.handleAusUpdate` is the terminal handler. It loads `transaction_state` + client + `transaction_record`, applies the shadow guard, updates `audit_details`, and generates the PDF via `AuditReportPdfService.generate(...)`. That fetches results from loanlight-api (`AuditResultsFetcherService.fetchV2Inputs`) and renders with the [audit-pdf library](/integrations/audit-pdf). On a non-`Complete` state, or missing identifiers/token/fetch error, it renders a NULL_SECTIONS status PDF.
+
+`fetchV2Inputs` uses **per-endpoint timeout semantics** (LOA-2294): `results` and `property_data` are fatal (a timeout throws and requeues the SQS message), while `urla_completeness` and `credit` degrade to a null section. This is the right tradeoff because `results` alone populates the summary, `dataConsistency`, and `documentHealth` sections — losing it leaves the report empty in every meaningful respect — and `property_data` drives the split path's per-property PDF output. A degraded section is logged at error level as `audit_data.fetch.section_degraded` and never silently swallowed.
 </Step>
 <Step title="PATCH the report into Encompass">
 The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResources` → generate streaming URLs → PUT bytes → resource refs), then the EPC transaction is PATCHed:

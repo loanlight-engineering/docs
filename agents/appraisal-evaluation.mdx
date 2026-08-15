@@ -340,7 +340,7 @@ The LLM step is declared as `appraisalEvaluation.irisVisionCatalog` in the llm-c
 
 ### Taxonomy as data (`appraisal_iris_taxonomy`)
 
-The IRIS vocabulary is stored in `appraisal_iris_taxonomy` (migration `0296`). Each row is a scene, element, or condition — 108 seeded rows total (38 scenes / 52 elements / 18 conditions). The agent loads `active = true` rows at run time and builds its prompt and Zod validators from them, so severity tuning and vocabulary changes take effect without a deploy. Rows are global (no `lender_id`). Retired entries use `active = false`, never `DELETE` — photo observation payloads reference codes.
+The IRIS vocabulary is stored in `appraisal_iris_taxonomy` (migration `0296`). The agent loads `active = true` rows at run time and builds its prompt and Zod validators from them, so severity tuning and vocabulary changes take effect without a deploy. Rows are global (no `lender_id`). Retired entries use `active = false`, never `DELETE` — photo observation payloads reference codes.
 
 Key columns:
 
@@ -351,7 +351,32 @@ Key columns:
 - `applicable_scenes` — used post-detection for the out-of-scene anomaly scan, **not** a detection filter
 - `out_of_scene_severity` — severity for an out-of-scene finding when applicable
 
+**Fact-group columns** (migration `0308`, LOA-1901): fact groups are now taxonomy config, not hardcoded logic. Every distinct `fact_tags` tag across active element/condition rows defines a fact group at read time.
+
+- `fact_tags` — array of fact-group membership tags for this element/condition (e.g. `["outbuildings", "agricultural_use"]`). An entry may carry multiple tags.
+- `fact_min_strength` — `'weak' | 'moderate' | null`. Below-floor detections cannot assert `yes` for the group (they can still prevent a `no` assertion).
+- `fact_scenes` — scene-scope filter for the sweep only; deliberately separate from `applicable_scenes`, which drives out-of-scene stamping.
+- `instance_flag_over` — scenes only. Emit a count fact group and flag when per-dwelling confirmed instances exceed this threshold (e.g. kitchen count > 1 is the accessory-unit signal).
+- `instance_flag_severity` — severity for the instance-count flag.
+
+**Report-band column** (migration `0309`, LOA-1901):
+
+- `photo_group` — scenes only. The level-1 band photos of this scene are grouped under in the findings report and the gallery (`subject_interior | subject_exterior | adu_outbuildings | comparables | collages | maps_sketches | other`). `NULL` resolves to `"Other"`. This replaces the hardcoded scene sets `photo-display.ts` used to carry; a new scene picks up its band purely from config.
+
 Drift between the schema and the seed SQL is enforced by `__tests__/appraisal-iris-taxonomy.spec.ts`.
+
+### Fact Groups v2 — read-time sweep
+
+Fact groups (which properties the subject has: manufactured home, ADU, pool, etc.) are now computed at read time by `fact-sweep.ts`, not hardcoded. The engine (`sweepFactGroups`) derives groups from stored per-photo observations plus the **current** taxonomy config. Tuning a tag, strength floor, or scene threshold re-grades all historical runs instantly without a re-run — exactly like flag severities already do via the read-time taxonomy join. Nothing is persisted from the sweep; `appraisal_runs.iris_facts` keeps only the run lifecycle.
+
+Two mechanism types, no per-group special cases:
+
+- **Tag groups** — every distinct `fact_tags` tag is a group. Members are the detected element/condition rows carrying that tag. Tone derives from detected members' existing flag config.
+- **Count groups** — a scene with `instance_flag_over` emits a per-dwelling instance count using the same scene-level semantics as the v1 kitchen-count logic, now generalised to every applicable scene.
+
+Presence is tri-state: `no` is only claimable on a complete run; comparable-property photos and hidden (non-photo) scenes never feed a group.
+
+Both the portal (in-process) and Octy (via `POST /internal/iris/fact-sweep`) read the same engine output. The batch endpoint accepts up to **25 appraisal run IDs**, up to **500 photos per run**, and resolves taxonomy from the shared Drizzle DB client.
 
 ### Photo table (`appraisal_photos`)
 
@@ -363,10 +388,11 @@ Drift between the schema and the seed SQL is enforced by `__tests__/appraisal-ir
 
 ### Portal and Octy surfaces
 
-The portal **Photos** tab ships dark behind `SHOW_IRIS_PHOTOS = false` — it is not yet visible to lenders. Octy's audit-run modal is the primary viewing surface for IRIS data: the **IRIS Photos** section shows the photo honeycomb and per-photo analysis. See [Loan lookup and audit-run modal](/octy/loan-lookup).
+The portal **Photos** tab is gated to `super_admin` only via `canSeeIrisPhotos` — not yet visible to lenders. It has four views, selected via a tab strip: **Findings** (default), **Facts** (taxonomy-driven fact groups from the sweep), **Property features** (non-flagged element inventory), and **Gallery** (honeycomb). The processing view shows the scanning comb on top; completed photos settle into their scenes below it. Octy's audit-run modal is the primary viewing surface for IRIS data: the shared `IrisAnalysisPanel` provides the same four-view layout. See [Loan lookup and audit-run modal](/octy/loan-lookup).
 
-Octy also provides a dedicated `/appraisals-iris` admin page with two tabs:
-- **IRIS Taxonomy** — browse and inspect the seeded taxonomy rows.
+Octy also provides a dedicated `/appraisals-iris` admin page with three tabs:
+- **Appraisal Runs** — a paginated table of all IRIS-analyzed appraisal runs across lenders.
+- **IRIS Taxonomy** — browse and inspect the seeded taxonomy rows, including the new fact-group and photo-band columns.
 - **Dry Run** — internal multi-model compare harness; send a source PDF through multiple vision models side by side (`POST /api/appraisals-iris/dry-run`, SSE endpoint).
 
 ### agenticRefine, detectScanned, and ocr have been deleted
@@ -528,7 +554,11 @@ The fields were renamed between spec and as-built: LOA-1368/1374 spec'd `improve
 `cost_approach.adu_sqft`. Grepping `has_adu` finds nothing.
 </Note>
 
-#### First Colony (Sharp Advantage) bundle updates (LOA-1713)
+#### First Colony (Sharp Advantage) bundle updates (LOA-1713 / LOA-2188)
+
+<Note>
+**`FCAPP_018` scoped to condo/co-op forms (LOA-2188 follow-up, migration `0307`):** `FCAPP_018` now declares `formTypes: ["1073", "1075", "coop"]`, restricting evaluation to condo and co-op appraisals. Previously the rule evaluated on all form types, which was incorrect since its `then` arm checks `condo_project_info.presale_percent` — a field only applicable to condo projects. `FCAPP_021` remains unscoped pending the fleet-wide form-type normalization fix in LOA-2285.
+</Note>
 
 Two additions to the First Colony (`sharp_advantage`) bundle:
 
@@ -608,11 +638,11 @@ the `appraisalIris` entitlement runs).
 </ResponseField>
 
 <ResponseField name="appraisal_iris_taxonomy" type="table">
-The IRIS taxonomy vocabulary: 108 seeded rows (`scene`, `element`, `condition` kinds). Global (no `lender_id`), drift-guarded by spec. See [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
+The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (no `lender_id`), drift-guarded by spec. Migrations `0308`/`0309` (LOA-1901) added fact-group columns (`fact_tags`, `fact_min_strength`, `fact_scenes`, `instance_flag_over`, `instance_flag_severity`) and the report-band column (`photo_group` on scene rows). See [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
 </ResponseField>
 
 <ResponseField name="appraisal_photos" type="table">
-One row per extracted appraisal photo. `id` is a deterministic UUIDv5 (source signature + page + figure index). Identity: `page_number`, `caption`, `width`, `height`, `s3_key`, `bbox` (normalized 0–1 bbox, nullable on pre-IRIS rows). IRIS observation columns (nullable until `analyzed_at` is set): `scene`, `attribution`, `quality`, `elements`, `conditions`. Replaces the retired `photo_manifest` column and 8-value category contract.
+One row per extracted appraisal photo. `id` is a deterministic UUIDv5 (source signature + page + figure index). Identity: `page_number`, `caption`, `width`, `height`, `s3_key`, `bbox` (normalized 0–1 bbox, nullable on pre-IRIS rows). IRIS observation columns (nullable until `analyzed_at` is set): `scene`, `attribution`, `quality`, `elements`, `conditions`. Migration `0310` (LOA-1901) adds a composite read index on `(appraisal_run_id, page_number)` used by the fact-sweep batch endpoint. Replaces the retired `photo_manifest` column and 8-value category contract.
 </ResponseField>
 
 <ResponseField name="rules, overrides, corrections" type="tables">

@@ -125,6 +125,8 @@ validation never aborts the run.
 `computeSummaries` produces `factsSummary` and coverage percent
 (`computeCoverageFromFacts` against `COVERAGE_THRESHOLD`). This node must return
 `facts.summaries` merged into facts, or six rules silently misfire.
+
+As of LOA-2188 follow-up: `buildFactsFromCandidates` no longer fabricates `report.pulled_at` from the audit-run clock. The field is an optional, nullable fallback for a future real producer; `report_date` remains primary. Date-dependent credit rules use a single `resolveCreditReportReferenceDate` helper. A missing anchor returns `NEEDS_INFO` only when the date can change the verdict — anchor-independent outcomes (e.g. collections below the unwindowed cap) remain gradable. Coverage percent now reads extracted `report_date` rather than the previously fabricated timestamp, so values may differ from pre-deploy for runs where `report_date` was absent.
 </Accordion>
 <Accordion title="evaluateRules — DB-backed rule evaluation">
 Resolves `loanProgramId` for program-scoped credit rules (LOA-1080) and calls

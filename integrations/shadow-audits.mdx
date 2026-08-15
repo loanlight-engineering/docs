@@ -46,14 +46,17 @@ The point of the shadow is to run under a different lender configuration (`resol
 
 Shadow audits run **all agents, including credit**, which is what makes them useful for validating agent coverage that a given lender's normal entitlements might not include.
 
-## Completion: write PDF, never touch Encompass
+## Completion: never touch Encompass
 
-When the shadow run completes, the AUS update consumer detects it and routes to `handleShadowAusUpdate`:
+When the shadow run completes, the AUS update consumer detects it and routes to `handleShadowAusUpdate` (LOA-1571):
 
-- Writes the AUS Report PDF to `shadow-audits/{transactionStateId}/AUS-Report.pdf` (`SHADOW_S3_PREFIX`).
 - Reconciles `transaction_state` to `ShadowComplete` or `ShadowFailed`.
-- Emits a `shadow_audit_complete` log line.
-- **Never PATCHes Encompass.**
+- Emits a `shadow_audit_complete` log line (includes `auditState` and `auditError` for failed runs).
+- **Never generates or uploads an audit PDF; never PATCHes Encompass.**
+
+<Note>
+Shadow audits no longer write an AUS Report PDF to S3. Prior to LOA-1571, `handleShadowAusUpdate` called `auditReportPdfService.generate`, which reached loanlight-api via `resolveAuditInputs`. Those calls failed in production because loanlight-api associated shadow runs with a different lender than the `requestorId` sent. Since nothing read back what was written under `shadow-audits/`, the whole generate → S3 path was cost and noise only. `SHADOW_S3_PREFIX` was removed from `shadow-audit.constants.ts`; `SHADOW_LOAN_NUMBER_MARKER` remains (still backs `assertNotShadowLoan`).
+</Note>
 
 `transaction_record.partner_status` shadow values (`ShadowProcessing`, `ShadowComplete`, `ShadowFailed`) are local-only; Encompass never sees them.
 
