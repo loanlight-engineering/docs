@@ -10,7 +10,15 @@ The page lives in `src/app/(app)/bug-reports/page.tsx` plus its panel components
 
 ## The issue list
 
-The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue references an `audit_run_id` (always present) and a `loan_id` (optional — loanless portal-appraisal runs have none), and carries aggregate counts (run count, latest run status, PR count, comment count).
+The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue carries aggregate counts (run count, latest run status, PR count, comment count). The anchor model is a three-tier ladder:
+
+| Tier | `audit_run_id` | `loan_id` | Example |
+|---|---|---|---|
+| Loan-bound | present | present | Standard EPC audit |
+| Loanless | present | null | Standalone portal appraisal (migration 0197) |
+| Ad-hoc | null | null | Free-text report filed from **New Report** (migration 0311) |
+
+Ad-hoc rows render an `AdHocReportCell` badge instead of the lender-implying `LoanlessLenderCell`. Their audit run column in the table displays a dash.
 
 Filters are URL-driven, so a filtered view is shareable:
 
@@ -25,12 +33,22 @@ Filters are URL-driven, so a filtered view is shareable:
 The default page size is 20 (options 10/20/50/100). The `StatusChangerBadge` lets you change an issue's `intake_status` inline; it PATCHes `/api/octy-issues/[id]`.
 
 <Info>
-Issues are usually created upstream from the loanlight-api portal (or from Octy's own Lookup BugReportPanel) via `POST /api/bug-reports`. See [Issues, runs, labels API](/octy/issues-runs-labels-api) for the intake contract.
+Issues are created from three surfaces: the loanlight-api portal, Octy's own Lookup BugReportPanel (both supply an `audit_run_id`), and the **New Report** button on the Bug Reports page itself (ad-hoc, no `audit_run_id`). See [Issues, runs, labels API](/octy/issues-runs-labels-api) for the intake contract.
 </Info>
+
+## Creating an ad-hoc report
+
+The **New Report** button (top-right of the issue list toolbar) opens a `NewReportPanel` slide-out. You supply a description in plain text or markdown — there is no loan, no audit run, and no LangSmith trace to attach at creation time.
+
+Once created, the report appears in the issue list and opens automatically. From the detail panel you can launch Octy against it exactly as you would any other report. The description becomes the primary issue context the agent starts from, so include everything it needs: links, IDs, expected vs. actual behaviour.
+
+Loan- or run-anchored reports keep their richer entry point on the loan lookup page (`BugReportPanel`), where traces can be attached at creation time.
 
 ## The issue detail panel
 
 Selecting an issue opens a right-hand drawer (`PanelShell`) with the issue meta (loan, audit run, dates, status, labels), the description, related agent runs as LangSmith trace chips, the comment thread, and the Trigger Octy form.
+
+For ad-hoc issues (no `audit_run_id`), the panel skips the audit-run metadata fetch, shows "None — ad-hoc report" in the Audit Run field, and does not display an untraced-agents reconciliation (there are no `agent_runs` rows to reconcile against).
 
 ### Trigger Octy
 

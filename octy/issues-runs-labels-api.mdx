@@ -12,8 +12,8 @@ These routes manage Octy's own data model — issues (`octy_issues`), the runs l
 
 Creates an issue. This is the intake endpoint the loanlight-api portal (and Octy's own Lookup bug-report panel) posts to.
 
-<ParamField body="audit_run_id" type="uuid" required>
-The audit run the issue is about. Must reference an existing `audit_runs` row, else the route returns **422**.
+<ParamField body="audit_run_id" type="uuid | null">
+**Optional** (api migration 0311). Ad-hoc bug reports — filed from the Bug Reports **New Report** panel — have no audit run at all. Pass `null` or omit the field. When provided as a non-empty string it must reference an existing `audit_runs` row, else the route returns **422**. Loan-bound and loanless issues still carry an `audit_run_id`.
 </ParamField>
 <ParamField body="loan_id" type="uuid | null">
 **Optional** (api migration 0197). Loanless audit runs — a standalone portal appraisal — carry no loan but always carry an `audit_run_id`. Must be a non-empty string or `null`.
@@ -42,7 +42,7 @@ Paginated issue list with aggregates.
 | `status` / `intake_status` | comma list of intake statuses |
 | `agents` | comma agent types, each normalized to canonical `agent_type` + LangSmith aliases (`agentMatchValues`, catalog-tolerant of newly added agents), matched against `related_traces[].agent_type` via jsonb |
 | `labels` | comma label uuids |
-| `lenders` | comma lender uuids, matched on `audit_runs.lender_id` (works for loanless issues, which have no loan) |
+| `lenders` | comma lender uuids, matched on `audit_runs.lender_id` (works for loanless issues; ad-hoc issues with no audit run never match a lender filter) |
 | `q` | `loan_number` or `audit_run_id` ILIKE |
 | `sort` | `date_asc` or `date_desc` |
 </Expandable>
@@ -83,7 +83,7 @@ All runs for the issue, newest first.
 
 <ParamField path="GET /api/octy-issues/[id]/audit-run-metadata" type="endpoint" />
 
-Returns the exact `AuditRunMetadata` baked into the prompt (audit run started/completed/status plus the matching classify-split run timing), so the UI can render an accurate prompt preview.
+Returns the exact `AuditRunMetadata` baked into the prompt (audit run started/completed/status plus the matching classify-split run timing), so the UI can render an accurate prompt preview. Not called for ad-hoc issues (no `audit_run_id`).
 
 <ParamField path="GET /api/octy-runs/[runId]/status" type="endpoint" />
 

@@ -49,6 +49,45 @@ Short-circuit env toggles (testing):
   orchestrator completes the audit and returns.
 - `SKIP_LANGGRAPH_AGENTS === "true"` → skip agent execution; the audit still completes.
 
+## 0-document preflight gate (LOA-2360)
+
+After `createAuditRun` writes the `audit_run` row and `route()` seeds the planned `agent_runs`
+rows, but **before** document registration, LlamaCloud indexing, or agent dispatch, the
+orchestrator checks that the request carries at least one document:
+
+```ts
+if (files.documents.length === 0) { throw new NoDocumentsError(correlationId, loanNumber); }
+```
+
+A MISMO-only payload counts as zero documents — the MISMO XML is handled separately by
+`downloadTransactionFiles` and is not a loan document.
+
+**Why placement is load-bearing.** The gate runs after `createAuditRun` so the `failed` run is
+visible in the audit lookup UI (the failure isn't a silent rejection). It runs before any
+document or agent work so the SQS handler returns immediately — the previous behaviour was a
+hang that never ACKed the message, causing SQS to redeliver every 60 minutes indefinitely.
+
+**What happens on a 0-document request:**
+
+1. Every seeded `agent_runs` row whose status is `pending` is sealed to `failed` (via
+   `reconciler.setAgentRunStatus`). This prevents the reaper from leaving ledger rows in a
+   permanent `pending` state after `failAuditRun` flips the parent to `failed`. The sealing is
+   best-effort — a ledger blip does not mask the terminal failure.
+2. `NoDocumentsError` is thrown with a stable machine-readable `code = "NO_DOCUMENTS"`.
+3. The outer catch classifies the error as `validation` (duck-typed on `.code`, not a message
+   regex) and records an `audit_errors` row.
+4. `failAuditRun` flips the run to `failed`.
+5. `WORKFLOW.ERROR` is emitted to Encompass with `errorCode: "NO_DOCUMENTS"`, so an operator
+   (or the Luxury middleware) sees a specific, legible reason.
+6. The SQS message is **acknowledged** (the outer catch does not rethrow). On any redelivery,
+   `createAuditRun` returns `created: false` and the existing DUPLICATE_AUDIT path handles it —
+   no stale-reset resurrection because the run is already `failed`, not `processing`.
+
+<Note>
+This gate applies to the **EPC path only**. The partner API pre-uploads documents before the
+audit request, so a 0-document state cannot arise there.
+</Note>
+
 ## Phase 1 — pre-audit stage
 
 `preAuditStage.executePreAuditStage({...})` runs three independent branches in parallel and
@@ -136,7 +175,8 @@ emit (which would stick the Encompass spinner):
 <Steps>
   <Step title="saveAuditError">
     Records the failure. `classifyAuditError(error, step)` tags it `transient | permanent |
-    validation` by step and message regex.
+    validation` by step and message regex — except `NO_DOCUMENTS`, which is classified
+    `validation` by stable `.code` duck-typing regardless of step (never retried as transient).
   </Step>
   <Step title="failAuditRun">
     Flips the run to `failed` (idempotent; only affects `pending`/`processing` rows).

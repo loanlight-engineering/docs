@@ -26,11 +26,41 @@ X-Oz-Run-Id: <run_id>
 X-Oz-Refresh-Token: <refresh_token>
 ```
 
-`validateOzToken` resolves the run, hashes the bearer token and compares it to `webhook_token`, checks expiry, and checks that the token has not been consumed. The agent never passes an `audit_run_id`: the server derives it from the run's parent issue via `resolveAuditRunId(run)`, so every result is scoped to the issue's audit run automatically.
+`validateOzToken` resolves the run, hashes the bearer token and compares it to `webhook_token`, checks expiry, and checks that the token has not been consumed. The agent never passes an `audit_run_id` for anchored runs: the server derives it from the run's parent issue via `resolveRunAnchor(run)`, so every result is scoped to the issue's audit run automatically. For unanchored runs, see below.
 
 ## Data tools — `GET /api/oz/tools/[dataset]`
 
-Handlers live in `src/lib/oz-tool-handlers.ts`. The flow is: validate token, resolve the audit run id from the parent issue, switch on `dataset`, and return a result. Scoping is automatic — child tables join through their parent, loan-scoped tools resolve `loan_id` via `resolveLoanId`, and lender tools via `resolveLenderId`.
+Handlers live in `src/lib/oz-tool-handlers.ts`. The flow is: validate token, resolve the audit run anchor from the parent issue, switch on `dataset`, and return a result. For anchored runs, scoping is automatic — child tables join through their parent, loan-scoped tools resolve `loan_id` via `resolveLoanId`, and lender tools via `resolveLenderId`.
+
+### Unanchored runs
+
+When a bug report has no `audit_run_id` (ad-hoc reports, api migration 0311) or the run has no
+issue parent (experiment-parented runs), the anchor is `unanchored`. The `[dataset]` route gates
+based on each tool's `requiresAuditRun` flag in `OZ_TOOL_REGISTRY`:
+
+- **`requiresAuditRun: false`** — global config tools (`split-categories`, `classify-rules`,
+  `pii-field-doc-type-rules`, `fetch-instructions`, `attach-linear-ticket`, `token-refresh`,
+  `octy-run-complete`). These serve normally on unanchored runs.
+- **`requiresAuditRun: true`** — all audit/loan/lender-scoped datasets. On an unanchored run
+  without an explicit override, the route returns `404 NO_AUDIT_RUN` with a structured error body
+  that lists the available global tools and hints at the drill-down mechanism.
+
+**Drill-down via `?audit_run_id=`:** if an unanchored Oz run discovers a concrete audit run ID
+during investigation (from the report description, LangSmith traces, Datadog logs, or a database
+query), it can pass it explicitly to any run-scoped tool:
+
+```
+GET /api/oz/tools/<dataset>?audit_run_id=<uuid>
+```
+
+The server validates the UUID and checks the row exists (`AUDIT_RUN_NOT_FOUND` — 404 — if not),
+then serves the data exactly as it would on a fully anchored run. On anchored runs, an
+`?audit_run_id=` override is **silently ignored** — the server-derived scope is authoritative
+and a run cannot widen its own scope.
+
+When an Oz run is unanchored, its base prompt includes an explicit "Unanchored Report" section
+derived from the registry — listing the available global tools and explaining the drill-down —
+so the agent knows not to treat `NO_AUDIT_RUN` responses as outages.
 
 ### Response shape
 
@@ -155,10 +185,13 @@ The single call that closes a run. Documented in full in the [completion webhook
 
 Because the agent self-corrects from response bodies, every error status carries actionable detail (`buildSelfCorrectionSection` + `src/lib/oz-tool-errors.ts`):
 
-| Status | Meaning | Agent action |
-|---|---|---|
-| **400** | Malformed payload (completion tool only) | Body has `field_errors` and `completion_tool_spec`. Fix and retry. The token is **not** consumed on a 400. |
-| **404** | Unknown tool path | Body has `available_data_tools` (every valid dataset and path) and `completion_tool`. Find the correct path and retry. |
-| **408** | Access token expired | Call `token-refresh`, update the `Authorization` header, retry the original call. |
-| **410** | Run already completed | The completion tool already ran. Do not retry anything. |
-| **401** | Invalid credentials | Token or run id is wrong. Do not retry. |
+| Status | `error` code | Meaning | Agent action |
+||---|---|---|---|
+|| **400** | — | Malformed payload (completion tool only) | Body has `field_errors` and `completion_tool_spec`. Fix and retry. The token is **not** consumed on a 400. |
+|| **400** | `INVALID_QUERY_PARAM` | `audit_run_id` query param is not a valid UUID (unanchored drill-down) | Correct the UUID and retry. |
+|| **404** | `UNKNOWN_TOOL` | Unknown dataset path | Body has `available_data_tools` (every valid dataset and path) and `completion_tool`. Find the correct path and retry. |
+|| **404** | `NO_AUDIT_RUN` | Run is unanchored and dataset requires an audit run | Body lists `tools_available_without_audit_run` and hints at the `?audit_run_id=` drill-down. Do not retry unchanged. |
+|| **404** | `AUDIT_RUN_NOT_FOUND` | Explicit `?audit_run_id=` does not match any row | Verify the ID against its source (trace, log, query result). It must be the `audit_runs.id` UUID, not a loan or agent-run ID. |
+|| **408** | — | Access token expired | Call `token-refresh`, update the `Authorization` header, retry the original call. |
+|| **410** | — | Run already completed | The completion tool already ran. Do not retry anything. |
+|| **401** | — | Invalid credentials | Token or run id is wrong. Do not retry. |
