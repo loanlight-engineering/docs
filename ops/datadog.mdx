@@ -227,7 +227,10 @@ Committed monitor files in `packages/encompass/observability/datadog/`:
 
 | File | What it pages on |
 |---|---|
-| `document-push-dlq-depth.monitor.json` | Encompass document-push DLQ depth exceeds threshold |
+| `audit-data-section-degraded.monitor.json` | An audit-data endpoint timed out during the pre-delivery data fetch — a report shipped short (LOA-2294/LOA-2301) |
+| `aus-update-dlq-depth.monitor.json` | The `handle-aus-updates` DLQ has depth \> 0 — an AUS delivery failed after retries and is parked |
+| `aus-update-queue-age.monitor.json` | The oldest message on an `handle-aus-updates` queue (or its DLQ) exceeds the age threshold — stuck or parked delivery |
+| `document-push-dlq-depth.monitor.json` | Encompass document-push DLQ depth exceeds threshold — EPC document delivery failing closed |
 
 The same `monitors.registry.json` / `monitor-schema.ts` / `apply-monitors.ts` pattern applies.
 

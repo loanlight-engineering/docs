@@ -100,6 +100,8 @@ Written by the [Property-Red-Flags agent](/agents/property-red-flags). **`red_fl
 
 Added by migration `0227_create_eligibility_results.sql` (LOA-1570). One row per `EligibilityFinding` emitted by the loan-eligibility evaluator (`src/lib/loan-eligibility/eligibility-evaluator.ts`). Mirrors `red_flag_results`: child of `audit_runs` (ON DELETE CASCADE).
 
+The writer is `buildEligibilityResultRows` in `modules/portal-eligibility-rules/eligibility-persistence.ts` (LOA-1965 lifted it out of `appraisal.processor.ts`, which is now only a caller).
+
 ### eligibility_results
 
 PK `id`, `audit_run_id` (NOT NULL), `code` (NOT NULL).
@@ -116,6 +118,8 @@ PK `id`, `audit_run_id` (NOT NULL), `code` (NOT NULL).
 <ParamField path="effective_max_ltv" type="numeric">The composed LTV cap for GRID rows (LOA-1763 §A2). NULL on order-95 overlay rows (`rule_id IS NOT NULL`). Set at write time from `composedMaxLtv`; the upsert UPDATE branch mirrors the INSERT so a re-run never leaves a stale cap.</ParamField>
 <ParamField path="applied_caps" type="jsonb">The individual cap steps that composed `effective_max_ltv`. NULL on overlay rows.</ParamField>
 <ParamField path="applied_reductions" type="jsonb">The reduction steps applied after the grid cap (e.g. declining market, multi-unit). NULL on overlay rows.</ParamField>
+<ParamField path="loan_ltv" type="numeric (nullable)">LOA-1966. The loan's own LTV — a reporting column, never a grading input. Present on every row of an evaluation that resolved one (grid and overlay alike) and carries the same value on all of them, because it is a loan fact rather than a per-finding output. Replaces the regex-scraping heuristic that LOA-2032 used to extract LTV from the `message` string — that approach was fragile; `loan_ltv` is the authoritative source going forward. Do not reintroduce any approach that derives LTV from `message`.</ParamField>
+<ParamField path="grid_base_ltv" type="numeric (nullable)">LOA-1966. The raw grid cell before the min()-of-caps stage and reductions. NULL whenever `effective_max_ltv` is NULL (both come from the same composition). Lets the portal audit trail lead with "Grid base → x%" and then show what lowered it.</ParamField>
 
 Indexes: unique on `(audit_run_id, lender_id, code)`, composite on `(audit_run_id, code, created_at, id)` for deterministic worst-outcome-first ordering (via `eligibilityOutcomeRankDesc()`), and on `rule_id` for overlay lookups.
 

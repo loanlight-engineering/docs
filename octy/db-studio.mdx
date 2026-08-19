@@ -24,10 +24,12 @@ The per-user connection also carries `default_transaction_read_only = true` as a
 
 ## Access control
 
+The Prisma Studio link appears in the Octy nav for every authenticated `@loanlight.com` user. Access is gated at the layout level — navigating to `/prisma-studio` without the required permission shows an `AccessDeniedNotice` explaining which permission is needed (`db-studio:prod:read`) and prompting re-authentication. This replaced a `notFound()` (404) response (LOA-2459).
+
 Three layers gate every request:
 
 1. **WorkOS domain guard** — the middleware only allows `@loanlight.com` AuthKit sessions to reach `/prisma-studio` or any `/api/studio/*` route.
-2. **WorkOS permission** — the user's access token must carry `db-studio:prod:read` (read access) or `db-studio:prod:write` (write, reserved for LOA-2249). `readPermissionsFromToken()` (`src/lib/studio/authz.ts`) decodes this from the `permissions` claim without re-verifying the token signature. Add the permission to a user via their role in the WorkOS dashboard; they must re-authenticate for it to take effect.
+2. **WorkOS permission** — the user's access token must carry `db-studio:prod:read` (read access) or `db-studio:prod:write` (write, reserved for LOA-2249). `readPermissionsFromToken()` (`src/lib/studio/authz.ts`) decodes this from the `permissions` claim without re-verifying the token signature. Add the permission to a user via their role in the WorkOS dashboard; they must re-authenticate for it to take effect. A user who navigates to `/prisma-studio` without this permission sees the `AccessDeniedNotice` component (`src/components/common/AccessDeniedNotice.tsx`) rather than a 404.
 3. **Kill switch** — `isKillSwitchEngaged()` (`src/lib/studio/session-grant.ts`) reads an SSM parameter (`STUDIO_KILL_SWITCH_PARAM`). If the parameter is absent, unreadable, or set to any value other than `"enabled"`, Studio is inaccessible — fail-closed by design. Setting it to `"disabled"` takes effect immediately with no redeploy.
 
 ## Unlock flow

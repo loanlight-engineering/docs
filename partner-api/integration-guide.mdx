@@ -79,7 +79,7 @@ curl -sS https://api.loanlight.example/api/v1/partner/loans/a1b2c3d4-0000-4000-8
 ```
 
 <Tip>
-Poll on a backoff (for example every 5–10 seconds). Triggering an audit too early returns `409` ("not ready" or "classification still in progress").
+Poll no more than once per minute. Stop when `status` is `ready_for_audit`, `ready`, or `error`; do not continue polling after any of these — `error` is terminal, and `ready` means an audit has already been completed. Triggering an audit too early returns `409` ("not ready" or "classification still in progress").
 </Tip>
 
 ## Step 3 — Trigger an audit
@@ -117,7 +117,7 @@ Ignore `progressUrl` — there is no `/progress` endpoint. Poll `GET /audits/:au
 
 ## Step 4 — Poll the audit
 
-Poll until `status` is `complete`.
+Poll until `status` is `complete` or `failed`. A `failed` status is terminal. Poll no more than once per minute — most audits complete in 10-15 minutes.
 
 ```bash
 curl -sS https://api.loanlight.example/api/v1/partner/audits/b2c3d4e5-0000-4000-8000-000000000002 \
