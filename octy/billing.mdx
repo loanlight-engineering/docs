@@ -63,11 +63,29 @@ The **Vendor Costs** dashboard also surfaces run-level analytics computed at que
 
 ### Vendor vocabulary
 
-Four closed vendors are tracked: `openai`, `anthropic`, `reducto`, `llamacloud`. A line whose provider cannot be mapped lands in `unknown`. New vendors need no code change in the aggregation layer — they surface automatically from the line's `vendor` field.
+Nine vendors are tracked as of LOA-2100. Lines are attributed by the `vendor` field on each cost line; the aggregation layer is open — new vendors surface automatically without code changes.
+
+| Vendor | Cost line type | Notes |
+|---|---|---|
+| `openai` | LLM tokens | Exact (usage payload) |
+| `anthropic` | LLM tokens | Exact (usage payload) |
+| `reducto` | Pages / calls | Exact (usage payload) |
+| `llamacloud` | Index pages / classify calls | Exact (usage payload) |
+| `attom` | API calls | **Estimated** (`estimated: true`); contracted $500 / 3,000 calls blended |
+| `hasdata` | API calls | **Estimated**; $99 / 1,000,000 credits |
+| `mashvisor` | API calls | **Estimated**; $0.2075 per call |
+| `plaid` | Enriched transactions | **Estimated**; $2.00 / 1,000 transactions |
+| `encompass` | Loan transactions | **Exact** (flat $3.00 per audit run, by contract); landed in `totalUsd`, not `estimatedUsd` |
+
+A line whose provider cannot be mapped lands in `unknown`. Estimated lines (`estimated: true`) accumulate in `totals.estimatedUsd` and are separated from exact lines (`totals.usd`) in all response fields.
 
 ### Cost sources and double-counting
 
 `classify_split_runs.cost` is **excluded** from this view: it is a per-document breakdown of spend already counted on the `preAuditClassification` agent run in `agent_runs`. Including it would double-count. Use `classify_split_runs.cost` only for per-document attribution (cost per source file), not fleet-level totals.
+
+### IRIS cost attribution (LOA-2100)
+
+The IRIS agent's LLM spend is attributed at the step level. Each LLM call inside `catalog-conversation.ts` carries the `LLM_STEP_METADATA_KEY = IRIS_VISION_CATALOG_STEP` metadata tag, so the cost handler writes a `step`-scoped cost line on the `agent_runs.cost` ledger. IRIS spend appears under `bySource[]` as `source = "iris"` with per-step drill-down in `byOp[]`.
 
 ## Audit Runs page
 
@@ -83,6 +101,10 @@ A click on the row opens the audit-run modal at the overview section.
 ## Billing tab
 
 The Billing tab counts billable usage per lender over a date range. The logic lives in `src/lib/billing.ts`; shared definitions are in `src/lib/billing-shared.ts`. As of the agent-platform work (octy #84), billing is **catalog- and ledger-driven**: the billable agent set comes from the `agents` catalog and per-agent credit comes from the `agent_runs` execution ledger, replacing the old per-result-table existence probes.
+
+<Note>
+Migration `0317` (LOA-2100) set `agents.is_billable = true` for the `bankStatementIncome` agent. Completed `bankStatementIncome` runs now count toward billable units, including standalone portal runs (billed as loanless units keyed on `audit_run_id`). The precondition — portal runs having a real audit container so cost lines land on the ledger — was satisfied by migrations `0315`/`0316`.
+</Note>
 
 ## The billable unit
 

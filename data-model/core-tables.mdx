@@ -36,7 +36,11 @@ The central loan record (`loans.ts`). PK `id` uuid, `lender_id` → `lenders.id`
 <ParamField path="processing_status" type="text">Default `ready`. CHECK `loans_processing_status_check`: `processing | ready_for_audit | ready | error`.</ParamField>
 <ParamField path="loan_type" type="text">Plain text (not the `loan_type` pgEnum). `loan_program_name` is also stored.</ParamField>
 
-The table also carries many MISMO/Encompass loan attributes: `ltv`, `combined_ltv`, `hcltv_htltv`, `closing_date`, `estimated_closing_date`, `milestone_stage`, `nonqm_doc_type`, `ob_doc_type`, `property_appraised_value_amount`, `transaction_id`, foreign-address booleans (borrower / coborrower / employment / REO), and `borrower_country_of_citizenship` / `coborrower_country_of_citizenship`. Migration `0211` added `income_type` and `note_rate` (both text) — display-only loan-detail fields rendered into the AUS report PDF.
+The table also carries many MISMO/Encompass loan attributes: `ltv`, `combined_ltv`, `hcltv_htltv`, `closing_date`, `estimated_closing_date`, `milestone_stage`, `nonqm_doc_type`, `ob_doc_type`, `property_appraised_value_amount`, `transaction_id`, foreign-address booleans (borrower / coborrower / employment / REO), and `borrower_country_of_citizenship` / `coborrower_country_of_citizenship`. Migration `0211` added `income_type` and `note_rate` (both text) — display-only loan-detail fields rendered into the AUS report PDF. Migration `0321` (LOA-2479/2477) added three optional Encompass fields:
+
+<ParamField path="interest_only" type="boolean (nullable)">Whether the loan has an interest-only period. Sourced from Encompass field 2982 (`loan.regulationZ.interestOnlyIndicator`); wire name `interestOnly`.</ParamField>
+<ParamField path="interest_only_term" type="integer (nullable)">Length of the interest-only period in months. Sourced from Encompass field 1177 (`loan.regulationZ.interestOnlyMonths`); wire name `interestOnlyTerm`. Stored as integer (unlike most Encompass numerics, which are text via `numberOrString`).</ParamField>
+<ParamField path="channel" type="text (nullable)">Origination channel from Encompass custom field `CUST01FV`. Wire name `channel`.</ParamField>
 
 Indexes: `idx_loans_lender_id`, `idx_loans_loan_number`, `idx_loans_processing_status`, `idx_loans_loan_type`. Partial uniques: `(loan_number, lender_id)` where lender not null, `(loan_number)` where lender null, and `encompass_loan_id` where not null.
 

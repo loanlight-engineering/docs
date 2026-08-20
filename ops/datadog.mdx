@@ -206,14 +206,35 @@ Committed monitor files in `packages/api/observability/datadog/`:
 
 | File | What it pages on |
 |---|---|
-| `appraisal-reducto-queued-stalled.monitor.json` | Appraisal Reducto queue backlog stalled |
-| `bank-statement-reducto-queued-stalled.monitor.json` | Bank-statement Reducto queue backlog stalled |
-| `appraisal-reducto-circuit-read-failed.monitor.json` | Circuit snapshot reads fail (break-glass override may not be enforced) |
-| `appraisal-reducto-circuit-opened.monitor.json` | Reducto breaker trips OPEN (vendor is down) |
 | `appraisal-break-glass-audit-write-failed.monitor.json` | Break-glass mutation applied but audit-trail insert failed |
-| `llapi-ecs-memory-oom.monitor.json` | llapi ECS Fargate task memory ≥85% of container limit (warn at 75%), grouped by `task_arn` (LOA-965) |
-| `appraisal-rules-missing-required-field.monitor.json` | Appraisal rule evaluated against missing required field (INSUFFICIENT_DATA signal via `loanlight.rules.insufficient_data`) |
+| `appraisal-derivations-printed-percent-discrepancy.monitor.json` | Printed comparable adjustment % disagrees with the value derived from its own dollars |
+| `appraisal-high-failure-count.monitor.json` | Appraisal rule-evaluation failure count is high |
+| `appraisal-low-coverage.monitor.json` | Appraisal extraction coverage below UAD threshold — 3+ runs in an hour |
+| `appraisal-no-profile-evidence.monitor.json` | Appraisal document has no form/profile evidence |
+| `appraisal-pipeline-failure.monitor.json` | Appraisal pipeline failure — extraction/config errors (LOA-2408) |
+| `appraisal-reducto-circuit-opened.monitor.json` | Reducto breaker trips OPEN (vendor is down) |
+| `appraisal-reducto-circuit-read-failed.monitor.json` | Circuit snapshot reads fail (break-glass override may not be enforced) |
+| `appraisal-reducto-queued-stalled.monitor.json` | Appraisal Reducto queue backlog stalled |
+| `appraisal-reducto-single-call-wedge.monitor.json` | Appraisal Reducto single-call agentic extraction wedging — `dxF` fallback rate |
+| `appraisal-rule-set-empty.monitor.json` | Appraisal rule set is active but yields zero rules — likely misconfiguration |
+| `appraisal-rules-missing-required-field.monitor.json` | Appraisal rule evaluated against missing required field (`loanlight.rules.insufficient_data`) |
+| `appraisal-rules-unregistered-field-path.monitor.json` | Compound rule references an unregistered field path — the rule can never fire |
+| `appraisal-schema-element-quarantined.monitor.json` | Appraisal schema quarantined an array element — silent data loss |
+| `appraisal-schema-raw-cast-fallback.monitor.json` | Appraisal schema raw-cast fallback — whole payload cast, every constraint advisory |
+| `appraisal-schema-unknown-keys.monitor.json` | Appraisal schema dropped unmodeled vendor keys — silent field loss on a clean run (LOA-2408) |
+| `appraisal-zero-rules-fault.monitor.json` | Appraisal evaluated zero rules after a failed DB read — run ships a false all-clear |
+| `bank-statement-reducto-queued-stalled.monitor.json` | Bank-statement Reducto queue backlog stalled |
 | `credit-preview-program-resolution-outage.monitor.json` | Credit apply-preview program resolution failures (program not found at preview time) |
+| `credit-rules-cred031-needs-info-spike.monitor.json` | `CRED_031` grading NEEDS_INFO at scale — two-score minimum cannot decide (LOA-2310) |
+| `credit-rules-cred031-not-evaluated.monitor.json` | `CRED_031` is not being evaluated — two-score minimum is inert (LOA-2310) |
+| `credit-rules-outcome-beacon-silent.monitor.json` | Credit rule outcome beacon silent — the evaluator stopped reporting (LOA-2310) |
+| `credit-scores-model-unclassified.monitor.json` | Credit reports yielding no usable score model — score-count rules cannot grade (LOA-2310) |
+| `llapi-ecs-memory-oom.monitor.json` | llapi ECS Fargate task memory ≥85% of container limit (warn at 75%), grouped by `task_arn` |
+| `loan-interest-only-axis-unresolvable.monitor.json` | Interest-only axis unresolvable — neither Encompass 1177 nor MISMO produced a term (LOA-2479) |
+| `loan-interest-only-presence-beacon-silent.monitor.json` | Interest-only presence beacon silent — the producer stopped reporting (LOA-2479) |
+| `loan-interest-only-wire-contradicts-mismo.monitor.json` | Encompass 1177 overrode a disagreeing MISMO interest-only term (LOA-2479) |
+| `ruleops-reconcile-failed.monitor.json` | RuleOps reconcile run failed to complete |
+| `ruleops-rule-export-lost.monitor.json` | RuleOps rule-system export lost |
 
 `monitors.registry.json` contains one entry per `*.monitor.json` basename with `{ "deprecated": boolean }`. Setting `deprecated: true` causes `apply-monitors.ts` to delete that monitor from Datadog on the next apply rather than updating it. The registry shape is validated by `monitor-schema.ts` (Zod) at both PR time and apply time.
 

@@ -64,11 +64,13 @@ The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResour
 
 ## Delivery modes
 
-`AusUpdateService` decides delivery shape from the lender's **`document_push` feature flag** (`DOCUMENT_PUSH_FEATURE_KEY` on the `lender_feature` table). `resolveDocumentPushGate` resolves the lender for the transaction and reads the flag. A DB error throws (fail-loud — an opted-in lender is never silently downgraded to the combined path); an unmapped client is simply not enabled.
+`AusUpdateService` decides delivery shape from the lender's **`aus_property_indexing` feature flag** (`AUS_PROPERTY_INDEXING_FEATURE_KEY` on the `lender_feature` table). This flag is independent of `document_push`: it controls only whether the AUS report, property PDFs, and appraisal review-summary are routed via the `document_push_routing_config` table ("routed" path) or delivered as bare "AUS Results" resources ("combined" path). `document_push` continues to gate classified-document (bank statements, credit reports, etc.) delivery into eFolders — that part is unchanged.
+
+`resolveFeatureGate(transactionRecord, AUS_PROPERTY_INDEXING_FEATURE_KEY)` resolves the lender and reads the flag. A DB error throws (fail-loud); an unmapped client is simply not enabled (LOA-2466).
 
 <Tabs>
-<Tab title="Combined (default — flag OFF)">
-One AUS Report PDF is generated via `deliverComplete`. No property PDFs, no document-push routing. This is the default for every lender until the `document_push` flag is enabled.
+<Tab title="Combined (default — aus_property_indexing OFF)">
+One AUS Report PDF is generated via `deliverComplete`. No property PDFs, no routing-table lookup. This is the default for every lender until `aus_property_indexing` is enabled.
 
 In the common case the report is attached in a **single** Complete PATCH. When `aus_results` and `appraisal_review_summary` both resolve to the same Encompass eFolder (a lender-overridable `nameTemplate` applies to each), `deliverComplete` batches into multiple PATCHes to prevent Encompass silently orphaning the earlier document into the loan’s default folder (LOA-2230, third in the LOA-2207 collision stack). Batches are separated by resource type via `deliveryBatchIndexByType` / `partitionIntoBatches` — the same utilities used on the split path.
 
@@ -81,8 +83,8 @@ Batch throw semantics differ from the split path deliberately:
 
 When zero resources are present (LOA-1003: a missing document must not fail the audit), the batching produces no non-empty batches; an explicit fallback sends a bare terminal Complete so the audit is not left un-completed.
 </Tab>
-<Tab title="Routed (flag ON — LOA-948)">
-When `document_push` is enabled and the audit state is `Complete`, `deliverSplit` generates one main AUS PDF plus one PDF **per property**. Both the AUS report and each property PDF are routed through the table-driven `document_push_routing_config` via `buildRoute` — the same routing table used for classified document delivery. Each property lands in its own eFolder container named from its address (identical addresses collapse per the EPC-1379 duplicate rule). All files are stored in S3 under `audit-deliveries/{transactionStateId}/`.
+<Tab title="Routed (aus_property_indexing ON — LOA-948/LOA-2466)">
+When `aus_property_indexing` is enabled and the audit state is `Complete`, `deliverSplit` generates one main AUS PDF plus one PDF **per property**. Both the AUS report and each property PDF are routed through the table-driven `document_push_routing_config` via `buildRoute` — the same routing table used for classified document delivery. Each property lands in its own eFolder container named from its address (identical addresses collapse per the EPC-1379 duplicate rule). All files are stored in S3 under `audit-deliveries/{transactionStateId}/`.
 
 Since LOA-989 (#497), document upload is **fail-soft per document**: network errors and HTTP 429 → up to 4 attempts (exponential backoff with 50%–100% jitter via `retryWithBackoff`); all other error classes fail fast. A dropped upload no longer requeues the whole batch. The audit status and completion message **never** change based on document streaming — the terminal PATCH always uses the normal `Complete` / `ReportComplete` status, attaching whichever core documents uploaded. If zero core documents upload, the completion PATCH is skipped entirely (recovery via LOA-1730 manual re-attempt).
 

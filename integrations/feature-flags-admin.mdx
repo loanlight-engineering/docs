@@ -18,15 +18,20 @@ Every route is guarded by `InternalApiKeyGuard` — the same guard used by the r
 
 ## Flag registry
 
-The service maintains a code-defined registry (`feature-flags.registry.ts`) of the flags it manages. These are the three active per-lender `lender_feature` keys already read by `resolveLenderFeatureGate` in `webhooks.service.ts`; no new table or migration was introduced.
+The service maintains a code-defined registry (`feature-flags.registry.ts`) of the flags it manages. These are the per-lender `lender_feature` keys read by `resolveFeatureGate` in `aus-update.service.ts` and `webhooks.service.ts`; no new table or migration is required for new flags.
 
 | `key` | Label | Default | Gates |
 |---|---|---|---|
-| `document_push` | Document Push | `false` | EPC document push for this lender |
+| `document_push` | Document Push | `false` | Routing of classified documents (bank statements, credit reports, etc.) into EPC eFolders |
 | `appraisal_passthrough` | Appraisal Pass-Through XML | `false` | Manually-uploaded, non-MISMO appraisal XML alongside the appraisal PDF |
 | `appraisal_package_delivery` | Appraisal Package Delivery | `false` | Partner-delivered appraisal packages (UAD 3.6 ZIP or UCDP SSR) |
+| `aus_property_indexing` | AUS Property Indexing | `false` | Whether the AUS report, property report, and appraisal review-summary PDFs are routed via the `document_push_routing_config` table into specific eFolders. When `false` (default), these PDFs are delivered as bare "AUS Results" resources with no eFolder routing, regardless of the `document_push` flag. Added LOA-2466. |
 
-All three default to disabled (absence of a row = disabled), which matches the existing behavior before this API existed.
+All flags default to disabled (absence of a row = disabled).
+
+<Note>
+`document_push` and `aus_property_indexing` are **independent**. `document_push` controls whether classified documents are routed into eFolders; `aus_property_indexing` controls whether the AUS report / property PDFs are routed. A lender can have one without the other. Enable `aus_property_indexing` per-lender from the Octy EPC Feature Flags tab after verifying the legacy delivery path is no longer needed.
+</Note>
 
 ## Endpoints
 
@@ -34,8 +39,8 @@ All three default to disabled (absence of a row = disabled), which matches the e
 
 | Method & path | Action |
 |---|---|
-| `GET /integrations/feature-flags` | The code-defined flag registry (key, label, description, defaultEnabled for all three flags). |
-| `GET /integrations/feature-flags/lenders/:orgId` | A lender's effective flag values — all three flags merged with registry defaults (an absent row resolves to the default, never a 404). |
+| `GET /integrations/feature-flags` | The code-defined flag registry (key, label, description, defaultEnabled for all four flags). |
+| `GET /integrations/feature-flags/lenders/:orgId` | A lender's effective flag values — all four flags merged with registry defaults (an absent row resolves to the default, never a 404). |
 | `PUT /integrations/feature-flags/lenders/:orgId/:key` | Set one flag (upsert). Body: `{ "enabled": boolean }`. Returns `{ "key": string, "enabled": boolean }`. Audit-logged (see below). |
 
 ### PUT request body
@@ -54,12 +59,13 @@ All three default to disabled (absence of a row = disabled), which matches the e
   "flags": [
     { "key": "document_push", "enabled": false },
     { "key": "appraisal_passthrough", "enabled": false },
-    { "key": "appraisal_package_delivery", "enabled": false }
+    { "key": "appraisal_package_delivery", "enabled": false },
+    { "key": "aus_property_indexing", "enabled": false }
   ]
 }
 ```
 
-All three flags are always present in the response, whether or not a DB row exists for them. An absent row resolves to the registry's `defaultEnabled` (currently `false` for all three).
+All four flags are always present in the response, whether or not a DB row exists for them. An absent row resolves to the registry's `defaultEnabled` (currently `false` for all four).
 
 ## Audit logging
 

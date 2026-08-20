@@ -91,6 +91,15 @@ See the [Appraisal-Evaluation agent](/agents/appraisal-evaluation).
 
 Extraction outputs: `extracted_data`, `field_confidence_map`, `field_status_map`, `field_source_location_map`, `coverage_result`, `coverage_percent`, `comment_summary`, `comment_keywords`, `photo_manifest`, `enrichment_data`, `findings`, `compliance_results`, `output_snapshot`, `difference_summary`, `rental_data` jsonb (migration `0179`, for 1025/rental form extraction). Liveness/recovery (LOA-1101): `last_heartbeat_at`, `recovery_attempts`, `claim_token`. Plus `revision_number`, `input_filename` / `input_s3_key`, `xml_s3_key`, `xml_version`, `agent_version`, `model_version`, `langsmith_url`, `selected_agency_sources` text[], `reviewed_at`.
 
+<ParamField path="form_type_normalized" type="text (nullable)">
+Added by migrations `0319`/`0320` (LOA-2285/LOA-2062). The canonical appraisal form-type code, resolved from the banner in `extracted_data` by `resolveNormalizedFormType` at extraction time. Three states:
+- `NULL` — not yet extracted or run pre-dates the column.
+- `"unrecognized"` — a banner the alias table could not map (a gap someone can close without leaving the data ambiguous).
+- A canonical code otherwise: `1004`, `1004D`, `1073`, `1075`, `coop`, `1025`, `2055`, `manufactured`, `1007`, `2000`, `DSCR`.
+
+A CHECK constraint enforces the domain (migrations `0319`/`0320`, `NOT VALID` then validated separately to avoid a blocking lock). Two composite indexes support the Form Type filter and Property-type-mix chart on the portal. Existing rows remain `NULL` until `pnpm backfill:form-type-normalized -- --apply` runs post-deploy.
+</ParamField>
+
 ### appraisal_rules — operator difference
 
 `appraisal_rules` follows the shared shape, but its `operator` CHECK is the **16-value** union — it **does** include `abs_less_than` and `abs_less_than_or_equal` (drift-pinned by `operator-check-drift.spec.ts`). It keeps `source_template_id` → `appraisal_rule_templates` (set null).
