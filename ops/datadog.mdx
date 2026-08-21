@@ -240,7 +240,9 @@ Committed monitor files in `packages/api/observability/datadog/`:
 
 `monitor-schema.ts` also enforces that every `*.monitor.json` has **exactly one** of `env:int` or `env:prod` in its `tags` array. For log-alert monitors this tag must also appear in the `query` string (Datadog tags and log-facet filters are different mechanisms).
 
-`apply-monitors.ts` is idempotent by exact `name` match against Datadog's monitor list — no committed id file. Renaming a monitor's `name` field orphans the old one in Datadog; coordinate a deliberate rename with a manual delete of the orphan.
+`monitor-schema.ts` enforces Datadog's **log-alert evaluation window cap** (48 hours). A `type: "log alert"` monitor whose query uses `.last("3d")`, `.last("49h")`, or any window over 2880 minutes fails schema validation. `2d`, `48h`, and `2880m` all pass; an unrecognized unit fails closed. This cap is `type: "log alert"` only — metric monitors are not capped this way. The five absence/presence monitors that had `.last("3d")` were shortened to `.last("2d")` when the schema check was introduced (LOA-2408 follow-up, #3715); their absence monitors accept a higher false-alarm rate on zero-volume weekends as an acknowledged trade-off.
+
+`apply-monitors.ts` attempts **every monitor** in the registry and collects failures rather than throwing on the first non-2xx. The build still fails on a non-empty failure list, but all monitors get attempted — one bad file can no longer hide the state of every monitor sorted after it. `apply-monitors.ts` is idempotent by exact `name` match against Datadog's monitor list — no committed id file. Renaming a monitor's `name` field orphans the old one in Datadog; coordinate a deliberate rename with a manual delete of the orphan.
 
 ### encompass monitors
 

@@ -450,12 +450,29 @@ classification type), the 1008 Transmittal (`transmittal_1008`), and the Flood C
 (`flood_certificate`) — via per-document deterministic LlamaCloud retrieval, then runs one
 structured-output extraction call per source doc (3 LLM calls/run, no LLM query planner).
 Compares 10 appraisal-extracted fields against the source values using deterministic
-normalize-then-exact TypeScript (never fuzzy). Disagreements surface as `XDOC-*` **warning**
-findings in the existing appraisal findings stream. Results are persisted in the new
-`appraisal_runs.cross_doc_validation` jsonb column (migration `0264`), which stores only source
-values — verdicts are always re-derived so corrections remain correct. The LLM step uses the
-`appraisalEvaluation.crossDocExtraction` config (gpt-4.1, structuredOutput). On for all lenders;
-not lender-configurable.
+normalize-then-exact TypeScript (never fuzzy).
+
+Disagreements surface as `XDOC-*` **`complianceResults` rows** (outcome `WARNING`, category
+`Cross-Document Validation`) — not as findings. This mirrors the `DIFF_*` pseudo-rule
+precedent: rows are appended post-evaluator onto `evaluationOutput.results` and stripped from
+`findings` (LOA-2095, `cross-doc-compliance.ts`). An XDOC result must exist in exactly one
+array — the EPC issue count sums both with no dedup, so a row in both double-counts.
+
+Results are persisted in `appraisal_runs.cross_doc_validation` (migration `0264`), which stores
+only source values — verdicts are always re-derived so corrections remain correct. The LLM step
+uses the `appraisalEvaluation.crossDocExtraction` config (gpt-4.1, structuredOutput). On for all
+lenders; not lender-configurable.
+
+XDOC-* rows are **non-overridable**: `isNonOverridableRuleCode` covers them at all four override
+seams; `POST rule-overrides` returns `400` for any XDOC code; they carry no `ruleId` so the
+rule-config surface structurally cannot reach them. They are excluded from executive metrics
+(in-memory + all 8 SQL predicates). Legacy runs persisted before LOA-2095 are promoted at read
+time (`promoteCrossDocFindingsToComplianceResults`) — they display promoted without a rerun.
+
+**Partner API note:** `summary.warnings` increases on runs with XDOC mismatches because WARNING
+compliance rows now flow through `audit-results` and the partner API projection. The canonical
+nine-bucket `totalIssues` count is move-neutral — a mismatch counts once whether it lives in
+`findings` or `complianceResults`.
 </Step>
 <Step title="Write the run">
 Writes `appraisal_runs` with `extractedData`, `complianceResults`, `findings`, coverage fields,

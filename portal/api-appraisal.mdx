@@ -96,6 +96,10 @@ The updated-run flow is gated by an appraisal feature flag. When it is off, all 
 | `GET /api/v1/portal/appraisals/:id/key-field-reviews` | read+ | Key-field reviews |
 | `PATCH /api/v1/portal/appraisals/:id/key-field-reviews/:fieldId` | client_admin, client_user | Patch a review |
 
+<Note>
+`DIFF_*` and `XDOC-*` rule codes are **non-overridable**: `POST rule-overrides` returns `400` for either prefix. Both families are appended post-evaluator as `complianceResults` rows with no `ruleId` and no `appraisal_rules` row, so the rule-config surface structurally cannot reach them. Attempting an override on these codes is always an error, not a no-op.
+</Note>
+
 ### Review-summary export
 
 `POST /api/v1/portal/appraisals/:id/export` renders a branded "Review summary" PDF (property facts, issues, and program-rule outcomes) from the same `getRunDetail` projection the page renders, so the PDF matches the on-screen review. Roles: `client_admin`, `client_user`, `super_admin` (super_admin was added by #2477). HTTP 200, throttled to 5/min (PDF render is expensive). It reuses the `bank-statement-export` Puppeteer writer and signed-URL service.

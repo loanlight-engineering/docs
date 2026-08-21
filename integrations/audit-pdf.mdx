@@ -33,8 +33,11 @@ interface GenerateAuditPdfV2Input {
   auditState: AuditState;            // Processing | Complete | Failed | Error
   sections: AuditSectionsInput;      // see below
   errorDetails?: AuditErrorDetails;
+  hasAccompanyingAppraisalReport?: boolean; // LOA-2094
 }
 ```
+
+`hasAccompanyingAppraisalReport` is set when both delivery paths (split and combined) successfully fetch the Appraisal Review Summary PDF bytes before generating this report. When `true`, the body all-clear banner and the `auditSubtitle` scope their claims to the checks this report covers and direct the reader at the companion document — the AUS report has no appraisal input, so an unqualified "all validations passed" would contradict an accompanying appraisal PDF that carries findings. When `false` or absent the wording is byte-identical to before LOA-2094. The flag keys on fetched bytes, not file presence — a post-fetch streaming drop in Encompass can leave the banner referencing an unfiled document, alarmed via `appraisal_banner_orphaned`.
 
 `AuditSectionsInput` carries the six report sections:
 
@@ -64,10 +67,13 @@ When the audit state is not `Complete`, or sections are missing, the encompass s
 
 ### Header subtitle
 
-`auditSubtitle(sections)` emits the subtitle line below "Pre-Underwriting Analysis". It returns:
+`auditSubtitle(sections, hasAccompanyingAppraisalReport?)` emits the subtitle line below "Pre-Underwriting Analysis". It returns:
 - `undefined` when `sections.summary` is null (status-only PDFs).
-- `"All checks passed across analyzed documents."` when `issueCount === 0` **and** none of the exception sections (credit, 1003, properties) carry flagged findings.
+- `"All checks covered by this report passed. See the accompanying Appraisal Review Summary for appraisal findings."` when `issueCount === 0`, no exception sections have findings, **and** `hasAccompanyingAppraisalReport` is `true` (LOA-2094).
+- `"All checks passed across analyzed documents."` when `issueCount === 0` and no exception sections have findings (no accompanying appraisal).
 - `"Issues found across analyzed documents. Items in good standing are summarized, not listed."` otherwise.
+
+The body all-clear banner (`buildAuditContent`) uses the same `hasAccompanyingAppraisalReport` flag: when `true` it prints `"No issues found in the checks covered by this report. See the accompanying Appraisal Review Summary for appraisal findings."` instead of `"No issues found. All validations passed."`
 
 <Note>
 Prior to the grouped-Document-Health redesign (#516), the subtitle keyed only on `summary.issueCount`. A loan with zero document issues but a FAILing credit or 1003 rule would falsely claim "All checks passed". The fix adds `exceptionSectionsHaveFindings(sections)` as a second gate so the subtitle is consistent with the report body.
