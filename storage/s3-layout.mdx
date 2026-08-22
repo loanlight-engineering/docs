@@ -97,14 +97,26 @@ partner/{lenderId}/{loanId}/documents/{fileName}
 `POST /api/v1/partner/loans` inserts a `loans` row with status `processing`.
 </Step>
 <Step title="Upload to S3">
-`s3Service.uploadPartnerLoan(prefix, dto)` decodes the base64 MISMO XML to `{prefix}/mismo.xml` (ContentType `application/xml`) and uploads documents to `{prefix}/documents/{fileName}` in batches of 10 concurrent `PutObjectCommand`s. On failure the loan status is set to `error` and the error rethrown.
+`s3Service.uploadPartnerLoan(prefix, dto)` decodes the base64 MISMO XML to `{prefix}/mismo.xml` (ContentType `application/xml`) and uploads documents to `{prefix}/documents/{objectName}` in batches of 10 concurrent `PutObjectCommand`s. On failure the loan status is set to `error` and the error rethrown.
 </Step>
 <Step title="Register documents">
-`documentRegistry.registerDocuments` writes `loan_documents` rows from `buildPartnerIncomingDocs` (source `"partner_s3"`, `s3Bucket = getBucketName()`, `partnerS3Key = {prefix}/documents/{fileName}`).
+`documentRegistry.registerDocuments` writes `loan_documents` rows from `buildPartnerIncomingDocs` (source `"partner_s3"`, `s3Bucket = getBucketName()`, `partnerS3Key = {prefix}/documents/{objectName}`).
 </Step>
 </Steps>
 
 `loan_documents` rows store `partner_s3_key` (and a `storage_path` in `s3://bucket/key` form). `S3FileRetrievalService.resolveS3Key()` prefers `partner_s3_key`, falling back to parsing `storage_path`. `validateS3Key()` requires no leading slash, at least 3 `/`-segments (`module/id/filename`), no `..`, and a non-empty filename.
+
+### S3 key sanitization (LOA-2480)
+
+Partner document filenames may contain `/` or `\` (e.g. `"Credit Report 05/13/2026.pdf"`). If stored verbatim, a slash in the filename would create an extra path segment in the S3 key, silently fragmenting the object under an unexpected prefix.
+
+`buildPartnerS3Key(prefix, fileName)` in `partner-api/utils/partner-s3-key.util.ts` calls `toPartnerObjectName(fileName)` to replace `/` and `\` with `-` before building the key. The raw `fileName` is preserved in `loan_documents.file_name` for display; only the S3 object key is sanitized.
+
+Before writing any loan row or S3 object, the controller detects collisions:
+- **Within-batch:** `findPartnerObjectNameCollisions` checks whether two files in the same request sanitize to the same object name (e.g. `"8/1 Chase.pdf"` and `"8-1 Chase.pdf"` both → `"8-1 Chase.pdf"`). A collision returns `400 BadRequestException` before any write.
+- **Existing documents:** `findExistingObjectNameCollisions` checks incoming filenames against already-stored rows on the loan. A collision also returns `400`, leaving the existing loan and its S3 objects untouched.
+
+Legacy stored keys with embedded slashes are normalised at read time by `remintStoredPartnerKey`, which replaces separators only in the filename segment after `documents/`, preserving the server-minted prefix.
 
 On audit (`POST /api/v1/partner/audits` → `processAuditForPartner`), the consumer reads `s3Bucket = process.env.PARTNER_S3_BUCKET` and calls `downloadPartnerTransactionFiles(s3Bucket, partnerId, loanId)` against `partner/{lenderId}/{loanId}/`.
 

@@ -152,6 +152,13 @@ Reuses the `jobid://` handle from `parse` (no second upload or parse charge); on
 replay second pass it reuses its own cached `_reductoResult`. Preserves the canonical form type
 (`1025` vs `1004` schema).
 
+**HVAC and plumbing condition ratings from narrative text (LOA-2261, PR #3574).** The adapter runs `evaluateConditionRating(evidence, system)` (`lib/appraisal-pipeline/condition-rating-evidence.ts`) to extract condition ratings for `improvements.hvac_condition_rating` and `improvements.plumbing_condition_rating` from the appraisal's free-text narrative. The function uses a positive grammar: it accepts only a direct assignment clause (`"HVAC is in Good condition"`, `"Plumbing: Fair"`) rather than any occurrence of a rating word. It splits the evidence string into lines and clauses, discards comparator grid blocks (to avoid grading a comp's system instead of the subject's), and skips table rows, material-slash-rating cells, negated predicates, and non-subject-system references. Returns one of:
+
+- `{ rating: "Good" | "Average" | "Fair" | "Poor", reason: null }` — unambiguous extraction
+- `{ rating: null, reason: "no_supporting_evidence" | "ambiguous_evidence" | "conflicting_evidence" }` — not usable
+
+Only a single, unambiguous, uncontradicted rating reaches the extracted data. `field-provenance.ts` (`forgetFieldProvenance` / `forgetSectionProvenance`) provides helpers to evict a field's entries from all three provenance maps (`fieldStatusMap`, `fieldConfidenceMap`, `fieldSourceLocationMap`) atomically — used when the adapter rejects an extraction and must not leave stale confidence or bbox metadata pointing at the removed value.
+
 <Note>
 A **super-admin-gated Textract lane** exists as an alternative extraction path
 (`packages/api/src/lib/appraisal-pipeline/textract/`), introduced in LOA-1744 (#2701) for the

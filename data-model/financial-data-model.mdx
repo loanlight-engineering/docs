@@ -291,6 +291,50 @@ Numeric columns: `current_balance`, `qualifying_balance`, `qualifying_percent` n
 
 `counterparty-category-ledger.ts` (migration `0289`, LOA-2197). Per-borrower-file persistent memory of how a counterparty's credits should be categorized. Rows survive across re-runs: the same wire originator next month is categorized from this table without another Plaid round-trip. Scope is per `borrower_file_id` — the same counterparty can legitimately differ across files.
 
+### credit_category_corrections
+
+`credit-category-corrections.ts` (migration `0323`). FR-11 underwriter-override persistence for the credit-categorization pipeline (see [below](#the-credit-categorization-pipeline)). Keyed by `(borrower_file_id, signature_hash)` so overrides survive recompute. Mirrors `counterparty_category_ledger` structure.
+
+PK `id`. Unique index `credit_category_corrections_file_sig_key` on `(borrower_file_id, signature_hash)`.
+
+| Column | Notes |
+|---|---|
+| `borrower_file_id` | FK → `borrower_files` (cascade) |
+| `signature_hash` | Hash identifying the counterparty/credit group |
+| `prior_category` | Category before the correction |
+| `new_category` | Corrected category |
+| `prior_qualifier` / `new_qualifier` | Qualifier before/after (nullable) |
+| `corrected_by` | FK → `portal_users` (set null) |
+| `reason` | Free-text rationale (NOT NULL) |
+
+### credit_curation_queue
+
+`credit-curation-queue.ts` (migration `0324`). FR-12 curation queue for truncated-group labelling. Composite PK `(borrower_file_id, originator_id)`. Scope is per borrower file — `originator_id` is a normalized person name on the Wells Fargo and P2P rails, so a global key would let one borrower's counterparty name bleed into another borrower's statement.
+
+| Column | Notes |
+|---|---|
+| `borrower_file_id` | FK → `borrower_files` (cascade) |
+| `originator_id` | Normalized originator identifier (1–512 chars, NOT NULL) |
+| `renderings` | jsonb array of observed display-name renderings (default `[]`) |
+| `occurrence_count` | How many times this originator has been seen |
+| `curated_name` | Human-curated display name (nullable until curated) |
+| `curated_by` | FK → `portal_users` (set null) |
+
+### The credit-categorization pipeline
+
+A new deterministic credit-categorization pipeline lives at `packages/api/src/lib/bank-statement/credit-categorization/`. It categorizes bank-statement **credit** transactions (deposits) into a taxonomy of income and transfer types — `Wire`, `W2`, `Customer Payment`, `Rental Income`, `ACH Deposit`, `P2P Payment`, `Merchant Settlement`, `Account Transfer`, and others — using a rule ladder plus an LLM resolver for unresolved counterparties.
+
+<Note>
+**Zero-wiring epic (PR #3639).** The pipeline is types + reference implementations + a golden-corpus spec harness. No production code calls it yet; the wiring epic will connect it to persistence adapters and a real caller. The two supporting tables (`credit_category_corrections`, `credit_curation_queue`) are live. The pipeline's LLM step is registered in `llm-step-registry.ts` as `creditCategorization` but is not yet invoked from any agent node.
+</Note>
+
+Key design points:
+- **Signature-based grouping.** Credits are hashed into groups by counterparty signature (rail + structural ACH/wire fields). The resolver is called once per unique signature, not per row.
+- **Resolver budget.** `MAX_RESOLVER_CALLS_PER_FILE` caps LLM spend; exhausted groups fall back to the ladder's default category.
+- **Transport-halt guard.** After four transport failures within a statement, remaining groups are routed to the ladder fallback rather than retrying.
+- **Curation.** Truncated-group originators whose display name cannot be resolved are enqueued in `credit_curation_queue` for human labelling.
+- **Corrections.** Human-authored category overrides persist in `credit_category_corrections` (keyed by `borrower_file_id` + `signature_hash`) and survive recompute.
+
 PK `id`, `borrower_file_id` → `borrower_files` (cascade). Unique `(borrower_file_id, signature)`.
 
 | Column | Notes |

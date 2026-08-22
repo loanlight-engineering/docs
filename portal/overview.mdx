@@ -61,6 +61,14 @@ The portal renders two distinct UIs from the same codebase:
   </Card>
 </CardGroup>
 
+## Navigation loading feedback (LOA-2393)
+
+The portal renders visible loading feedback during route transitions and data refreshes.
+
+- **`NavigationProgress`** (`components/shell/navigation-progress.tsx`) mounts in `ChromeShell` and shows a top-of-viewport progress bar on unmodified left-clicks or `Enter` activations of internal same-origin links that change the route. It ignores modified clicks (alt/ctrl/meta/shift), non-primary buttons, `target="_blank"`, `download`, `rel="external"`, and same-path+same-query links. The bar self-clears on route change and after a 15-second ceiling so a failed navigation cannot pin it on screen. `startNavigationProgress()` lets imperative `router.push` callers opt in.
+- **App Router `loading.tsx` boundaries** exist for the `(app)`, `(detail)`, and `results` segments. All render a shared `RouteLoading` skeleton (`components/ui/route-loading.tsx`) with `role="status"`, `aria-busy`, and a screen-reader label.
+- **Dashboard audit table** exposes `aria-busy` and a "Refreshing audits…" status badge during a refetch, replacing the previous opacity-only cue.
+
 ## Tech stack
 
 | Concern | Choice |

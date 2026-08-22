@@ -67,6 +67,47 @@ Per-lender overrides (`LenderRoutingOverride`) can customise `nameTemplate`, `de
 
 **Generated document types (LOA-1975):** three classification types produced by LoanLight itself — `aus_results`, `property_report`, and `appraisal_review_summary` — never receive a `fileName` from the resolver, regardless of any configured `fileNameTemplate`. Their file names come from the generation step itself. The resolver returns `DocTypeView.renamable = false` for these types; the portal routing config editor uses this flag to hide the file-name field for them. A `fileNameTemplate` typed into the raw JSON editor is silently inert for these three types.
 
+### Bucket routing tier (LOA-2463)
+
+Phase 2 of the classify-failed routing strategy. When Phase 2 classification produces no usable `classificationType` (`"unknown"`), the resolver can fall back to the coarse Phase 1 split bucket (`BUSINESS`, `INCOME`, `PROPERTY`, etc.) to pick a destination folder rather than always collapsing into manual review.
+
+**How it works.** `resolveRouting` runs this tier **before** the classification lookup — not as a fallback after it. The reason: `"unknown"` is itself a seeded rule in the global config, so a `config.global["unknown"]` lookup returns `mapped` and the `!globalRule` branch is never taken for classify-failed documents. A post-lookup fallback would be unreachable in production.
+
+Three conditions must all be true for the tier to fire:
+
+1. `classificationType === "unknown"` — a successfully classified document keeps its own rule even when its bucket is known; a `paystub` is never routed as "Income".
+2. The Phase 1 split bucket is non-null, non-blank, and not `UNKNOWN` — genuinely un-typeable documents collapse into manual review, deliberately.
+3. A rule is configured for that bucket in `bucketRules` — the shipped state has none.
+
+If any condition fails, the tier returns null and the resolver falls through to the normal classification tier.
+
+A new `BucketRoutingRule` shape lives alongside the global rules on `RoutingConfig`:
+
+```ts
+interface BucketRoutingRule {
+  bucket: string;               // normalized DocumentBucket value, e.g. "PROPERTY"
+  nameTemplate: string;         // must be a non-blank literal — no {{field}} placeholders
+  typeTemplate: string;         // must be a non-blank literal — no {{field}} placeholders
+  descriptionTemplate?: string | null;
+  fileNameTemplate?: string | null;
+}
+
+interface RoutingConfig {
+  // ... global, lenderOverrides ...
+  bucketRules?: Record<string, BucketRoutingRule>; // bucket key → rule
+}
+```
+
+`bucketRules` is a **sibling field** on `RoutingConfig`, not extra keys in `global` — the two vocabularies are different and merging them would let an incoming `classificationType` collide with a bucket key. The validator **rejects** `requiredFields`/`onMissingFields` on bucket rules rather than ignoring them — those policies have no meaning when per-document metadata cannot be relied on.
+
+**`nameTemplate` and `typeTemplate` must be non-blank string literals** (no `{{ }}` placeholders). These two fields are the container's identity, and this tier only fires when document metadata is unreliable, so requiring literals makes both a blank render and a placeholder collapse structurally impossible. `descriptionTemplate` and `fileNameTemplate` may still use placeholders.
+
+The resolver emits a new routing outcome `bucket_fallback` (a success outcome) when this tier routes a document. It logs a distinct line so monitoring can distinguish it from the existing failure paths.
+
+**Lender scope.** The bucket tier is not lender-scoped. An existing per-lender override keyed on `"unknown"` is still authorable but stops taking effect for documents this tier routes once bucket rules are seeded. This is tracked in LOA-2535.
+
+**Shipped inert.** No `bucketRules` are seeded. Every document falls through to today's behaviour until LOA-2464 seeds the first bucket rules.
+
 ## Error responses
 
 | Status | Body | When |
