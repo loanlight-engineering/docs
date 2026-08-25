@@ -18,7 +18,7 @@ Every route is guarded by `InternalApiKeyGuard` — the same guard used by the r
 
 ## Flag registry
 
-The service maintains a code-defined registry (`feature-flags.registry.ts`) of the flags it manages. These are the per-lender `lender_feature` keys read by `resolveFeatureGate` in `aus-update.service.ts` and `webhooks.service.ts`; no new table or migration is required for new flags.
+The service maintains a code-defined registry (`feature-flags.registry.ts`) of the flags it manages. These are the per-lender `lender_feature` keys read by `resolveFeatureGate` in `aus-update.service.ts`, `webhooks.service.ts`, and `EpcClientRepository.getLenderFeature`; no new table or migration is required for new flags.
 
 | `key` | Label | Default | Gates |
 |---|---|---|---|
@@ -26,8 +26,9 @@ The service maintains a code-defined registry (`feature-flags.registry.ts`) of t
 | `appraisal_passthrough` | Appraisal Pass-Through XML | `false` | Manually-uploaded, non-MISMO appraisal XML alongside the appraisal PDF |
 | `appraisal_package_delivery` | Appraisal Package Delivery | `false` | Partner-delivered appraisal packages (UAD 3.6 ZIP or UCDP SSR) |
 | `aus_property_indexing` | AUS Property Indexing | `false` | Whether the AUS report, property report, and appraisal review-summary PDFs are routed via the `document_push_routing_config` table into specific eFolders. When `false` (default), these PDFs are delivered as bare "AUS Results" resources with no eFolder routing, regardless of the `document_push` flag. Added LOA-2466. |
+| `ssr_only_detection` | SSR-Only Detection | `false` | Flag an audit run as SSR-only when every document new on that run landed in the lender's configured UCDP SSR eFolder. **Value-bearing** — requires the eFolder display name in `value`. Added LOA-2483. |
 
-All flags default to disabled (absence of a row = disabled).
+All flags default to disabled (absence of a row = disabled). For **value-bearing flags** (`ssr_only_detection`), `enabled = true` with a blank or absent value also reads as disabled at runtime — the stored `enabled` state is reported accurately by the admin API, but `resolveFeatureValue` returns `null` until a non-blank `value` is persisted.
 
 <Note>
 `document_push` and `aus_property_indexing` are **independent**. `document_push` controls whether classified documents are routed into eFolders; `aus_property_indexing` controls whether the AUS report / property PDFs are routed. A lender can have one without the other. Enable `aus_property_indexing` per-lender from the Octy EPC Feature Flags tab after verifying the legacy delivery path is no longer needed.
@@ -39,17 +40,28 @@ All flags default to disabled (absence of a row = disabled).
 
 | Method & path | Action |
 |---|---|
-| `GET /integrations/feature-flags` | The code-defined flag registry (key, label, description, defaultEnabled for all four flags). |
-| `GET /integrations/feature-flags/lenders/:orgId` | A lender's effective flag values — all four flags merged with registry defaults (an absent row resolves to the default, never a 404). |
-| `PUT /integrations/feature-flags/lenders/:orgId/:key` | Set one flag (upsert). Body: `{ "enabled": boolean }`. Returns `{ "key": string, "enabled": boolean }`. Audit-logged (see below). |
+| `GET /integrations/feature-flags` | The code-defined flag registry (key, label, description, defaultEnabled, and for value-bearing flags: requiresValue, valueLabel, valueDescription). |
+| `GET /integrations/feature-flags/lenders/:orgId` | A lender's effective flag values — all five flags merged with registry defaults (an absent row resolves to the default, never a 404). |
+| `PUT /integrations/feature-flags/lenders/:orgId/:key` | Set one flag (upsert). Body: `{ "enabled": boolean, "value"?: string }`. Returns `{ key, enabled, value }` where `value` is `string \| null`. Audit-logged (see below). |
 
 ### PUT request body
+
+For boolean flags:
 
 ```json
 { "enabled": true }
 ```
 
-`@IsBoolean()` is enforced — a non-boolean value returns `400`.
+For value-bearing flags (`ssr_only_detection`), include `value`:
+
+```json
+{ "enabled": true, "value": "UCDP Submission Summary Report" }
+```
+
+- `@IsBoolean()` is enforced on `enabled`.
+- `value` is optional (`string | null`, max 255 chars). Omitting it preserves the stored value. Sending a blank string returns `400 MISSING_FEATURE_FLAG_VALUE`.
+- Enabling a value-bearing flag without a non-blank `value` (and none already stored) returns `400 MISSING_FEATURE_FLAG_VALUE`.
+- Sending `value` for a non-value-bearing flag is silently dropped.
 
 ### GET lenders/:orgId response
 
@@ -57,15 +69,16 @@ All flags default to disabled (absence of a row = disabled).
 {
   "orgId": "<workos-org-id>",
   "flags": [
-    { "key": "document_push", "enabled": false },
-    { "key": "appraisal_passthrough", "enabled": false },
-    { "key": "appraisal_package_delivery", "enabled": false },
-    { "key": "aus_property_indexing", "enabled": false }
+    { "key": "document_push", "enabled": false, "value": null },
+    { "key": "appraisal_passthrough", "enabled": false, "value": null },
+    { "key": "appraisal_package_delivery", "enabled": false, "value": null },
+    { "key": "aus_property_indexing", "enabled": false, "value": null },
+    { "key": "ssr_only_detection", "enabled": false, "value": null }
   ]
 }
 ```
 
-All four flags are always present in the response, whether or not a DB row exists for them. An absent row resolves to the registry's `defaultEnabled` (currently `false` for all four).
+All five flags are always present in the response. An absent row resolves to the registry's `defaultEnabled` (currently `false` for all five). `value` is the **stored** `feature_value` (trimmed), not the effective value — a disabled row still reports its stored folder name so an editing client can round-trip it.
 
 ## Audit logging
 
@@ -75,15 +88,17 @@ Every `PUT` performs a read-before-write and emits a structured log line:
 {
   "event": "feature_flag_set",
   "orgId": "<workos-org-id>",
-  "key": "document_push",
+  "key": "ssr_only_detection",
   "previousValue": false,
   "newValue": true,
+  "previousFeatureValue": null,
+  "newFeatureValue": "UCDP Submission Summary Report",
   "actorId": "<x-acting-user-id>",
   "actorEmail": "<x-acting-user-email>"
 }
 ```
 
-`previousValue` is resolved server-side and stays internal to the log; the wire-contract response shape is `{ key, enabled }` only. This mirrors the `routing_config_authored` / `_activated` / `_deactivated` pattern in `RoutingConfigAdminController`.
+`previousValue` / `previousFeatureValue` are resolved server-side and stay internal to the log. This mirrors the `routing_config_authored` / `_activated` / `_deactivated` pattern in `RoutingConfigAdminController`.
 
 ## Error responses
 
@@ -91,6 +106,7 @@ Every `PUT` performs a read-before-write and emits a structured log line:
 |---|---|---|
 | `409` | `{ code: "LENDER_NOT_PROVISIONED", message }` | `:orgId` does not resolve to a provisioned lender. |
 | `400` | `{ code: "UNKNOWN_FEATURE_FLAG", message }` | `:key` is not in the registry. |
+| `400` | `{ code: "MISSING_FEATURE_FLAG_VALUE", message }` | Enabling a value-bearing flag with no non-blank `value` (either sent blank or not sent and none stored). |
 
 ## Transport
 

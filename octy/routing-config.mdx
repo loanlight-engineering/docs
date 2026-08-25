@@ -66,6 +66,52 @@ The client is a close cousin of the loanlight-api client, but points at a **sepa
 
 Every call also carries the acting WorkOS user for the integrations audit trail — `x-acting-user-id` (WorkOS user id) and `x-acting-user-email` — and uses a 120-second timeout. Non-2xx responses surface as `ApiClientError`; `actions/shared.ts` maps the contract's **401 / 400 / 404 / 409** statuses to UI messages, and keeps 401s generic so the internal key is never echoed back to the browser.
 
+## Bucket rules (LOA-2465)
+
+The global rule set accepts an optional `bucketRules` field alongside `rules`. Bucket rules route documents whose Phase-2 classification came back `"unknown"` but whose Phase-1 split bucket is known — the tier the routing-config admin API calls the [bucket routing tier](/integrations/routing-config-admin#bucket-routing-tier-loa-2463).
+
+### Shape
+
+The `GlobalRulesPayload` authored against `POST /global/versions` is:
+
+```ts
+interface GlobalRulesPayload {
+  defaultContainer: { name: string; type: string };
+  rules: Record<string, RoutingRule>;
+  bucketRules?: Record<string, BucketRoutingRule>; // LOA-2465
+}
+
+interface BucketRoutingRule {
+  nameTemplate: string;           // must be a non-blank literal — no {{field}} tokens
+  typeTemplate: string;           // must be a non-blank literal
+  descriptionTemplate?: string | null;
+  fileNameTemplate?: string | null;
+}
+```
+
+`bucketRules` is **three-state** on the way in:
+- **Key absent** — integrations carries the active bucket map forward unchanged. An editor that saves without the key inherits rather than deletes.
+- **`{}`** — clears the bucket map.
+- **Non-empty map** — replaces the active bucket map.
+
+The Global editor (`GlobalConfigTab`) carries `bucketRules` through verbatim from the last-read config, so whatever is stored is visible in the editor buffer and round-trips correctly on save (LOA-2465 fixed a prior bug where the field was dropped on read, making it both invisible and uneditable).
+
+`nameTemplate` and `typeTemplate` on a bucket rule must be non-blank literals with no `{{placeholder}}` tokens. These fields are the container identity, and this tier fires exactly when per-document metadata cannot be trusted — a rendering failure would misfile silently. `descriptionTemplate` and `fileNameTemplate` may still use placeholders. The server rejects `requiredFields` or `onMissingFields` on a bucket rule with `400` — those policies are undefined when document metadata is unreliable.
+
+Bucket keys must be SCREAMING\_SNAKE\_CASE matching the Phase-1 split bucket names the resolver normalises to (e.g. `PROPERTY`, `INCOME`, `TITLE`). An unknown key is a rule the resolver can never look up and will cause a validation `400`.
+
+<Note>
+No bucket rules are seeded. The tier is inert until LOA-2464 seeds the first rules.
+</Note>
+
+### `RoutingRule.descriptionTemplate` type correction (LOA-2465)
+
+`descriptionTemplate` on a `RoutingRule` is three-state: absent (no description), `null` (explicit none), or a string template. Prior to LOA-2465, Octy's TypeScript types rejected `null` at author time even though the integrations service has accepted it since LOA-882. The type is now `string | null | undefined`, matching what the server accepts. A `null` that reached the raw JSON editor before this fix would have been blocked on save.
+
+### Unknown routing outcome no longer crashes (LOA-2535)
+
+The `ClassificationRoutingSection` component used to throw when it received a routing outcome value it did not recognise. LOA-2535 adds a safe fallback so an unrecognised outcome renders as an unknown state rather than crashing the Loan Lookup modal.
+
 ## Document-router outcomes on classification cards (LOA-1714)
 
 Octy surfaces document-router routing outcomes directly on classification cards in the **Loan Lookup** modal (the `LoanClassificationsPane` / `DocumentExplorer` views). When a classification has a routing outcome, a **Show routing** toggle appears on the `ClassificationCard` and expands a `ClassificationRoutingSection` showing:
@@ -97,10 +143,6 @@ Fetch errors yield an empty result — the classification card renders normally 
 ## EPC feature flags (lender detail page)
 
 The lender detail page at `/lenders/[id]` has a fifth tab, **EPC Flags** (`?tab=epc-flags`, `EpcFeatureFlagsTab.tsx`), for managing per-lender feature flags in the integrations service. It proxies to `INTEGRATIONS_INTERNAL_URL` and requires `workos_org_id` to be set on the lender — lenders without a WorkOS org display an "EPC flags unavailable" notice.
-
-<Note>
-The integrations EPC feature-flag API (`GET /integrations/feature-flags`, `GET/PUT /integrations/feature-flags/lenders/{orgId}/{key}`) is planned but **not live yet** (LOA-1463). The Octy tab is built against the contract in `src/lib/integrations-feature-flag-types.ts`; it will begin working once the integrations service ships the endpoint.
-</Note>
 
 The tab loads a **registry** of all known EPC feature flags (`listEpcFeatureFlags` → `GET /integrations/feature-flags`) and the lender's **current values** (`getLenderEpcFeatureFlags`) in parallel, merges them (absent key → `defaultEnabled`), and renders a toggle row per flag. Toggling calls `setLenderEpcFeatureFlag` (`PUT /integrations/feature-flags/lenders/{orgId}/{key}`) with optimistic UI — on failure the toggle reverts and a toast appears.
 
