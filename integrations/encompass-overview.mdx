@@ -87,6 +87,18 @@ code belongs to is the single most important framing for this area.
   </Step>
 </Steps>
 
+## EPC M2M credential reconciliation (LOA-2462)
+
+LoanLight's EPC integration authenticates to Encompass using Machine-to-Machine (M2M) credentials stored in `lender_auth_clients` and managed through WorkOS. In rare cases — such as a lender onboarded via a code path that skips the credential-minting step — a local `lender_auth_clients` row can be missing for an otherwise-active lender whose WorkOS M2M application exists.
+
+`EpcCredentialReconciliationService` runs a daily cron job (`@Cron("0 8 * * *")`, 08:00 server time) that lists each active, org-mapped lender's WorkOS M2M applications and auto-heals any `client_id` missing locally, using the same conflict-safe writer that `mintEpcCredential` uses. A PostgreSQL advisory lock ensures a single ECS pod runs the sweep per tick; others skip.
+
+Key design decisions:
+- **Active lenders only.** Inactive lenders are skipped; they cannot initiate an EPC integration.
+- **One-directional.** A local `lender_auth_clients` row whose `client_id` no longer appears in WorkOS is left untouched — absence from a WorkOS list could reflect transient API staleness and must not break live EPC auth.
+- **Org-scoping verified client-side.** Before linking a newly discovered `client_id`, the service confirms the WorkOS application belongs to the expected org. Mismatched orgs are logged and not linked.
+- **Telemetry.** The metric `epc_credential_reconciliation_complete` carries `{ healed, conflicts, mismatched, errors, lendersScanned }` for each sweep run. Conflicts arise when `mintEpcCredential` finds a pre-existing row for the same `client_id` during healing; they are logged but not treated as errors.
+
 ## Internal test shim
 
 An internal HTTP shim, `POST /api/v1/integration-events/process`, validates the same Zod

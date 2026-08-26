@@ -27,6 +27,7 @@ The service maintains a code-defined registry (`feature-flags.registry.ts`) of t
 | `appraisal_package_delivery` | Appraisal Package Delivery | `false` | Partner-delivered appraisal packages (UAD 3.6 ZIP or UCDP SSR) |
 | `aus_property_indexing` | AUS Property Indexing | `false` | Whether the AUS report, property report, and appraisal review-summary PDFs are routed via the `document_push_routing_config` table into specific eFolders. When `false` (default), these PDFs are delivered as bare "AUS Results" resources with no eFolder routing, regardless of the `document_push` flag. Added LOA-2466. |
 | `ssr_only_detection` | SSR-Only Detection | `false` | Flag an audit run as SSR-only when every document new on that run landed in the lender's configured UCDP SSR eFolder. **Value-bearing** — requires the eFolder display name in `value`. Added LOA-2483. |
+| `bucket_routing` | Bucket Routing | `false` | Enable the [bucket routing tier](/integrations/routing-config-admin#bucket-routing-tier-loa-2463) for this lender. When on, classify-failed documents with a known Phase 1 split bucket are routed by the global `bucketRules` config instead of collapsing into manual review. The tier runs before the classification lookup and preempts any lender-scoped `unknown` override for documents it covers. Leave off until bucket rules are seeded globally (LOA-2464) and the lender's destinations are confirmed. Added LOA-2554. |
 
 All flags default to disabled (absence of a row = disabled). For **value-bearing flags** (`ssr_only_detection`), `enabled = true` with a blank or absent value also reads as disabled at runtime — the stored `enabled` state is reported accurately by the admin API, but `resolveFeatureValue` returns `null` until a non-blank `value` is persisted.
 
@@ -73,12 +74,13 @@ For value-bearing flags (`ssr_only_detection`), include `value`:
     { "key": "appraisal_passthrough", "enabled": false, "value": null },
     { "key": "appraisal_package_delivery", "enabled": false, "value": null },
     { "key": "aus_property_indexing", "enabled": false, "value": null },
-    { "key": "ssr_only_detection", "enabled": false, "value": null }
+    { "key": "ssr_only_detection", "enabled": false, "value": null },
+    { "key": "bucket_routing", "enabled": false, "value": null }
   ]
 }
 ```
 
-All five flags are always present in the response. An absent row resolves to the registry's `defaultEnabled` (currently `false` for all five). `value` is the **stored** `feature_value` (trimmed), not the effective value — a disabled row still reports its stored folder name so an editing client can round-trip it.
+All six flags are always present in the response.
 
 ## Audit logging
 

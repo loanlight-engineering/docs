@@ -92,6 +92,7 @@ also defines `onRequestError()` for server-error logging.
 Extra DD env on the API app (`getApplicationEnvironment()`):
 
 - `DD_PROFILING_ENABLED=true` (continuous profiler)
+- `DD_RUNTIME_METRICS_ENABLED=true` (Node.js runtime metrics — `runtime.node.*` gauge series; enabled LOA-2242)
 - `DD_GIT_COMMIT_SHA` and `DD_GIT_REPOSITORY_URL` (source code integration)
 - `DD_DBM_PROPAGATION_MODE=full` (SQL-to-trace linking)
 
@@ -233,8 +234,13 @@ Committed monitor files in `packages/api/observability/datadog/`:
 | `loan-interest-only-axis-unresolvable.monitor.json` | Interest-only axis unresolvable — neither Encompass 1177 nor MISMO produced a term (LOA-2479) |
 | `loan-interest-only-presence-beacon-silent.monitor.json` | Interest-only presence beacon silent — the producer stopped reporting (LOA-2479) |
 | `loan-interest-only-wire-contradicts-mismo.monitor.json` | Encompass 1177 overrode a disagreeing MISMO interest-only term (LOA-2479) |
+| `appraisal-ssr-dual-label-dropped.monitor.json` | An SSR document carries both `fnma_ssr` and `fhlmc_ssr` labels and was dropped from routing rather than double-attached (LOA-2460) |
+| `appraisal-ssr-extraction-failed.monitor.json` | SSR extraction reached a terminal failure after retry exhaustion (LOA-2460) |
+| `appraisal-ssr-routing-fault.monitor.json` | SSR routing fault during the Encompass-sourced SSR dispatch path (LOA-2460) |
 | `ruleops-reconcile-failed.monitor.json` | RuleOps reconcile run failed to complete |
 | `ruleops-rule-export-lost.monitor.json` | RuleOps rule-system export lost |
+| `waf-blocked-requests-int.monitor.json` | WAF block-rate elevated in the INT account (LOA-2244) |
+| `waf-blocked-requests-prod.monitor.json` | WAF block-rate elevated in the PROD account (LOA-2244) |
 
 `monitors.registry.json` contains one entry per `*.monitor.json` basename with `{ "deprecated": boolean }`. Setting `deprecated: true` causes `apply-monitors.ts` to delete that monitor from Datadog on the next apply rather than updating it. The registry shape is validated by `monitor-schema.ts` (Zod) at both PR time and apply time.
 

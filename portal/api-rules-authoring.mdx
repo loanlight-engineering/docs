@@ -152,6 +152,16 @@ Two tables store authoring state for the eligibility system:
 
 **`eligibility_configs`** — a per-lender JSON config (one row per lender, unique) that carries the full eligibility engine input: `grids` (per-program LTV matrix rows keyed by `rowId`), `geoBars` (geographic bar rules), `ltvModifiers` (condo cap, cash-out cap, multi-unit/FL-condo/declining-market reductions), `programClassifier` (doc-type and name-regex program matching), and `ficoStrategy` (per-program FICO selection strategy). Loaded and Zod-validated on every read by `EligibilityConfigLoaderService`.
 
+Grid row band axes (LOA-1778 adds three new columns alongside the existing `ficoMin`/`ficoMax`, `dscrMin`/`dscrMax`, `unitsMin`/`unitsMax`, and `purpose`/`occupancy`):
+
+| Axis | Values | Notes |
+|---|---|---|
+| `docType` | `"FULL"` \| `"ALT"` | Closed enum — same aliased-collapse hazard as `purpose`/`occupancy`; `normalizeDocType` maps to exactly these tokens. |
+| `dscrNoRatio` | `true` (literal) | Matches only when the borrower supplied no DSCR ratio. Cannot be combined with `dscrMin`/`dscrMax` — the validator rejects the combination. |
+| `creditEventTrack` | `"STANDARD"` \| `"RECENT_EVENT"` | Closed enum; `normalizeCreditEventTrack` maps to exactly these tokens. |
+
+Omitting an axis makes the row a wildcard for that dimension. Using `dscrNoRatio: true` alongside numeric DSCR bounds is a validation error at the persistence boundary.
+
 <Note>
 `programClassifier` and `ficoStrategy` are schema-valid and persisted but **not yet consumed at runtime** (forward-staged, LOA-1763 §B4). `determineProgram` still uses in-code doc-type/name regexes; `selectRepresentativeFico` still uses the in-code `FIRSTCOLONY_FICO_STRATEGY`. Do not treat them as live overrides until a later ticket wires the processor plumbing.
 </Note>

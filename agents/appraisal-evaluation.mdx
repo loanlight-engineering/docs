@@ -38,6 +38,12 @@ fires, the orchestrator enumerates classified appraisal documents (`appraisal_st
 the job by identity. The EPC audit completes synchronously; the appraisal job runs as a
 detached best-effort task (up to ~95 min) and does not gate `WORKFLOW.COMPLETE`.
 
+**SSR routing from Encompass (LOA-2460).** Classified Fannie Mae (`fnma_ssr`) and Freddie Mac (`fhlmc_ssr`) Submission Summary Reports now route into the existing SSR extraction pipeline on the EPC audit path. The routing path is shared with the portal upload path; it does not add an SSR lane for lenders without the `appraisalEvaluation` entitlement.
+
+The orchestrator selects the two newest document candidates per agency from the current audit’s classification run, resolves whole-document S3 keys, copies each selected document to a UUID-owned destination key, and enqueues the SSR processor only after the appraisal dispatch handoff succeeds. Same-key attachment is idempotent under the existing advisory lock. Only missing live keys consume the two-row cap per agency or enqueue work.
+
+Three Datadog monitors cover this path: `appraisal-ssr-routing-fault` (routing errors), `appraisal-ssr-dual-label-dropped` (documents carrying both `fnma_ssr` and `fhlmc_ssr` labels), and `appraisal-ssr-extraction-failed` (terminal extraction failures).
+
 Read the EPC-linked run via `GET /api/v1/audit_runs/:id/appraisal` — returns `PortalAppraisalPayload`
 or `{ data: null }` (never 404). The `AppraisalAuditProjectionService` applies the manual-override
 overlay (LOA-1685) to the projection. See [Integration orchestration pipeline](/integrations/orchestration-pipeline)
@@ -669,11 +675,22 @@ The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (
 One row per extracted appraisal photo. `id` is a deterministic UUIDv5 (source signature + page + figure index). Identity: `page_number`, `caption`, `width`, `height`, `s3_key`, `bbox` (normalized 0–1 bbox, nullable on pre-IRIS rows). IRIS observation columns (nullable until `analyzed_at` is set): `scene`, `attribution`, `quality`, `elements`, `conditions`. Migration `0310` (LOA-1901) adds a composite read index on `(appraisal_run_id, page_number)` used by the fact-sweep batch endpoint. Replaces the retired `photo_manifest` column and 8-value category contract.
 </ResponseField>
 
+<ResponseField name="appraisal_ssr_documents" type="table">
+Fannie/Freddie SSR findings. One row per attempted extraction, keyed on `(runId, agency)` where only `completed` rows occupy the unique agency slot. Key columns:
+
+- `agency` — `"fannie_mae" | "freddie_mac"` (or null while pending/processing)
+- `status` — `"pending" | "processing" | "completed" | "failed"`
+- `processingJobId` / `processingToken` — BullMQ job id and delivery token; used to fence processor writes against stale deliveries (LOA-2460)
+- `detectionConfidence` — jsonb: `{ method: SsrDetectionMethod, score: number }`. `SsrDetectionMethod` is a closed union (LOA-2460): `document_text_confirmed` | `document_text_llm_confirmed` | `document_text_only` | `marker_llm_confirmed` | `llm_unverified` | `unresolved`. Older rows may carry `llm_extracted`, `header_markers`, `ambiguous`, or `no_ssr_markers` in the `method` field — do not switch exhaustively.
+
+The unique partial index `idx_one_ssr_per_run_agency` covers only `status = 'completed'` rows (LOA-2460, migration `0326`). Two `pending` or `processing` rows for the same agency may coexist; PostgreSQL arbitrates when they transition to `completed`.
+</ResponseField>
+
 <ResponseField name="rules, overrides, corrections" type="tables">
 `appraisal_rule_sets`, `appraisal_rules`, `appraisal_rule_templates` (the platform-owned shared
 template catalog with no `lenderId`, `module` in `appraisal | credit | income`),
 `appraisal_rule_overrides`, `appraisal_corrections`, `appraisal_run_partials`,
-`appraisal_field_metrics`, and `appraisal_ssr_documents` (Fannie/Freddie SSR findings).
+and `appraisal_field_metrics`.
 </ResponseField>
 
 ## HTTP endpoints
