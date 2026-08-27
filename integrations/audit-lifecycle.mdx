@@ -64,7 +64,13 @@ The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResour
 
 ## Delivery modes
 
-`AusUpdateService` decides delivery shape from the lender's **`aus_property_indexing` feature flag** (`AUS_PROPERTY_INDEXING_FEATURE_KEY` on the `lender_feature` table). This flag is independent of `document_push`: it controls only whether the AUS report, property PDFs, and appraisal review-summary are routed via the `document_push_routing_config` table ("routed" path) or delivered as bare "AUS Results" resources ("combined" path). `document_push` continues to gate classified-document (bank statements, credit reports, etc.) delivery into eFolders — that part is unchanged.
+`AusUpdateService` decides delivery shape from the lender's **`aus_property_indexing` feature flag** (`AUS_PROPERTY_INDEXING_FEATURE_KEY` on the `lender_feature` table). This flag is independent of `document_push`: it controls only whether the AUS report, property PDFs, and appraisal review-summary are routed via the `document_push_routing_config` table ("routed" path) or delivered as bare "AUS Results" resources ("combined" path). `document_push` continues to gate classified-document (bank statements, credit reports, etc.) delivery into eFolders.
+
+**Per-loan document push via `extensions.indexingShouldRun` (LOA-2587).** Classified documents are normally pushed only when the lender-wide `DOCUMENT_PUSH_FEATURE_KEY` (`document_push`) feature flag is on. An EPC transaction request may now enable document push for a single loan by including the extension key `indexingShouldRun` in the EPC `extensions` object, even when the lender flag is off. The queue consumer (`QueueConsumerService`) reads the flag first; if it is not set, `isIndexingRequested(extensions)` is checked as a fallback. The resulting `enablementReason` (`"lender_flag"` or `"loan_extension"`) is logged alongside the dispatch for observability.
+
+Key behavior of the extension lookup:
+- Matching is case-insensitive on the key name (`indexingShouldRun` lowercased), because the key comes from the lender's own EPC config and a wrong guess would silently skip every piloted loan.
+- Any populated scalar value enables the gate — `"N"` and `false` enable too; only the key's presence (with a non-empty scalar value) matters, not the value itself. Objects and arrays are not considered populated.
 
 `resolveFeatureGate(transactionRecord, AUS_PROPERTY_INDEXING_FEATURE_KEY)` resolves the lender and reads the flag. A DB error throws (fail-loud); an unmapped client is simply not enabled (LOA-2466).
 

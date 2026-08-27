@@ -152,6 +152,8 @@ Other columns: `name`, `created_by`, the `processing_*` progress columns, `incom
 
 Other columns: `bank_name`, `account_number_masked`, `account_holder`, `statement_period_start` / `statement_period_end` (date, NOT NULL), `fraud_flags` jsonb, `pdf_metadata` jsonb, `created_at`.
 
+**Source page range (migration `0328`, LOA-2224):** `source_page_start` integer, nullable; `source_page_end` integer, nullable. The 1-based page numbers the statement occupies within its source PDF, reported by the structured-extraction model. Populated by the `bankStatementIncome` agent; null on rows from earlier extractions or when the model did not return a range. Validated against `isValidPdfPageNumber` (shared package) before persistence — out-of-range values are discarded rather than stored as a data error (cosmetic-only, per ticket). The portal uses these to deep-link a reviewer directly to the relevant pages of the source document.
+
 ### transactions
 
 `transactions.ts`. PK `id`, `statement_id` → `bank_statements` (cascade).
@@ -170,6 +172,11 @@ Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-
 - `category_rule` text, nullable — which post-Plaid rule rewrote the category: `'wire'` | `'counter_credit'` | `'corporate_ach'` | `'counterparty_ledger'`. `NULL` means the Plaid result is unchanged.
 - `category_detailed_vendor` text, nullable — the original Plaid detailed code before a correction, preserved for display. Populated whenever `category_rule` is non-null.
 
+**Credit-categorization columns (migration `0331`, LOA-2541):** three nullable columns added alongside the existing Plaid-PFC columns so the deterministic credit-categorization pipeline can write and be compared against Plaid output before anything depends on it. `NULL` means the pipeline has not run for that row.
+- `credit_category` text — the pipeline's assigned credit category (e.g. `Wire`, `W2`, `Customer Payment`). Bounded by CHECK `(credit_category IS NULL OR length BETWEEN 1 AND 64) NOT VALID`. Partial index `idx_transactions_credit_category WHERE credit_category IS NOT NULL`.
+- `credit_category_label` text — human-readable label. Bounded CHECK `(1–256) NOT VALID`.
+- `credit_signature_hash` text — hash of the counterparty signature group the label was derived from, for traceability back to the resolver result. Bounded CHECK `(1–64) NOT VALID`.
+
 <Note>
 Migration `0236` dropped `borrower_files.ntropy_account_holder_id` — the column was used by the now-removed Ntropy integration and is no longer written.
 </Note>
@@ -179,7 +186,7 @@ Migration `0236` dropped `borrower_files.ntropy_account_holder_id` — the colum
 `findings.ts`. The bank-statement finding ledger. PK `id`, `borrower_file_id` → `borrower_files` (cascade).
 
 <ParamField path="statement_id" type="uuid → bank_statements (set null)">Links a finding to the statement it came from; indexed (migration `0201`).</ParamField>
-<ParamField path="finding_type" type="text NOT NULL">16-value CHECK `finding_type_check`. Migration `0209` added `nsf_overdraft` and `income_trend` (and re-asserted `validation_balance_mismatch` / `validation_duplicate`). Migration `0244` (LOA-1688) added `negative_balance`, emitted at the borrower-file level when any statement's `closing_balance` or running balance goes negative. See [enums reference](/data-model/enums-reference#finding-type-unions-bank-statement-pipeline).</ParamField>
+<ParamField path="finding_type" type="text NOT NULL">17-value CHECK `finding_type_check`. Migration `0209` added `nsf_overdraft` and `income_trend` (and re-asserted `validation_balance_mismatch` / `validation_duplicate`). Migration `0244` (LOA-1688) added `negative_balance`, emitted at the borrower-file level when any statement's `closing_balance` or running balance goes negative. Migration `0332` (LOA-2314) added `reciprocal_counterparty`, emitted at the borrower-file level when the `detectReciprocalCounterparties` detector finds a counterparty with bidirectional flows that are roughly equal (a "wash" pattern suggesting a self-transfer or related-party deposit). See [enums reference](/data-model/enums-reference#finding-type-unions-bank-statement-pipeline).</ParamField>
 <ParamField path="severity" type="text NOT NULL">CHECK `severity_check`: `info | warning | critical | error`.</ParamField>
 <ParamField path="is_dismissed" type="boolean NOT NULL">Default `false`. Migration `0222`. When `true`, the finding is waived by an admin reviewer and excluded from the Issues surface.</ParamField>
 <ParamField path="dismissed_reason" type="text">Required when dismissing; free text ≤500 chars.</ParamField>
@@ -322,10 +329,10 @@ PK `id`. Unique index `credit_category_corrections_file_sig_key` on `(borrower_f
 
 ### The credit-categorization pipeline
 
-A new deterministic credit-categorization pipeline lives at `packages/api/src/lib/bank-statement/credit-categorization/`. It categorizes bank-statement **credit** transactions (deposits) into a taxonomy of income and transfer types — `Wire`, `W2`, `Customer Payment`, `Rental Income`, `ACH Deposit`, `P2P Payment`, `Merchant Settlement`, `Account Transfer`, and others — using a rule ladder plus an LLM resolver for unresolved counterparties.
+A deterministic credit-categorization pipeline lives at `packages/api/src/lib/bank-statement/credit-categorization/`. It categorizes bank-statement **credit** transactions (deposits) into a taxonomy of income and transfer types — `Wire`, `W2`, `Customer Payment`, `Rental Income`, `ACH Deposit`, `P2P Payment`, `Merchant Settlement`, `Account Transfer`, and others — using a rule ladder plus an LLM resolver for unresolved counterparties.
 
 <Note>
-**Zero-wiring epic (PR #3639).** The pipeline is types + reference implementations + a golden-corpus spec harness. No production code calls it yet; the wiring epic will connect it to persistence adapters and a real caller. The two supporting tables (`credit_category_corrections`, `credit_curation_queue`) are live. The pipeline's LLM step is registered in `llm-step-registry.ts` as `creditCategorization` but is not yet invoked from any agent node.
+The pipeline's LLM step is registered in `llm-step-registry.ts` as `creditCategorization`. The resolver answers are now persisted to the **credit resolver memo tables** (migrations `0334`, LOA-2545 step 3 — see below), so the same counterparty signature is not resolved twice. End-to-end wiring to agent nodes is tracked in the LOA-2543 epic.
 </Note>
 
 Key design points:
@@ -347,6 +354,37 @@ PK `id`, `borrower_file_id` → `borrower_files` (cascade). Unique `(borrower_fi
 | `created_by` | FK → `portal_users` (set null); set when a human override writes the entry. |
 
 Source priority on re-apply: `override > rule > plaid`. The rank guard prevents a lower-priority source from overwriting a higher-priority existing entry.
+
+### credit_resolver_memo_global and credit_resolver_memo_file
+
+`credit-resolver-memo.ts` (migration `0334`, LOA-2545 step 3). The LLM resolver memo — a cache of counterparty-resolution answers so each unique counterparty signature is not resolved more than once.
+
+Two tiers exist for a **privacy** reason, not a performance one: `originator_id` is a normalized person name on Wells Fargo and P2P rails, so storing it in a globally-keyed table makes one borrower's counterparty name readable from another borrower's file. The global tier holds only hashed digests; the file-scoped tier may hold plaintext but cascades away with the borrower file.
+
+Lookup order within the pipeline: `structuralCache → batchCache → memo (file tier, then global tier) → vendor`. A match at any memo tier returns without an LLM call.
+
+**`credit_resolver_memo_global`** — permanent, cross-file, digest-only.
+
+| Column | Notes |
+|---|---|
+| `signature_hash` | Truncated (64-bit) counterparty hash — the pipeline lookup key. |
+| `contract_version` | Combined PK with `signature_hash`; a new contract version invalidates all prior answers. |
+| `verify_digest` | Full-width sha256 recomputed at read time; a mismatch is a MISS (guards against 64-bit hash collisions in a permanent table). CHECK `length = 64`. |
+| `display_name` | Resolved display name — no originator plaintext (rail aggregates only). |
+| `entity_type` | CHECK `business \| individual \| mechanism \| unknown`. |
+| `proposed_category` | Resolver's category answer; null when `abstain = true`. |
+| `abstain` | When `true`, the resolver declined to answer; `proposed_category` must be null. |
+
+Index: PK `(signature_hash, contract_version)` serves the batched pre-fetch.
+
+**`credit_resolver_memo_file`** — file-scoped, cascades with the borrower file. Identical shape plus plaintext columns acceptable here because the FK to `borrower_files` (cascade on delete) scopes the data to one borrower relationship.
+
+| Column | Notes |
+|---|---|
+| `borrower_file_id` | FK → `borrower_files` (cascade). PK lead. |
+| `institution` / `rail` / `originator_id` / `entry_descriptor` / `normalized_text` | Plaintext descriptor fields — the originator identity in full, safe only at file scope. |
+
+All columns from the global tier are present plus the plaintext columns above. Index `idx_credit_resolver_memo_file_lookup` on `(borrower_file_id, contract_version, signature_hash)` supports the pre-fetch.
 
 ### statement_invites
 

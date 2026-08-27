@@ -138,6 +138,27 @@ exist.
   </Accordion>
 </AccordionGroup>
 
+## classify_split_pending_changes
+
+Migration `0333` (LOA-2564). Stores taxonomy edits that are held for review before being applied to the live tables. The classify-split engine never reads this table; a pending change is invisible to classify runs until it is promoted.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `status` | text NOT NULL | CHECK `pending \| verifying \| verified \| applied \| discarded` (default `pending`). |
+| `actor_email` | text NOT NULL | Author; CHECK length 1–320. |
+| `base_config` | jsonb NOT NULL | Snapshot of the live taxonomy when the draft was authored — what the change is being applied on top of. |
+| `candidate_config` | jsonb NOT NULL | The proposed taxonomy (the author's intended end state). |
+| `checks` | jsonb nullable | Static-check report (`TaxonomyCheckReport`): blocker/warning counts and the eval lane. Recomputed on every save. |
+| `eval` | jsonb nullable | Frozen document sample plus both arms' results; written once when `runPendingChangeEval` completes and reused on re-runs. |
+| `resolved_at` / `resolved_by` | timestamptz / text | Required when status is `applied` or `discarded`; must be null otherwise (CHECK `classify_split_pending_changes_resolution_consistent`). |
+
+Partial unique index `uq_classify_split_pending_changes_one_open` on `((true)) WHERE status NOT IN ('applied', 'discarded')` — at most one open draft at a time. This is enforced by the database rather than application logic so two concurrent saves cannot both land.
+
+All four jsonb columns have size CHECKs (`pg_column_size ≤ 1 MiB` for `base_config`, `candidate_config`, `checks`; ≤ 4 MiB for `eval`) using `NOT VALID` on creation.
+
+See [Taxonomy staging](/octy/classify-split-config#taxonomy-staging-loa-2564) for how this table is used.
+
 ## Dry-runs write real rows
 
 octy dry-runs (`POST /internal/dry-run/classify-split`) run the real agent against a tracked loan

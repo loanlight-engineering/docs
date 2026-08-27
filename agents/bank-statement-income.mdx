@@ -38,6 +38,8 @@ Classifies each extracted deposit (`deposit_classification`) by `borrowerType`. 
 </Accordion>
 <Accordion title="detectAnomalies">
 Runs large-deposit, anomaly, and income-basis (audit P2) analysis via `AnomalyDetectionService`. Threads both `category_detailed` and `income_excluded_reason` into the income basis so refund/P2P/family exclusions are honored.
+
+Also receives `rejectedPeriods` from the extraction state — statement periods the model identified as incomplete or out-of-window (mapped from `extraction.rejected_periods` to `{ accountNumberMasked, coveredMonths }`). `AnomalyDetectionService` uses this list to exclude rejected periods from the anomaly window, so a statement that the extractor rejected does not silently dilute income or fire spurious anomaly findings.
 </Accordion>
 <Accordion title="checkIncomeTrend">
 Checks the month-over-month income trend (audit F2). Threads `incomeExcludedReason` and `borrowerType` through the `toTrendStatements` adapter so the eligibility matrix is borrower-type-aware. No DB access — all inputs come from graph state.
@@ -65,6 +67,10 @@ sequence-sync.spec.ts`) keeps them aligned.
 </Accordion>
 <Accordion title="aggregate (terminal)">
 Assembles the `AggregateWritePlan` — per-table write-batches for `borrower_files`, `bank_statements`, `transactions`, `income_filters`, and `findings` — and returns it. The node itself performs **no DB write** (IC-3/D9). Two additional detectors run inline inside aggregate's glue wrapper (NOT registered StateGraph nodes, so the topology stays at 9 nodes): `detectBalanceFindingsNode` (NSF + negative-balance at extraction time) and `detectContinuityFindingsNode` (balance-continuity fraud). Their outputs thread into `AggregateInput` directly.
+
+A third inline pass, `detectReciprocalCounterparties` (LOA-2314), also runs inside aggregate. It scans credits and debits for counterparties with roughly-equal bidirectional flow ("wash" transfers). Each such counterparty produces one borrower-level `reciprocal_counterparty` finding (severity `info`, `statement_id = null`) and is written to the `findings` table via the write plan. The `FINDING_TYPE_SET` and `VALID_FINDING_TYPES` allowlists are kept in sync by a drift spec (`reciprocal-counterparty-finding-type.spec.ts`).
+
+The `bank_statements` write-plan rows now carry `source_page_start` and `source_page_end` (migration `0328`) when the extraction model reported them. These are 1-based page numbers validated by `isValidPdfPageNumber` (from `loanlight-shared/bank-statement/pdf-page`) before entry into the write plan — out-of-range or non-integer values are dropped rather than persisted.
 </Accordion>
 </AccordionGroup>
 

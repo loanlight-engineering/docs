@@ -59,6 +59,42 @@ Two scripts under `packages/api/scripts/renumber/` make Drizzle migration number
 
 The core is layered and unit-tested under `packages/api/scripts/renumber/`: `journal-state` (pure logic) → `git-journal` (git adapter) → `renumber` (orchestration) → `cli`.
 
+## Destructive-change lint (LOA-1924)
+
+`packages/api/scripts/lint-migrations.ts` and the `migration-lint/` modules under it run a warn-only CI gate that classifies every statement in a newly-added migration as **convention**, **destructive**, or **unclassified**.
+
+The gate uses [squawk](https://squawkhq.com) (a native `libpg_query`-based linter) for statement classification, augmented by repo-specific rules:
+
+- `DO $$ … $$` blocks — squawk treats them as opaque; `do-blocks.ts` parses the PL/pgSQL body and re-classifies statements inside it.
+- Drops squawk has no rule for (e.g. `DROP INDEX`) and house conventions (enum partitioning, data-fixup observability) are handled in `lint.ts` and `enum-partitioning.ts`.
+
+**Status: warn-only.** The gate annotates offending lines with `::warning` in CI and prints a summary, but its findings do not fail the build. Only an operational failure (crash, unreadable path, or a missing input set) exits non-zero. This is intentional: the gate is a detective control; the existing one-approval requirement on `main` is the preventive one.
+
+**Liveness guard.** A separate CI step runs `lint-migrations.ts --assert-input-set` and hard-fails if `packages/api/db/migrations/` is absent or empty. This prevents the gate from silently reporting green over an empty input set if the directory ever moves.
+
+**What it flags:**
+
+- `ALTER COLUMN … SET NOT NULL` (even when a backfill is present — pairing is declared with `-- squawk-ignore adding-not-nullable-field`, not inferred).
+- Column or table drops, type changes, index removals.
+- `ALTER TYPE … ADD VALUE` mixed with other DDL in the same file (enum-partitioning rule — shared with `validate-migrations.ts`).
+- Bare `UPDATE` / `DELETE` inside a migration with no `GET DIAGNOSTICS` / `RAISE NOTICE` wrapper.
+- Dynamic SQL (`EXECUTE format(…)`) — reported `unclassified`.
+
+**Expand/contract path.** Each destructive class has the same fix pattern: separate the schema change from the code change across two deploys, and annotate with a `-- squawk-ignore` comment when the backfill is already present. See `scripts/migration-lint/README.md` for worked examples.
+
+**Running locally:**
+
+```bash
+# Migrations this branch adds (committed, staged, or untracked)
+pnpm lint:migrations:changed
+
+# Lint specific files
+pnpm exec tsx packages/api/scripts/lint-migrations.ts packages/api/db/migrations/0300_x.sql
+
+# Liveness assertion only
+pnpm exec tsx packages/api/scripts/lint-migrations.ts --assert-input-set
+```
+
 ## CI lint rules (validate:migrations)
 
 `scripts/validate-migrations.ts` enforces:

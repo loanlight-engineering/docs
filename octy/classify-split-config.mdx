@@ -16,7 +16,54 @@ The page is tab-based (`src/app/(app)/classify-split-config/`):
 - **PII Doc-Type Rules** — the `pii_field_doc_type_rules` that drive PII scoping.
 - **Dry Run** — run the live validation described below.
 
-Edits are applied through server actions in `actions/` (`classifications.ts`, `classify-rules.ts`, `split-categories.ts`, `pii-doc-type-rules.ts`, `confusion-edges.ts`, `bulk-config.ts`, `config-context.ts`), with Zod schemas in `src/lib/schemas/`.
+Edits are applied through server actions in `actions/` (`classifications.ts`, `classify-rules.ts`, `split-categories.ts`, `pii-doc-type-rules.ts`, `confusion-edges.ts`, `bulk-config.ts`, `config-context.ts`, `pending-changes.ts`, `run-eval.ts`), with Zod schemas in `src/lib/schemas/`.
+
+## Taxonomy staging (LOA-2564)
+
+Every edit now goes through a **staged draft** before it modifies the live taxonomy. The classify-split engine never reads the staging table; a staged change is invisible to classify runs until it is explicitly promoted.
+
+### Scopes
+
+A **scope switch** in the page header toggles between **Live** and **Staged** views (`TaxonomyScope.tsx`). In live scope the page looks and behaves exactly as before — it renders the live tables and each editor saves directly. In staged scope the page renders the draft's `candidate_config` instead of the live tables, and every save writes into the open draft rather than to the live tables.
+
+A header badge indicates when an open draft exists. The switch itself is present only when a draft is open; otherwise the page is always in live scope.
+
+### Draft lifecycle
+
+At most one draft is open at any time, enforced by a partial unique index `uq_classify_split_pending_changes_one_open` on `classify_split_pending_changes` (migration `0333`).
+
+When an edit is saved in staged scope it is projected onto the open draft's `candidate_config` rather than inserted as a second independent fork. This avoids the problem where staging two edits in sequence created two parallel forks of live — applying one made the other's baseline stale. The draft's `base_config` (the snapshot of live when the draft was created) never moves, so the stale-baseline guard on promote keeps working.
+
+Draft lifecycle states (`classify_split_pending_changes.status`):
+
+| Status | Meaning |
+|---|---|
+| `pending` | Open; checks have run but no eval yet, or the draft changed since the last eval. |
+| `verifying` | An eval is running. |
+| `verified` | An eval completed; the draft has not changed since. |
+| `applied` | Promoted to live. Terminal. |
+| `discarded` | Explicitly discarded. Terminal. |
+
+### Static checks
+
+Every save recomputes `runTaxonomyChecks` (`src/lib/classify-split/taxonomy-checks.ts`) against the base and candidate configs. Findings are `blocker` or `warning`. The **Promote to live** button is disabled while any blocker is unresolved. The apply action re-runs checks at promotion time against the current live taxonomy (not just the snapshot) so a blocker introduced by an intervening edit also blocks promotion.
+
+### Check against documents (eval)
+
+When `checks.lane !== "none"`, the **Check against documents** button appears. It calls `runPendingChangeEval` (`actions/run-eval.ts`), which:
+
+1. Draws a frozen sample of real classified documents (or reuses the sample already stored on the draft).
+2. Runs both the live taxonomy and the candidate taxonomy against each sample document.
+3. Stores the side-by-side results in `classify_split_pending_changes.eval`.
+4. Returns an `EvalRecord` with `counts`, `changedRows`, and a `noiseFloor` (the expected classification variation from non-determinism alone).
+
+The **Report** button in the staging bar expands `EvalReportPanel` to show which documents changed classification, what each changed to, and whether the delta exceeds the noise floor. The eval result is stored on the draft so it survives a page refresh and is included in the audit-log entry on apply or discard.
+
+### Promote and discard
+
+**Promote to live** (`applyPendingChange`) computes a targeted diff (`planApply`) between `base_config`, the current live taxonomy, and `candidate_config`. If anything the change touches has moved since the draft was authored, promotion is refused and conflicts are listed — nothing is overwritten. A successful promote runs each op (`category.create | update | delete`, `rule.create | update | delete | reparent`, `edge.create | delete`) inside a single transaction and writes a `pending_change_applied` audit row to `classify_split_config_audit`.
+
+**Discard** marks the draft `discarded` and writes a `pending_change_discarded` audit row that records the diff summary, blocker/warning counts, and the eval verdict if one was run. Discards are audited because a deliberately rejected taxonomy change is often the most informative decision in the config history.
 
 ## Live dry-run
 
