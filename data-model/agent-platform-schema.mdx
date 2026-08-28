@@ -78,6 +78,18 @@ Constraints and indexes:
 The success value is `complete`, not `completed`. The CHECK constraint pins this, and `audit_runs.status` uses the same value. The appraisal pipeline separately uses `completed` for `appraisal_runs.status` — a different table. See [enums reference](/data-model/enums-reference).
 </Warning>
 
+### Orphan termination (LOA-2560, migration `0335`)
+
+Whenever an `audit_runs` row transitions to a terminal state (`complete` or `failed`), `transitionParentAndSealChildren` runs **in the same transaction** to terminalize any non-terminal child `agent_runs` rows:
+
+- In-process children (`urlaExtraction`, `piiValidation`, etc.) are force-failed with `errors.reason = "parent_terminal_before_agent_complete"`.
+- Worker-owned children that were never claimed (`status = 'pending'`) are skipped with `skip_reason = "audit_failed_before_trigger"`.
+- Worker-owned children that were claimed (`status = 'processing'`) are force-failed. Worker-owned children still within their own ledger deadline are **not** terminalized at the direct-complete seam — only the stuck-audit poller terminates those, after verifying the child is past its own deadline.
+
+This prevents `agent_runs` rows from being stranded at `processing` forever when their parent `audit_runs` goes terminal. The orphan reapers (which skip children under terminal parents) cannot recover such rows without this seal.
+
+Migration `0335` (`0335_backfill_stranded_agent_runs_loa_2560.sql`) is a one-time backfill that applies the same classification to rows already stranded before the fix shipped.
+
 ## audit_infra_steps
 
 A thin ledger for **non-agent** infra steps that join a phase — today only LlamaCloud indexing on phase 0 (`database/schema/audit-infra-steps.ts`). These rows have no entitlement and no billing and do not count toward agent completion, but they **do** gate the phase barrier: a phase crosses only when all its `agent_runs` and all its infra steps are terminal. The orchestrator writes these rows directly via `IndexingService` — there is no recorder seam.

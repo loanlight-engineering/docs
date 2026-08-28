@@ -12,7 +12,7 @@ TypeScript contracts, reusable CDK constructs, and LocalStack dev tooling.
 
 <Note>
 The repo now tracks **eight packages** at their current versions:
-`shared-types@1.13.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
+`shared-types@1.23.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
 `shared-auth@0.3.0`, `shared-api-auth@0.3.0`, `shared-ui@0.8.0`,
 `shared-lambda-auth@0.2.0`, and `aus-db` (LOA-1961 — see below). (Older snapshots of this doc warned that only three
 packages existed on disk and that types like `RelatedTrace` were published-only;
@@ -28,7 +28,7 @@ looks missing.
 
 | Package | Role | Version (repo HEAD) |
 |---|---|---|
-| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, roles) | 1.13.0 |
+| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, roles) | 1.23.0 |
 | `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 1.18.0 |
 | `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | 0.1.0 |
 | `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.3.0 |
@@ -116,11 +116,12 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
 `DocumentHealthResponse`, `PropertyDataResult` / `RedFlagResult`,
 `UrlaRulesEngineResult`, and more; the portals render them into tables.
 
-`shared-types@1.13.0` exports these modules (all re-exported from `src/index.ts`):
+`shared-types@1.23.0` exports these modules (all re-exported from `src/index.ts`):
 `field-value.types`, `table.types`, `audit-response.types`, `credit.types`,
 `common.types`, `api-response.types`, `property-data.types`,
 `urla-completeness.types`, `octy.types`, `portal-audits.types`, `role.types`,
-`access-policy.types`, and `epc-document-events.types`. The contract-bearing ones:
+`access-policy.types`, `epc-document-events.types`, `brand.types`, and
+`workos-config`. The contract-bearing ones:
 
 <AccordionGroup>
   <Accordion title="credit.types — the credit-evaluation contract (LOA-1461)">
@@ -173,6 +174,24 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
     (`missing_lender_id | missing_token | invalid_token | expired_token |
     audit_scope_mismatch | audit_not_found | upstream_error`); `PortalAuditsError`;
     `ChecksCompletedResponse = { checksCompleted: number; checksTotal: 4 }`.
+  </Accordion>
+  <Accordion title="brand.types — branded identifier primitives (LOA-2599)">
+    A thin utility module for TypeScript branded types — a pattern that makes two
+    structurally identical primitive types (e.g., two different `string` ids)
+    incompatible at the type level. Exports `Brand&lt;T, B&gt;` and helpers
+    (`brand(value)`, `isBrand(value)`) that let callers create and validate a
+    branded value without a runtime class. Used internally to tighten WorkOS user
+    identifiers and similar opaque ids across the codebase.
+  </Accordion>
+  <Accordion title="workos-config — WorkOS base-URL seam (LOA-2599)">
+    Exports `getWorkosBaseUrl()`, which returns the WorkOS API base URL for the
+    current process. In `production` and other non-override environments it returns
+    `WORKOS_PRODUCTION_BASE_URL` (`https://api.workos.com`). In `development` and
+    `test` environments a `WORKOS_API_BASE_URL` env var may redirect calls to a
+    local mock (docker compose service name, `localhost`, or a private IP range)
+    — a foot-gun guard, not a security boundary. All three shared-auth packages
+    (`shared-auth`, `shared-api-auth`, `shared-lambda-auth`) consume this seam so
+    that WorkOS can be stubbed in container tests without patching network DNS.
   </Accordion>
 </AccordionGroup>
 

@@ -11,12 +11,12 @@ The Classify & Split config tool at `/classify-split-config` lets engineers edit
 The page is tab-based (`src/app/(app)/classify-split-config/`):
 
 - **Categories & Rules** — the split categories and classification rules.
-- **Classifications** — the classification types. The Classifications tab includes a **Show routing** toggle: when enabled, it fetches each visible segment's routed Final container from the integrations service and surfaces it as an inline chip in the Classification column. The fetch is keyed by audit-run correlation ID (fan-out capped server-side); toggling off clears the overlay. This is a display-only toggle — it does not modify any query filter.
+- **Classifications** — the classification types. The tab opens in **Coverage view** by default — a treemap of all split categories sized by segment count, heat-mapped by unknown-subtype share (white at 0%, brand red at 100%). Clicking a category tile splits the view to show its subtypes. Clicking a subtype (or **View documents**) drills into the ordinary classification table filtered to that slice. A **Show routing** toggle fetches each visible segment's routed Final container from the integrations service and surfaces it as an inline chip; the fetch is keyed by audit-run correlation ID (fan-out capped server-side). A **prev/next** row navigation allows stepping through individual classification records in the detail panel without returning to the list.
 - **Confusion Map / Matrix / Graph** — visualizations of misclassification.
 - **PII Doc-Type Rules** — the `pii_field_doc_type_rules` that drive PII scoping.
 - **Dry Run** — run the live validation described below.
 
-Edits are applied through server actions in `actions/` (`classifications.ts`, `classify-rules.ts`, `split-categories.ts`, `pii-doc-type-rules.ts`, `confusion-edges.ts`, `bulk-config.ts`, `config-context.ts`, `pending-changes.ts`, `run-eval.ts`), with Zod schemas in `src/lib/schemas/`.
+Edits are applied through server actions in `actions/` (`classifications.ts`, `classify-rules.ts`, `split-categories.ts`, `pii-doc-type-rules.ts`, `confusion-edges.ts`, `bulk-config.ts`, `config-context.ts`, `pending-changes.ts`, `staged-targets.ts`), with Zod schemas in `src/lib/schemas/`.
 
 ## Taxonomy staging (LOA-2564)
 
@@ -48,16 +48,21 @@ Draft lifecycle states (`classify_split_pending_changes.status`):
 
 Every save recomputes `runTaxonomyChecks` (`src/lib/classify-split/taxonomy-checks.ts`) against the base and candidate configs. Findings are `blocker` or `warning`. The **Promote to live** button is disabled while any blocker is unresolved. The apply action re-runs checks at promotion time against the current live taxonomy (not just the snapshot) so a blocker introduced by an intervening edit also blocks promotion.
 
-### Check against documents (eval)
+### Check against documents (staged targets)
 
-When `checks.lane !== "none"`, the **Check against documents** button appears. It calls `runPendingChangeEval` (`actions/run-eval.ts`), which:
+When `checks.lane !== "none"`, the staging bar shows a **Check documents** link. It navigates to the Dry Run tab with `?source=staged&taxonomy=staged`, preloading real production documents that the taxonomy change most affects.
 
-1. Draws a frozen sample of real classified documents (or reuses the sample already stored on the draft).
-2. Runs both the live taxonomy and the candidate taxonomy against each sample document.
-3. Stores the side-by-side results in `classify_split_pending_changes.eval`.
-4. Returns an `EvalRecord` with `counts`, `changedRows`, and a `noiseFloor` (the expected classification variation from non-determinism alone).
+The `getStagedTargets` server action (`actions/staged-targets.ts`) selects documents from `document_classifications` using a two-bucket strategy derived by `staged-targets.ts` (`focusOf`, `pickBoundaryFirst`, `pickSpread`):
+- **Target** documents — those whose stored result is on a classification that the draft changes (a boundary). These are the documents most likely to classify differently under the candidate taxonomy.
+- **Control** documents — documents from the same split type that the draft does not touch (spread). These are expected to be unchanged; if they change, the edit has wider blast radius than intended.
 
-The **Report** button in the staging bar expands `EvalReportPanel` to show which documents changed classification, what each changed to, and whether the delta exceeds the noise floor. The eval result is stored on the draft so it survives a page refresh and is included in the audit-log entry on apply or discard.
+Each selected document carries its stored result as a `baseline` (the `before`). Running the Dry Run against it produces the live result. The `StagedCompare` component renders both side by side, colour-coded by outcome (`unchanged`, `changed`, `added`, `removed`). A **stale** chip on a row indicates the stored result predates the last taxonomy promotion, so the baseline was produced by an older live taxonomy than the draft's base.
+
+Up to 30 target documents are shown, selected from a pool of 400 recent classified rows. Test-tenant rows are excluded from the pool in deployed environments.
+
+<Note>
+The old sample-based eval path (`run-eval.ts` / `EvalReportPanel`) was removed. The staged-targets approach uses real stored results as the baseline rather than re-running the live taxonomy, which is faster and makes the comparison deterministic.
+</Note>
 
 ### Promote and discard
 
@@ -84,7 +89,17 @@ The client uses a 120-second timeout and surfaces failures as `ApiClientError`.
 The dry-run is gated by `OCTY_INTERNAL_API_KEY`. If the secret does not match loanlight-api's `InternalApiKeyGuard`, the proxied request is rejected. See [Environment variables](/octy/environment-variables).
 </Warning>
 
-### Modes
+### Source kinds
+
+The **picker** selects which documents to run:
+
+| Source kind | How documents are chosen |
+|---|---|
+| `loan` (default) | Search by loan number; documents from the selected loan's `document_classifications`. |
+| `local` | Upload a local file directly from the browser. |
+| `staged` | Documents pre-selected by `getStagedTargets` (set automatically from the **Check documents** staging bar link). Each document shows its stored result as the baseline comparison. |
+
+### Run modes
 
 - `mode`: `split` (Phase 1 splitting only) or `full` (split + classify).
 - `classificationMode` (optional): `per_segment`, `majority_bucket`, or `two_pass`.

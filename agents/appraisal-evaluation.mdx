@@ -376,7 +376,38 @@ Key columns:
 
 - `photo_group` — scenes only. The level-1 band photos of this scene are grouped under in the findings report and the gallery (`subject_interior | subject_exterior | adu_outbuildings | comparables | collages | maps_sketches | other`). `NULL` resolves to `"Other"`. This replaces the hardcoded scene sets `photo-display.ts` used to carry; a new scene picks up its band purely from config.
 
-Drift between the schema and the seed SQL is enforced by `__tests__/appraisal-iris-taxonomy.spec.ts`.
+A new column added in migration `0336` (LOA-2342/2344/2346):
+
+- `places` — `jsonb`, nullable. The set of spatial locations where this element or condition is worth knowing about, drawn from `["inside_property", "outside_property", "off_property"]`. When set, an observation is only counted when the model's own `seenIn` answer is a member of the set. `NULL` means the item counts everywhere (same behaviour as before this column existed). Applies only to `kind = 'element'` and `kind = 'condition'` rows (CHECK constraint). `applicable_scenes` and `places` compose: `places` decides whether an item means anything **at all** at a given location; `applicable_scenes` decides whether it is surprising in the current scene (an out-of-scene stamp). Suppression from a `places` mismatch is not deletion — the observation stays on `appraisal_photos` with its reason legible, the photo stays in the gallery, and the run still grades `complete`. Suppression is resolved at read time, so flipping a `places` set re-grades every historical run instantly with no re-analysis.
+
+<Note>
+A `NULL` `seenIn` from the model always counts (the gate only suppresses on a stated-but-wrong place). The legacy fallback that inferred place from the photo's band was removed: the band describes where the **camera** was, not where the observed thing sits, and the inference silenced legitimate findings on ADU and comparative photos.
+</Note>
+
+Drift between the schema and the seed SQL is enforced by `__tests__/appraisal-iris-taxonomy.spec.ts` and `__tests__/appraisal-iris-relevance-rules.spec.ts`.
+
+### Relevance gate — `appraisal_iris_relevance_rules` (LOA-2342/2344/2346)
+
+`appraisal_iris_relevance_rules` (migration `0336`) is a second layer of policy on top of `places`. Where `places` answers "does this item count at this location at all?", relevance rules answer "do the overall photo-level conditions (scene, focus, framing) mean this observation should be suppressed?"
+
+Each row is a rule that hides observations from findings, from fact-groups, or from both, when the model's answers match the rule's `conditions` object. The rule is evaluated in `sort_order` order; the first matching rule wins.
+
+Key columns (table `appraisal_iris_relevance_rules`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | `gen_random_uuid()`. |
+| `code` | `text` UNIQUE | Stable identifier and ON CONFLICT target for the seed. |
+| `name` | `text` | Human label, shown in the Octy Relevance Rules tab. |
+| `conditions` | `jsonb` | Object of condition keys to accepted value arrays; `{}` is a catch-all. |
+| `hide_from_findings` | `boolean` | Suppresses the observation from the findings surface. |
+| `hide_from_facts` | `boolean` | Suppresses the observation from the fact-group sweep. |
+| `reason` | `text` | One-line shown under a hidden observation instead of the raw finding. |
+| `detail` | `text` nullable | Optional longer explanation for the reviewer. |
+| `active` | `boolean` | Inactive rules are loaded but not evaluated. |
+| `sort_order` | `integer` | Evaluation order (ascending). First match wins. |
+
+Three rules are seeded by migration `0336`: `different_property` (hides observations on comparable-property photos), `no_single_home` (hides observations when several homes share the frame), and `wrong_place` (hides observations detected outside the item's stated `places`). Operators author additional rules through Octy's Relevance Rules tab.
 
 ### Fact Groups v2 — read-time sweep
 
@@ -403,10 +434,12 @@ Both the portal (in-process) and Octy (via `POST /internal/iris/fact-sweep`) rea
 
 The portal **Photos** tab is gated to `super_admin` only via `canSeeIrisPhotos` — not yet visible to lenders. It has four views, selected via a tab strip: **Findings** (default), **Facts** (taxonomy-driven fact groups from the sweep), **Property features** (non-flagged element inventory), and **Gallery** (honeycomb). The processing view shows the scanning comb on top; completed photos settle into their scenes below it. Octy's audit-run modal is the primary viewing surface for IRIS data: the shared `IrisAnalysisPanel` provides the same four-view layout. See [Loan lookup and audit-run modal](/octy/loan-lookup).
 
-Octy also provides a dedicated `/appraisals-iris` admin page with three tabs:
-- **Appraisal Runs** — a paginated table of all IRIS-analyzed appraisal runs across lenders.
-- **IRIS Taxonomy** — browse and inspect the seeded taxonomy rows, including the new fact-group and photo-band columns.
-- **Dry Run** — internal multi-model compare harness; send a source PDF through multiple vision models side by side (`POST /api/appraisals-iris/dry-run`, SSE endpoint).
+Octy also provides a dedicated `/appraisals-iris` admin page with five tabs:
+- **Appraisal Runs** — a paginated table of all IRIS-analyzed appraisal runs across lenders, with faceted filters and prev/next row navigation in the detail panel.
+- **IRIS Taxonomy** — browse and inspect the seeded taxonomy rows, including fact-group, photo-band, and `places` columns.
+- **Relevance Rules** — view, author, and measure `appraisal_iris_relevance_rules` rows. Four rule archetypes are available (different property, no single home in frame, wrong place, and custom/catch-all). Each rule's conditions can be measured against real historical runs before saving: the preview panel shows how many observations would have been suppressed per run, and a diff view identifies which photo findings would disappear. See [Relevance gate](#relevance-gate-appraisal_iris_relevance_rules-loa-23422344-2346) below.
+- **How It Works** — an explanatory schematic of the IRIS perception and scoring pipeline, built from static content in `tabs/how-it-works/content.ts`.
+- **Dry Run** — internal multi-model compare harness; send a source PDF through multiple vision models side by side (`POST /api/appraisals-iris/dry-run`, SSE endpoint). The dry-run tab now starts all selected documents in parallel and shows each target's stored result alongside the live run result.
 
 ### agenticRefine, detectScanned, and ocr have been deleted
 
@@ -486,6 +519,10 @@ time (`promoteCrossDocFindingsToComplianceResults`) — they display promoted wi
 compliance rows now flow through `audit-results` and the partner API projection. The canonical
 nine-bucket `totalIssues` count is move-neutral — a mismatch counts once whether it lives in
 `findings` or `complianceResults`.
+
+Two Datadog monitors cover the cross-document collection path (LOA-2038):
+- `appraisal-xdoc-collection-failed` — fires when `@event:appraisal.cross_doc_collection_failed` appears in prod logs; indicates the source collection step threw before storing anything, so all cross-doc validations yield no findings for that run.
+- `appraisal-xdoc-occupancy-unreadable` — fires on `@event:appraisal.cross_doc_occupancy_unreadable`; indicates the URLA occupancy field was not extractable from the source document, which prevents the occupancy cross-doc check from running.
 </Step>
 <Step title="Write the run">
 Writes `appraisal_runs` with `extractedData`, `complianceResults`, `findings`, coverage fields,
@@ -557,6 +594,12 @@ occupancy/solar/income/deferred-maintenance groups) on top of new Phase 1.5 extr
 the adapter and `appraisal-data` schema. These DH rules are compound rules evaluated by the shared
 `compound-walker`; they are written only into the Deephaven lender's active rule set and are not
 part of the 67-rule core registry.
+
+#### Deephaven static LTV caps bundle (LOA-1777)
+
+**`DH_053`–`DH_066`** (Category-A bundle v2 → v3, staged in `portal-appraisal-rules/staged-bundles/`) encode Deephaven's fixed LTV/CLTV caps as 14 compound bundle rules. These rules became authorable after LOA-1754 (2026-07-24) wired `ltv`, `cltv`, `fico`, `loan.purpose`, and `loan.property_state` into the eval bag for any lender with a URLA on the audit. Rule codes, thresholds, and scope (lender-wide or program-specific) are in the staged-bundle file. The same bundle update re-enables `NEIGH_001` lender-wide as a `WARNING` (was disabled; the previously promised LTV overlay was never built — these LTV rules are it).
+
+Apply via `/admin/staged-rules` → Deephaven → dry-run → promote.
 
 The accessory-dwelling-unit (ADU) rules in Group B are `DH_025` (**No accessory dwelling unit** —
 a flat predicate that warns when `improvements.has_accessory_unit` is `true`) and `DH_026`
@@ -668,11 +711,15 @@ the `appraisalIris` entitlement runs).
 </ResponseField>
 
 <ResponseField name="appraisal_iris_taxonomy" type="table">
-The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (no `lender_id`), drift-guarded by spec. Migrations `0308`/`0309` (LOA-1901) added fact-group columns (`fact_tags`, `fact_min_strength`, `fact_scenes`, `instance_flag_over`, `instance_flag_severity`) and the report-band column (`photo_group` on scene rows). See [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
+The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (no `lender_id`), drift-guarded by two specs. Migrations `0308`/`0309` (LOA-1901) added fact-group columns (`fact_tags`, `fact_min_strength`, `fact_scenes`, `instance_flag_over`, `instance_flag_severity`) and the report-band column (`photo_group` on scene rows). Migration `0336` (LOA-2342/2344/2346) added `places` (jsonb, nullable) — the set of spatial locations where this element or condition is worth counting. See [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
 </ResponseField>
 
 <ResponseField name="appraisal_photos" type="table">
 One row per extracted appraisal photo. `id` is a deterministic UUIDv5 (source signature + page + figure index). Identity: `page_number`, `caption`, `width`, `height`, `s3_key`, `bbox` (normalized 0–1 bbox, nullable on pre-IRIS rows). IRIS observation columns (nullable until `analyzed_at` is set): `scene`, `attribution`, `quality`, `elements`, `conditions`. Migration `0310` (LOA-1901) adds a composite read index on `(appraisal_run_id, page_number)` used by the fact-sweep batch endpoint. Replaces the retired `photo_manifest` column and 8-value category contract.
+</ResponseField>
+
+<ResponseField name="appraisal_iris_relevance_rules" type="table">
+The relevance-gate policy (migration `0336`, LOA-2342/2344/2346). Each row is a rule that suppresses IRIS observations from findings and/or fact-groups when the model's photo-level answers match the rule's `conditions` object. Evaluated in `sort_order` ascending; first match wins. Three rows seeded: `different_property`, `no_single_home`, `wrong_place`. Global (no `lender_id`). See [Relevance gate](#relevance-gate-appraisal_iris_relevance_rules-loa-23422344-2346) above for the full schema.
 </ResponseField>
 
 <ResponseField name="appraisal_ssr_documents" type="table">

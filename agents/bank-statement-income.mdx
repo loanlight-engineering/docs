@@ -76,9 +76,17 @@ The `bank_statements` write-plan rows now carry `source_page_start` and `source_
 
 ## Write plan and persistence
 
-`aggregate` produces an `AggregateWritePlan`. The **worker** (`bank-statement.processor.ts::analyzeWithGraph` → unchanged `writeResults`) is the sole DB persister. No node may write to the DB — any node that takes a `DrizzleDB` uses it read-only (tenant guards, basis lookups).
+`aggregate` produces an `AggregateWritePlan`. The **worker** (`bank-statement.processor.ts::analyzeWithGraph` → `writeResults`) is the sole DB persister. No node may write to the DB — any node that takes a `DrizzleDB` uses it read-only (tenant guards, basis lookups).
 
-The worker's `writeResults` is unchanged from before the port: it reads the write plan produced by the graph and persists the same five table families it always did (`borrower_files`, `bank_statements`, `transactions`, `income_filters`, `findings`). The graph replaces the deleted `postProcess` function; everything after `writeResults` is unchanged.
+The worker's `writeResults` persists the same five table families: `borrower_files`, `bank_statements`, `transactions`, `income_filters`, and `findings`. The graph replaces the deleted `postProcess` function; everything after `writeResults` is unchanged.
+
+## Reducto extraction checkpoint (LOA-2517)
+
+Each file's validated `ExtractionResult` is persisted to Redis keyed by `(borrowerFileId, sourceFileHash, EXTRACTION_CONTRACT_VERSION)` before `writeResults` runs. On a BullMQ retry, a checkpoint hit serves the cached result and skips the paid `structureWithReducto` call; only the not-yet-checkpointed file(s) re-extract. The TTL is bounded: at least `BANK_STATEMENT_LEDGER_DEADLINE_MS` (120 min) and at most `PII_BOUND_MS` (3 h). Keys are deleted after `writeResults` succeeds to tighten the PII window; TTL self-expiry is the backstop.
+
+The checkpoint uses a dedicated ioredis client. Without it, a transient Reducto slowdown on a single file of a batch audit would fail the entire audit and re-bill Reducto for work it had already done, because a single `writeResults` after the loop meant there was nothing to resume from.
+
+Two additional Datadog monitors cover extraction retries and budget exhaustion (added in LOA-2517; monitor names are in `observability/datadog/`).
 
 ## Parity with the legacy pipeline
 
@@ -103,13 +111,19 @@ Two post-categorization passes run inside the `categorize` node after Plaid PFC 
 Gated on the `pfc_corrections_enabled` lender feature flag (opt-in, default off — see
 [Feature flags](/lender-config/feature-flags-and-entitlements)).
 
-Three structural rules forcibly override any Plaid category for credits that match a known pattern. When a rule fires, `transactions.category_rule` is set to the rule name and `transactions.category_detailed_vendor` preserves the original Plaid detailed code for display.
+Five structural rules forcibly override any Plaid category for credits that match a known pattern. When a rule fires, `transactions.category_rule` is set to the rule name and `transactions.category_detailed_vendor` preserves the original Plaid detailed code for display.
 
 | `category_rule` | Pattern | Forced `category` / `category_detailed` |
 |---|---|---|
 | `wire` | `\bwire\b` in the description, but **not** exclusively inside an ACH payer name field | `TRANSFER_IN` / `TRANSFER_IN_WIRE` |
 | `counter_credit` | Counter-credit and branch-deposit keywords (e.g. `counter credit`, `over-the-counter`, `teller deposit`) | `TRANSFER_IN` / `TRANSFER_IN_DEPOSIT` |
 | `corporate_ach` | ACH structural marker + CCD or CTX SEC code | `TRANSFER_IN` / `TRANSFER_IN_DEPOSIT` |
+| `payroll` | ACH consumer entry class (`PPD`/`COR`) + company identifier that matches the known payroll-originator list **and** a payroll-token in the entry-descriptor field position (LOA-2548) | `PAYROLL` / `INCOME_WAGES_SALARY` |
+| `rental` | Credit from a known rental/payout platform originator (e.g. Airbnb Payouts) in the ACH company-identifier field (LOA-2548) | `INCOME_RENTAL` / `INCOME_RENTAL_INCOME` |
+
+The `payroll` rule requires three things together — a consumer entry class, a company identifier from the known-originator registry, and a payroll token in the entry-descriptor position (not anywhere in the description). This prevents mislabelling ACH transfers from companies whose names contain payroll-adjacent words. The rule does **not** fall back to description keywords because `signature.ts::extractEntryDescriptor` returns `null` for ACH-shaped rows that do not expose their entry descriptor in the `DES:` field position; where the descriptor is unreadable, the rule does not fire.
+
+The `rental` rule reads no rail — it is purely a payout-platform registry match on the ACH originator-ID field.
 
 The `wire` rule includes a precision guard: a `wire` token that appears **only** inside an ACH payer name (e.g. a paycheck from `INSTEEL WIRE PRODUCTS`) is not treated as a wire descriptor. The guard reads the `ORIG CO NAME:` field by offset, not by text value, so a payer name that happens to print twice (once truncated in the prefix, once in full in the field) is correctly handled.
 
