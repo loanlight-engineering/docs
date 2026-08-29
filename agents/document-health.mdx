@@ -1,6 +1,6 @@
 ---
 title: Document-Health agent
-description: Classification, page completeness, expiration, required-document, and signature checks.
+description: Classification, page completeness, expiration, required-document, signature, and borrower-declaration checks.
 icon: file-check
 ---
 
@@ -34,6 +34,8 @@ __start__ → prepare → plan-document-check → document-completeness
   verify-required-documents → validate-closing-date-consistency
   validate-closing-date-consistency → aggregate → __end__
 ```
+
+`verify-required-documents` has two sub-phases that run sequentially within the single node: (1) program-required document evaluation (lender YAML conditions), and (2) borrower-declaration evaluation (`borrower-declaration-eval.ts`). Both contribute `DocumentExpirationResult` rows that `aggregate` persists together.
 
 Parallelism uses the LangGraph `Send` primitive. The `results` and `signatureFindings` channels
 accumulate via concat reducers. `buildVerifyRequiredDocsSend(state)` builds the no-documents join
@@ -156,8 +158,14 @@ Resolves the required-document set for the loan's program
 document's `day_1` or `pre_close` condition. The `present` set is built from validated results whose
 `issueKind ∈ {valid, expired, expiring_soon}`. Missing required documents get an LLM-assisted
 recheck (`presenceMini`, semantic search) to reduce false negatives. The node emits synthetic
-results: present-required → `issueKind: "valid"`; missing → `issueKind: "missing_document"`. It
-returns `requiredDocumentTypes`, which is threaded into `aggregate` so
+results: present-required → `issueKind: "valid"`; missing → `issueKind: "missing_document"`.
+
+After the program evaluation pass, the node runs the **borrower-declaration evaluator**
+(`borrower-declaration-eval.ts`). It reads each borrower's URLA Section 1/4/5 declaration answers,
+matches them against the built-in check registry (`ALL_BORROWER_DECLARATION_CHECKS`), and emits
+results for any triggered check. See [Borrower-declaration checks](#borrower-declaration-checks) below.
+
+The node returns `requiredDocumentTypes`, which is threaded into `aggregate` so
 `doc_expiration_results.is_required` can be set.
 </Step>
 
@@ -179,6 +187,49 @@ Postgres. Emits `EVENTS.AGENT.DOCUMENT_HEALTH.COMPLETE` and returns `{ completed
 error, to avoid loops).
 </Step>
 </Steps>
+
+## Borrower-declaration checks
+
+LOA-1948 added a built-in check registry that turns URLA Section 1/4/5 declaration answers into
+conditional document requirements. The evaluator runs once per borrower (and once loan-wide for
+`loanContextField` triggers) inside `verify-required-documents`, after the program-required pass.
+
+### Output families
+
+Each check in the registry declares one or more outputs, each with a `family`:
+
+| Family | Behaviour |
+|---|---|
+| `document_requirement` | Presence-checked against the eFolder. Present → `issueKind: "valid"` (silent pass). Absent and classifier-backed → `issueKind: "missing_document"`. Absent but no classifier can confirm the type → `issueKind: "conditional_document_unknown"` (non-blocking review note). |
+| `request_note` | A soft "request copy of…" note. Suppressed when the document is already on file. Never blocks. |
+| `flag_only` | An unconditional manual-review prompt that fires on the URLA value alone; does not look in the eFolder. Emits `issueKind: "conditional_document_unknown"`. |
+
+One check can emit more than one output from a single trigger. `family` is the hard/soft lever: only `document_requirement` can produce a blocking `missing_document` finding, and only when the document type is classifier-backed.
+
+### Presence resolution
+
+Absence is provable only when a classifier can produce the document type
+(`classifierBacked: true` in the registry). When `classifierBacked` is unset, absence is
+`uncertain` and the check degrades to a non-blocking `conditional_document_unknown` review note
+rather than a false `missing_document` block.
+
+### Kill-switch and opt-out
+
+- **`ENABLE_BORROWER_DECLARATION_CHECKS`** env var — set to `"false"` to disable all declaration
+  checks globally. Enabled by default; the kill-switch is for emergencies.
+- **`disabled_declaration_checks`** in the lender YAML `document_expiration` section — suppresses
+  specific check IDs per lender (or program-scoped, via `if:` metadata). Example:
+  ```yaml
+  document_expiration:
+    disabled_declaration_checks:
+      - decl.status.gift
+  ```
+
+### Classifier allow-list
+
+Document types only a declaration check requires are added to the classifier allow-list so they are
+recognised as their real type (for example `gift_letter`, `divorce_decree`) rather than labelled
+`"other"`.
 
 ## Required-document conditions
 
@@ -334,6 +385,7 @@ Document-Health reads the `document_expiration` section of the lender's YAML con
 - `program_aliases`, `program_resolve_fields`, `default_program` — program resolution.
 - `preferred_file_patterns` — filename scoring used during dedup.
 - `signature_required_documents` — document types that trigger the signature subgraph.
+- `disabled_declaration_checks` — list of built-in declaration check IDs to suppress. See [Borrower-declaration checks](#borrower-declaration-checks).
 
 <Warning>
 If the DI `LenderConfigLoaderService` is not passed into `buildGraph`, a module-level singleton is

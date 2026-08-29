@@ -82,4 +82,13 @@ Data is scoped by `lender_id` from the session; route handlers never trust a len
 - `lib/api/admin-client-rules.ts` does accept `clientId` because admin proxies enforce `requireLenderAccess` on the backend. Keep it separate from the session-scoped file.
 - `scripts/check-no-x-lender-id.sh` is a CI guard: no `x-lender-id`/`x-user-id` forwarding under `app/api/v2/**`, `(detail)/loan-audits/**`, or `portal-audits-proxy.ts` (legitimate doc references must carry a `// CI-ALLOW:` marker).
 
+### E2E proxy routes and CSRF
+
+Three internal proxy routes (`/api/e2e/cleanup/loans/[loanId]`, `/api/e2e/resources`,
+`/api/e2e/runs/[operation]`) are used exclusively by the nightly E2E harness. The three
+MUTATING handlers (DELETE/POST) validate a double-submit CSRF token before reading the session
+(LOA-2131): the request must carry both an `x-csrf-token` header and a matching `csrf_token` cookie
+or the handler rejects it with `403`. The four READ handlers (GET) are deliberately unguarded
+because the E2E client does not send the header on reads.
+
 See [data flow](/concepts/data-flow) and [identity and auth](/concepts/identity-and-auth) for the wider picture.

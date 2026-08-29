@@ -161,10 +161,12 @@ The service (`langgraph.service.ts` `persistRedFlagResults`), not the graph, wri
 </ResponseField>
 
 Each `summary.flags[]` becomes a row: `rule_id = flag.ruleId`, severity normalized,
-`loan_purpose` / `occupancy_type` from URLA Section 4, and `metadata` enriched with a
-`propertyAddress` (the borrower address when `fieldPath` starts with `borrowerProperty`, else the
-subject address). No rows are persisted when `summary.flags` is empty, and a persistence failure
-does not fail the audit (logged only).
+`loan_purpose` / `occupancy_type` from URLA Section 4, and `metadata` enriched with:
+- `propertyAddress` — the borrower address when `fieldPath` starts with `borrowerProperty`, else the subject address.
+- `businessRule` — the human-readable `flag.ruleName` (e.g. `"Active Foreclosure"` for `ACTIVE_FORECLOSURE`). Populated for all 23 emitting rules since LOA-541. The portal's shared **Properties Check** view renders this in the **Rule** column; older rows that predate the deploy fall back to the raw `rule_id` enum.
+- `ruleName`, `category`, `severity`, `fieldPath`, `expectedValue` — mirrored from the flag for portal rendering.
+
+No rows are persisted when `summary.flags` is empty, and a persistence failure does not fail the audit (logged only). Historical `red_flag_results` rows created before LOA-541 have no `businessRule` in `metadata`; the portal falls back to `rule_id` for those.
 
 ## Related
 

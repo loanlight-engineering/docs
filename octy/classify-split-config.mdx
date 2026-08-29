@@ -60,6 +60,14 @@ Each selected document carries its stored result as a `baseline` (the `before`).
 
 Up to 30 target documents are shown, selected from a pool of 400 recent classified rows. Test-tenant rows are excluded from the pool in deployed environments.
 
+Target and control documents are drawn in **random order** by default (Fisher–Yates shuffle with an
+injectable random source for reproducibility), so consecutive Check-documents runs sample different
+loans rather than always landing on the most recent ones. The picker exposes a **Latest / Random**
+switch to revert to recency ordering when you need a deterministic baseline.
+
+The pool is also **deduped**: rows sharing the same storage path, or the same loan + filename
+combination, collapse to one entry so a re-synced document does not occupy multiple slots.
+
 <Note>
 The old sample-based eval path (`run-eval.ts` / `EvalReportPanel`) was removed. The staged-targets approach uses real stored results as the baseline rather than re-running the live taxonomy, which is faster and makes the comparison deterministic.
 </Note>
