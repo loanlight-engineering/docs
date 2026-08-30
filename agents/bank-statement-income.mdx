@@ -70,6 +70,12 @@ Assembles the `AggregateWritePlan` — per-table write-batches for `borrower_fil
 
 A third inline pass, `detectReciprocalCounterparties` (LOA-2314), also runs inside aggregate. It scans credits and debits for counterparties with roughly-equal bidirectional flow ("wash" transfers). Each such counterparty produces one borrower-level `reciprocal_counterparty` finding (severity `info`, `statement_id = null`) and is written to the `findings` table via the write plan. The `FINDING_TYPE_SET` and `VALID_FINDING_TYPES` allowlists are kept in sync by a drift spec (`reciprocal-counterparty-finding-type.spec.ts`).
 
+`collectLegs` applies two gates before any name enters the candidate set (#3905):
+- **Non-person marker gate** — names containing institution/entity/transfer vocabulary (`bank`, `credit union`, `chk`, `sav`, `confirmation`, `transfer`, `llc`, `inc`, `corp`, etc.) are dropped immediately. A related party is a person; an institution or boilerplate name cannot be one.
+- **Spending-rail gate** — legs whose `category_detailed` matches a Plaid PFC purchase primary (e.g. `FOOD_AND_DRINK_*`, `GENERAL_MERCHANDISE_*`, `TRANSPORTATION_*`) or whose `category` matches a spending word are dropped. This catches a clean merchant name that no entity marker can reach. `RENT_AND_UTILITIES_*` is deliberately excluded — rent to a related-party landlord is a plausible reciprocal. Both gates fail-open: a missing or null category never drops a leg.
+
+Both gates are advisory-only deny-lists (which income/liability passes forbid for safety), acceptable here because the `reciprocal_counterparty` finding is `info` severity: it moves no income and writes no disposition, so a false reject drops only a finding. To support the spending gate, `ReciprocalRow` now carries `category` and `categoryDetailed`, populated by both callers — the extraction adapter and the service recompute path.
+
 The `bank_statements` write-plan rows now carry `source_page_start` and `source_page_end` (migration `0328`) when the extraction model reported them. These are 1-based page numbers validated by `isValidPdfPageNumber` (from `loanlight-shared/bank-statement/pdf-page`) before entry into the write plan — out-of-range or non-integer values are dropped rather than persisted.
 </Accordion>
 </AccordionGroup>
