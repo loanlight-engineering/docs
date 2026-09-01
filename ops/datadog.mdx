@@ -224,6 +224,14 @@ Committed monitor files in `packages/api/observability/datadog/`:
 | `appraisal-schema-raw-cast-fallback.monitor.json` | Appraisal schema raw-cast fallback — whole payload cast, every constraint advisory |
 | `appraisal-schema-unknown-keys.monitor.json` | Appraisal schema dropped unmodeled vendor keys — silent field loss on a clean run (LOA-2408) |
 | `appraisal-zero-rules-fault.monitor.json` | Appraisal evaluated zero rules after a failed DB read — run ships a false all-clear |
+| `bank-statement-income-audit-record-inconsistent.monitor.json` | Partner audit income record inconsistent — snapshot rejected or ledger non-terminal (LOA-2639) |
+| `bank-statement-income-trigger-failed.monitor.json` | Partner audit lost its bank-statement income — trigger or handoff failed (LOA-2639) |
+| `bank-statement-orphan-vendor-spend.monitor.json` | Bank-statement vendor spend with no ledger home — cost unattributed and unbilled (LOA-2639) |
+| `bank-statement-queue-gate-read-failed.monitor.json` | Bank-statement enqueue gate cannot read the Reducto circuit — break-glass not enforced (LOA-2639) |
+| `bank-statement-queue-health-blind.monitor.json` | Bank-statement queue-health machinery is failing — stall alerting is unreliable (LOA-2639) |
+| `bank-statement-queued-exhausted.monitor.json` | Bank-statement analyses terminally failed while parked — reviewer work lost (LOA-2639) |
+| `bank-statement-recovery-driver-broken.monitor.json` | Bank-statement recovery is failing — parked and orphaned work is not draining (LOA-2639) |
+| `bank-statement-reducto-extraction-degraded.monitor.json` | Bank-statement Reducto extraction timing out or failing to poll (LOA-2639) |
 | `bank-statement-reducto-queued-stalled.monitor.json` | Bank-statement Reducto queue backlog stalled |
 | `credit-preview-program-resolution-outage.monitor.json` | Credit apply-preview program resolution failures (program not found at preview time) |
 | `credit-rules-cred031-needs-info-spike.monitor.json` | `CRED_031` grading NEEDS_INFO at scale — two-score minimum cannot decide (LOA-2310) |

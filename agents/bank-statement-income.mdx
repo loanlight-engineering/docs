@@ -148,6 +148,41 @@ Source priority (highest wins, never downgrades a higher source):
 Rule-corrected rows (`category_rule != null` and not `'counterparty_ledger'`) are excluded from ledger seeding: they already have an authoritative category and should not block a future human override from writing a `source: 'override'` entry via the normal rank guard.
 </Note>
 
+## Concurrent batch handling and the backlog queue (LOA-2639)
+
+Prior to LOA-2639 the `POST /api/v1/portal/bank-statements/enqueue` endpoint rejected any submission from a lender who already had a batch processing, returning `409` with a per-lender five-minute lock. That lock has been removed. Concurrent batches from the same lender are now absorbed by the existing BullMQ queue rather than rejected at the entry point.
+
+**Concurrency facts:**
+- `concurrency: 1` on the bank-statement BullMQ worker is a **per-task** setting, not fleet-wide. The API task runs at `desiredCount: 2, maxCapacity: 12`, so 2–12 bank-statement batches can process concurrently, including from one lender.
+- Every write in the job is keyed by `borrower_file_id` — findings, transactions, `bank_statements`, `income_filters`, `transaction_category_overrides`, and `counterparty_category_ledger`. Two concurrent batches touch disjoint rows and are safe.
+- Genuine deduplication (same `correlationId` / same `borrower_files` content-address) still rejects at the batch-UUID claim check; the removed 409 only blocked distinct submissions.
+
+**`waiting_on` field (`lib/bank-statement/waiting-on.ts`):**
+
+`resolveWaitingOn` derives a `BankStatementWaitingOn` discriminator from the row without clocks or thresholds:
+
+| `waiting_on` | Condition | Portal label |
+|---|---|---|
+| `"dependency"` | `status === "queued"` (parked lane — Reducto circuit held) | Waiting to resume — this will continue automatically |
+| `"backlog"` | `status === "processing"` **and** `processingStartedAt IS NULL` (queued, worker not yet claimed) | Queued — this will start automatically, and your upload is safe |
+| `null` | All other states | Normal status label |
+
+The `GET .../status` response carries `waiting_on` alongside `status`. The portal list view shows **"Queued"** (not "Processing") when `waiting_on != null`, so in-flight unstarted batches are never misreported as already running. One resolver drives the list view, the detail view, and the `/status` poll so they cannot disagree.
+
+<Note>
+The 30-second per-lender rate limit on `enqueue` was also removed in LOA-2639. The endpoint is still throttled at **10 requests per minute per request IP** (the class-level `ThrottlerGuard` on `BankStatementController`) — a content-agnostic rate limit that does not constrain distinct borrowers or loans submitting from different IPs.
+</Note>
+
+## Credit categorization v2 (LOA-2543)
+
+A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categorization/pipeline.ts`) runs as a **second, parallel categorization pass** after the primary Plaid PFC enrichment. It is wired behind the `ENABLE_CREDIT_CATEGORIZATION_V2` environment variable (strict `=== "true"`; CDK sets INT to `"true"`, prod to `"false"`).
+
+When the flag is enabled, `CreditCategorizationV2Service.categorizeAndPersist(borrowerFileId)` is called from `bank-statement.processor.ts::writeResults` **after** the write transaction commits. It runs outside the transaction deliberately — the service makes sequential vendor calls (the OpenAI resolver) and holding a DB connection across them would pin it for minutes.
+
+**What it writes:** per-transaction `transactions.credit_category` columns — the v2 answer. It does **not** change `effective_category`, `is_income`, or any income surface. The v2 columns fill in while dark and the flag flip is a switch, not a reprocess.
+
+**Portal surface:** super-admins see a **"Category (v2)"** column in the portal transaction table (gated by `isSuperAdmin` — not visible in the column picker for other roles). The column shows the raw v2 label alongside the v1 (Plaid PFC) answer for comparison. It is read-only and intentionally not sortable.
+
 ## Dispatch and entitlement
 
 `bankStatementIncome` is dispatched on the **partner lane only** (`defaultOnLanes: ["partner"]`). It declares `requiresExplicitGrant`, so the router's zero-rows fallback that entitles un-seeded lenders to other active agents deliberately does **not** apply here.

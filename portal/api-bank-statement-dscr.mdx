@@ -47,6 +47,18 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `POST /api/v1/portal/bank-statements/:id/reprocess` | client_admin, client_user | Re-run analysis (HTTP 200, throttle 10/min) |
 | `GET /api/v1/portal/bank-statements/:id/export` | read+ | Export data (throttle 10/min) |
 
+#### `waiting_on` in status responses
+
+The `GET .../status` and `GET .../` (list) responses include a `waiting_on` field that explains why a batch has not started yet:
+
+| `waiting_on` | Meaning | Portal label |
+|---|---|---|
+| `"backlog"` | `status` is `"processing"` but the worker has not claimed the job yet (`processing_started_at IS NULL`) | Queued — this will start automatically, and your upload is safe |
+| `"dependency"` | `status` is `"queued"` — the batch is parked because the Reducto circuit is held | Waiting to resume — this will continue automatically |
+| `null` | Normal active, completed, or failed state | Normal status label |
+
+`waiting_on` is derived at read time from `borrower_files.status` and `borrower_files.processing_started_at`; it is never persisted. The portal list and detail views both use it to display **"Queued"** rather than the misleading "Processing" for batches that have been accepted but not yet started.
+
 #### Large-deposit threshold basis
 
 The large-deposit flag threshold is computed against **qualified monthly income** (post-haircut/ownership, `calculateIncomeForFile`), not the pre-haircut average gross income. This unifies the ingestion and recompute paths: both now reference the same income figure the reviewer sees in the UI. The finding description reads "150% of qualified monthly income".
@@ -125,6 +137,8 @@ See [Recurring expense tables](/data-model/financial-data-model#recurring_transa
 #### POST /api/v1/portal/bank-statements/enqueue
 
 Enqueue a borrower's bank statements for extraction and analysis. Returns HTTP 201.
+
+Concurrent submissions from the same lender are accepted — the per-lender 409 lock was removed in LOA-2639. Distinct batches (different files or borrowers) run in parallel. A submission that repeats the same `correlationId` or batch UUID is still rejected as a duplicate.
 
 <ParamField body="s3Keys" type="string[]" required>
 Up to 50 statement PDFs.
