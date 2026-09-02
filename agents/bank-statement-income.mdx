@@ -94,6 +94,29 @@ The checkpoint uses a dedicated ioredis client. Without it, a transient Reducto 
 
 Two additional Datadog monitors cover extraction retries and budget exhaustion (added in LOA-2517; monitor names are in `observability/datadog/`).
 
+## LangSmith tracing (LOA-2653)
+
+`bankStatementIncome` emits a LangSmith trace on every run. The trace metadata carries only `{ auditRunId, agentType }` — no borrower-derived fields — with the shared anonymizer wired as `hideInputs`/`hideOutputs` and bank-statement PII keys in `PII_KEY_DENYLIST` as defense-in-depth. The Octy audit-run modal surfaces a **Bank-Statement-Income** card for these runs. Tracing is controlled by the `LANGSMITH_TRACING` environment variable.
+
+## NSF / overdraft finding behavior
+
+### Count as the headline (LOA-2313)
+
+`detectNsfFinding` now describes the finding by the **total transaction count**: `"N NSF/overdraft transactions detected"` (singular when `N === 1`). Earlier versions embedded a sample of occurrence dates in the description; those dates moved exclusively to `evidence.sample_transactions`. Every surface that renders an `nsf_overdraft` finding derives the display sentence from `evidence` via `nsfDescriptionFromEvidence` — `distinct_days` is read first (see below); `count` is the fallback. Persisted rows written before LOA-2313 retain their stored description; only the append-recompute path rewrites one.
+
+### Same-day occurrence collapsing per lender (LOA-2315)
+
+A per-lender `nsf_same_day_occurrence` feature flag controls whether multiple NSF fees on the same calendar day are counted as **one occurrence**. When enabled:
+
+- `detectNsfFinding` collapses same-day transactions before counting. The description changes to `"The account had NSF/overdraft activity on N day(s)."` — matching the phrasing of the adjacent `negative_balance` finding.
+- `evidence.distinct_days` carries the collapsed day count (the discriminator for `nsfDescriptionFromEvidence`).
+- `evidence.count` always carries the **raw transaction total**, regardless of the setting, so historical comparison is preserved.
+- `distinct_days` is excluded from the reviewer-feedback signature: the key's presence or absence changes with the admin toggle, while `count` and `sample_transactions` remain the stable identity.
+
+Collapsing happens over the transaction set handed in at the time of the call (post-exclusion `included` set for recompute; full statement set for the graph node) — never before exclusion filtering.
+
+The flag is registered in the admin Flags tab (`KNOWN_FLAGS` + `KEY_MAP` + `FeatureFlags`) and resolves `false` when no `lender_feature_flags` row exists.
+
 ## Parity with the legacy pipeline
 
 The port restores several extraction-time finding categories that the legacy hard-swap (T11) had dropped:
@@ -132,6 +155,8 @@ The `payroll` rule requires three things together — a consumer entry class, a 
 The `rental` rule reads no rail — it is purely a payout-platform registry match on the ACH originator-ID field.
 
 The `wire` rule includes a precision guard: a `wire` token that appears **only** inside an ACH payer name (e.g. a paycheck from `INSTEEL WIRE PRODUCTS`) is not treated as a wire descriptor. The guard reads the `ORIG CO NAME:` field by offset, not by text value, so a payer name that happens to print twice (once truncated in the prefix, once in full in the field) is correctly handled.
+
+**FR-5 rung — sender identity (LOA-1ad3959b).** The `Online Transfer → Account Transfer` rung (FR-5) in `CreditCategorizationV2` now derives the qualifier **identity-first**: sender name, then masked account number, then bare. Previously only the masked account was extracted, so a descriptor printing the sender's name dropped it entirely and a descriptor printing the sender's masked account number implied the borrower's own sweep rather than a third-party inflow. The fix distinguishes the two shapes by their trailing discriminator: an account type is followed by a masked number, a person by their initial.
 
 ### 2. Counterparty ledger (`applyCounterpartyLedger`)
 

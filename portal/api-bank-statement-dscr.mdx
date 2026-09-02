@@ -47,6 +47,10 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `POST /api/v1/portal/bank-statements/:id/reprocess` | client_admin, client_user | Re-run analysis (HTTP 200, throttle 10/min) |
 | `GET /api/v1/portal/bank-statements/:id/export` | read+ | Export data (throttle 10/min) |
 
+#### Export balance report (LOA-2661)
+
+The `GET :id/export` Excel report (bank-statement balance sheet) scopes each month's balances to the **newest account covering that month**. Each `ExportMonthlyRow` carries an `accountCount` field indicating how many accounts contributed to that month's balance scope. A month covered by multiple accounts shows `(N accounts)` in the balance column header.
+
 #### `waiting_on` in status responses
 
 The `GET .../status` and `GET .../` (list) responses include a `waiting_on` field that explains why a batch has not started yet:

@@ -407,6 +407,11 @@ All under `api/v1/portal/credit` (`PortalCreditController`):
 | GET | `/:id/key-field-reviews` | Key-field reviews |
 | PATCH | `/:id/key-field-reviews/:fieldId` | Resolve a key-field review |
 
+**CRED_025 and reserves — LOA-1938 producer audit.** CRED_025 (`max-DTI + residual income`) is a First Colony-specific credit rule with two evaluation axes:
+
+- **Reserves axis** (`documentedReserveMonths`): `lib/loan-context/reserves.ts` now computes this from URLA §2a liquid assets. The computation runs through `loan-context.service.ts::buildForAuditRun` and is threaded into `EligibilityContext` and `LoanContextAxes`. This field now has a producer and CRED_025's reserves evaluation can proceed.
+- **HPML gate** (`isHpml`, `annualPercentageRate`, FFIEC APOR table, rate-set lock date): all four required fields have **no producer**. `grep` over `packages/api/src` returns zero instances of `annualPercentageRate`, no APOR table or HPML computation, and only a `rateLockStatus` string (not a date). Until these producers are built, CRED_025's HPML branch evaluates to `NEEDS_INFO`.
+
 Custom credit-rule authoring lives in a separate `portal-credit-rules` module
 (`PortalCreditRulesController`): natural-language parsing (`credit-nl-parse.service.ts`), a
 dry-run preview (`credit-preview.service.ts`), the credit field registry, a compound-condition

@@ -93,11 +93,12 @@ config of `false` is disabled; `true` or an object is enabled. Thresholds come f
 | `HOME_VALUE_CHANGE` | MEDIUM | PURCHASE only: list price vs Zillow last-sold price (within 24 months) exceeds `thresholds.home_value_change.percent` in either direction (LOA-2090); enabled under `rules.loan_purpose.PURCHASE` in lender YAML |
 | `RENTAL_VALUE_CHANGE` | MEDIUM | rental price-history change exceeds the tier |
 | `ACTIVE_FORECLOSURE` | CRITICAL | preforeclosure records within last 3 years (appends upcoming auction within ±90 days) |
-| `ZONING_MISMATCH` | HIGH | `lot.zoning` is not residential |
-| `RAPID_RESALE` | HIGH | two most recent sales within `months` (default 6) |
-| `LLC_TO_LLC_SALE` | HIGH | most recent sale buyer and seller both match an entity pattern |
-| `PRICE_DECLINE_FROM_PRIOR` | HIGH | current price < most recent prior sale amount |
-| `PURCHASE_PRICE_ABOVE_MARKET` | HIGH / CRITICAL | PURCHASE loan, contract purchase price > listing price and/or ATTOM AVM by threshold; one anchor exceeded → HIGH, both → CRITICAL; AVM anchor skipped when forecast std-dev (`fsd`) is missing or ≥ threshold, or confidence < `purchase_price_avm_min_confidence` (default 80); thresholds: `purchase_price_vs_listing_percent` (default 10) and `purchase_price_vs_avm_percent` (default 10) |
+|| `ZONING_MISMATCH` | HIGH | `lot.zoning` is not residential |
+|| `RAPID_RESALE` | HIGH | two most recent sales within `months` (default 6) |
+|| `LLC_TO_LLC_SALE` | HIGH | most recent sale buyer and seller both match an entity pattern |
+|| `PRICE_DECLINE_FROM_PRIOR` | HIGH | current price < most recent prior sale amount |
+|| `PURCHASE_PRICE_ABOVE_MARKET` | HIGH / CRITICAL | PURCHASE loan, contract purchase price > listing price and/or ATTOM AVM by threshold; one anchor exceeded → HIGH, both → CRITICAL; AVM anchor skipped when forecast std-dev (`fsd`) is missing or ≥ threshold, or confidence < `purchase_price_avm_min_confidence` (default 80); thresholds: `purchase_price_vs_listing_percent` (default 10) and `purchase_price_vs_avm_percent` (default 10) |
+|| `UNPERMITTED_RENOVATION` | HIGH | PURCHASE only (via `rules.loan_purpose.PURCHASE`): a recent Zillow-recorded sale within 24 months followed by a list-price increase > `thresholds.unpermitted_renovation_value_increase_percent` (default 30%) with no qualifying building permits on record — the unpermitted-flip pattern. Fires only when ATTOM confirms permits are affirmed-empty (`buildingPermitsAvailability === "affirmed_empty"`); withdrawn and incomplete permits do not suppress the finding. A missing/empty permit status is treated as qualifying (suppresses) — fail-safe so an ambiguous permit record cannot mint a HIGH finding (LOA-539) |
 
 <Note>
 The default `purchase_price_avm_min_confidence` floor (80) is named `AVM_MIN_CONFIDENCE_DEFAULT` in `general.rules.ts` and **must track** `shared-ui`'s `MIN_CONFIDENCE` constant in `PropertiesCheckView.tsx`. Both thresholds use strict `<`, so confidence exactly 80 passes both. The 80/80 alignment ensures the portal cannot simultaneously render "No Confident AVM" in the Est. Value of Subject tile while the `PURCHASE_PRICE_ABOVE_MARKET` finding quotes that AVM's dollar figure (LOA-2328). The per-lender `purchase_price_avm_min_confidence` override remains available in both directions.

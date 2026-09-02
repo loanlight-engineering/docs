@@ -103,10 +103,10 @@ Logs the instrumentation summary and returns `{ completed: true }`.
 <AccordionGroup>
 <Accordion title="ATTOM (AttomService)">
 `baseUrl = https://api.gateway.attomdata.com`, env `ATTOM_API_KEY` (header `apikey`).
-`getPropertyData()` fans out **10 endpoints** in parallel (`/property/basicprofile`,
+`getPropertyData()` fans out **11 endpoints** in parallel (`/property/basicprofile`,
 `/property/expandedprofile`, `/assessmenthistory/detail`, `/saleshistory/expandedhistory`,
 `/property/detailowner`, `/property/detailmortgageowner`, `/property/detail`, `/sale/detail`,
-`/attomavm/detail`, preforeclosure detail) with a unit-qualified lookup and street-only fallback.
+`/attomavm/detail`, preforeclosure detail, and `/propertyapi/v1.0.0/property/buildingpermits`) with a unit-qualified lookup and street-only fallback. The building-permits endpoint is subject-scope only — not fetched for the borrower or REO addresses. Its result is consolidated into `ConsolidatedProperty` as `buildingPermits` (array of permit records, each with `status` and other jurisdiction-specific fields) and `buildingPermitsAvailability` (`"affirmed_empty"` when ATTOM confirmed the lookup ran with no records; `"unavailable"` on error or no-match). These two fields drive the [`UNPERMITTED_RENOVATION`](/agents/property-red-flags) red-flag rule (LOA-539). The success-log denominator reflects the 11-endpoint set for subject scope (10 for borrower/REO).
 `getNaturalHazard()` is a 2-step v4 flow (`property/detail` → `geoIdV4` →
 `/v4/neighborhood/community`) parsed into a FEMA flood zone + hazards. 30s timeout, 3 retries with
 backoff.

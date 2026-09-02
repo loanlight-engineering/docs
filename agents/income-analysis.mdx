@@ -232,3 +232,23 @@ All under `api/v1/portal/income` (`PortalIncomeController`):
 Like the credit and appraisal agents, income seeds `key_field_reviews` rows with the text
 `agent` column set to `"income"`. Low-confidence fields block `export` and `rule_override` until
 reviewed; the field catalog lives in `modules/key-field-reviews/catalogs/income.ts`.
+
+## Octy integration (LOA-2316)
+
+### Audit-run container
+
+Every portal income run mints exactly one lender-scoped, non-shadow `audit_runs` container via `AuditRunFactory` (`triggerSource: "portal"`). The container is stamped with `agent_config: ["income"]` and the requestor id from the controller. This makes every income run appear in Octy's audits list and be reportable from the portal's bug-report flow, anchored on `audit_run_id` — the same anchor every other audit run uses.
+
+A caller-supplied `auditRunId` in `CreateIncomeRunDto` is honored. A reuse attempt against a terminal, non-income-eligible, or already-income-attached audit is rejected with `ConflictException`. The one-income-run-per-container constraint is enforced by both a pre-check and the partial unique index `idx_one_income_run_per_audit_run` on `income_runs.audit_run_id`.
+
+Income is added as a `TraceOnlyAgentType` (not a dispatchable `CatalogAgentType`) and seeded into the agent catalog via migration `0344_seed_income_agent.sql` (mirrors `appraisalIris`'s pattern). Income mints an `agent_runs` ledger row so `tryCompleteAuditRun` observes it: an income-bearing audit reaches terminal state only after the income run completes or fails.
+
+### PII-safe LangSmith tracing
+
+Income emits a LangSmith trace with a payload carrying only `{ auditRunId, agentType }` — no borrower-derived fields. The shared anonymizer is wired as `hideInputs`/`hideOutputs`, and income PII keys are added to `PII_KEY_DENYLIST` as defense-in-depth.
+
+### Bug reports and portal links
+
+- **Bug report endpoint (portal):** `POST /api/v1/portal/audit-runs/:auditRunId/bug-reports`. The portal app proxies this via `POST /api/audit-runs/:auditRunId/bug-report/route.ts` (`PortalAuthGuard`). The endpoint performs a lender-based tenant check (`audit_runs.id = :id AND lender_id = effectiveLenderId AND is_shadow = false`, else 404) before delegating. The reporter is the portal user; `loan_id` is derived from the run (null for loanless).
+- **Bug report affected areas:** the affected-area option list includes an **"Income"** option scoped to income traces.
+- **Portal links:** the audits list, dashboard, and loan-audits detail all link to `/income/<runId>`. Because Next.js forbids two sibling dynamic segments with different names at the same level, these one-segment links land on a redirect page (`app/(app)/income/[familySlug]/page.tsx`) that resolves the run's family and forwards to the canonical two-segment URL (`/income/<family>/<runId>`).

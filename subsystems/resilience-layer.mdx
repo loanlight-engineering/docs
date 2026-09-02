@@ -43,6 +43,21 @@ The Reducto circuit uses the **cockatiel** library with a `consecutive` policy:
 
 Circuit state is persisted in Redis at `resilience:reducto:state`. A single `QueueAndRecoverOrchestrator` owns the recovery-driver timer (one per process; `.unref()`'d) so there is no race between the two domains.
 
+### Redis read outcomes and indeterminate state (LOA-2361)
+
+`CircuitStore.readWithinBudget` (bounded by `CIRCUIT_REDIS_CONNECT_BUDGET_MS` = 1.5 s and `CIRCUIT_REDIS_COMMAND_TIMEOUT_MS` = 1.5 s) distinguishes four outcomes:
+
+| Outcome | Meaning | Effect |
+|---|---|---|
+| Redis answered, key absent | Determinate — nothing persisted yet; legitimately closed | Circuit is closed |
+| Redis answered, valid snapshot | Determinate — circuit state known | Apply the stored state |
+| Redis answered, garbage (bad JSON / unexpected shape) | Determinate error — distinct from an unreachable store | Logged; circuit treated as closed (conservative) |
+| Redis did **not** answer (timeout, connection refused, partition) | **Indeterminate** | Raises `CircuitStateUnavailableError` (subclass of `BrokenCircuitError`) |
+
+Before LOA-2361, a Redis read failure (network partition, timeout) was treated as a clean "nothing persisted yet" — equivalent to a closed circuit. Work passed through even when the stored open/force_open state was inaccessible. Now, an unreadable store raises `CircuitStateUnavailableError`, which callers treat the same as an open circuit: work is parked rather than let through. The open-circuit path itself (`force_open`, deliberate stops) is unchanged.
+
+`getReductoCircuitStore()` awaits the first Redis connection with a bounded budget and memoizes the readiness promise to avoid bootstrap races.
+
 ## Queue and recover
 
 When the circuit is open (or `force_open` overridden), both adapters **park** incoming work rather than hard-failing it.

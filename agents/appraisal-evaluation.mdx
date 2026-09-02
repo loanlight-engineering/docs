@@ -574,6 +574,8 @@ the DB-backed rules, so migration `0192_seed_comp_007_rule_template` seeds it in
 never seeded. Migration `0213_comp_007_tolerance_10pct` (LOA-1200) tightened the proximity
 tolerance from 25% to 10%.
 
+**COMP_007 bidirectional check and WARNING severity (LOA-1941).** The rule previously flagged only when the actual distance exceeded the appraiser's stated distance by more than the tolerance (understatement only). An overstatement — the appraiser claiming a comp is farther than it is — passed silently, then fell through to COMP_003, which labelled the actually-close comp "distant". The rule is now bidirectional: `Math.abs(actual - stated) > tolerance` fires in either direction. The severity default is **WARNING** (changed from FAIL): a wrong-direction label is a grading inconsistency, not a fabrication, and the bidirectionality itself narrows the tolerance. The relative tolerance anchor also changed from `relativeTolerancePct% of stated` to `relativeTolerancePct% of min(stated, actual)` so the tolerance never widens with the figure under suspicion. Pre-existing understatement outcomes are byte-for-byte unchanged: when `stated < actual`, `min === stated`, making the denominator identical to before.
+
 The `appraisal_rules.operator` CHECK (`appraisal_rules_operator_check`) is the **16-value** union
 (adding `abs_less_than` and `abs_less_than_or_equal` to the base 14). Credit reached the same
 16-operator parity in migration `0190_credit_operator_abs_parity`, so the two unions now match.
@@ -594,6 +596,18 @@ occupancy/solar/income/deferred-maintenance groups) on top of new Phase 1.5 extr
 the adapter and `appraisal-data` schema. These DH rules are compound rules evaluated by the shared
 `compound-walker`; they are written only into the Deephaven lender's active rule set and are not
 part of the 67-rule core registry.
+
+**Five Phase 1.5 rules retired (LOA-2582, LOA-2576).** The following rules were removed from the Deephaven bundle and from Deephaven's active rule sets after a production review by Max Klein (2026-08-27). Historical findings are preserved (outcome rows store the plain-text `rule_code` with no FK):
+
+| Rule code | Name | Reason retired |
+|---|---|---|
+| `CUST_DEE00033` | Condo project questionnaire | Operand `null` in all 4 blocks carrying the key; rule could only emit `NEEDS_INFO`, never `FAIL` |
+| `CUST_DEE00044` | Over-improvement narrative | Every appraisal asked whether the appraiser discussed it, but no field records whether the subject is one |
+| `CUST_DEE00045` | Under-improvement narrative | Same reason as DH_044 |
+| `CUST_DEE00046` | Form 1007 rent schedule | Leaf present but `false` on 27/28; cannot distinguish "no 1007" from "1007 in eFolder" |
+| `CUST_DEE00051` | Income-approach support | `has_gross_rent_multiplier` absent 8/8 on UAD 3.6; first 3.6 income-producing appraisal would flag on extraction coverage, not appraiser conduct |
+
+Migration `0342` removes these rules from the bundle and from every lender holding them. The deletion targets Deephaven's production-verified slug, so a portal-authored custom at another lender reusing one of these codes is not affected (codes are unique per rule set, not globally).
 
 #### Deephaven static LTV caps bundle (LOA-1777)
 

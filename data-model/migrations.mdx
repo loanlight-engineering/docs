@@ -132,7 +132,7 @@ Because `drizzle-kit generate` re-derives SQL from the schema, a schema file tha
 The timestamp invariant is why nearly every timestamp column is declared `timestamp(..., { withTimezone: true, mode: "string" })`. A `pg.types.setTypeParser` override returns raw ISO strings (no JS `Date` coercion) for timestamptz/timestamp OIDs.
 </Note>
 
-## Squashing migrations (quarterly) — LOA-1495
+## Squashing migrations — LOA-1495
 
 The migration chain only grows. `pnpm migrate:squash <cutoff-idx>` collapses the settled
 prefix (entries `0..cutoff` in journal order) into a **baseline set** without touching the
@@ -143,7 +143,7 @@ database schema:
   PostgreSQL forbids `ADD VALUE` inside a transaction.
 
 After collapsing, the script rewrites the journal head, deletes the collapsed `.sql` files,
-preserves and renumbers the tail (keeping each entry’s original `version`/`breakpoints`/`when`
+preserves and renumbers the tail (keeping each entry's original `version`/`breakpoints`/`when`
 — only `idx` is rewritten), and emits an **append-only reconciliation manifest**
 (`meta/_squash_manifest.json`). Re-running the same cutoff is a manifest-detected no-op.
 
@@ -167,6 +167,14 @@ Superseded rows are retained (rollback safety). No application schema DDL runs. 
 deploy sees the same hashes and skips. End-to-end: **author + verify locally → commit →
 merge → first INT deploy reconciles INT ledger → promote → first PROD deploy reconciles PROD
 ledger.**
+
+### First squash run (LOA-2351, 2026-09-02)
+
+The first squash was executed on `main` on 2026-09-02. **321 migrations were collapsed at cutoff idx 320** into 11 baseline files: `0000_baseline.sql` (all non-enum DDL wrapped in one transaction) plus 10 isolated enum `ADD VALUE` files (PostgreSQL forbids `ADD VALUE` inside a transaction). The 19-migration tail was renumbered to journal entries 0–18.
+
+The cutoff was derived from prod and INT applied-set intersections pulled over the RDS Data API and matched to the journal by SHA-256. Prod had applied through idx 322; INT through idx 328 (INT runs ahead due to unmerged branches). The intersection set idx 0–322 was the hard ceiling; a 7-day soak window inside that ceiling gave cutoff idx 320.
+
+After pulling the squash onto a populated local DB, drop and rebuild the entire database, clearing the **`drizzle` schema** (not just `public`) so the `drizzle.__drizzle_migrations` ledger is reset before `db:migrate` reconciles against the new baseline hashes.
 
 <Warning>
 Never hand-collapse migrations or hand-edit `meta/_journal.json`, the
