@@ -576,6 +576,13 @@ tolerance from 25% to 10%.
 
 **COMP_007 bidirectional check and WARNING severity (LOA-1941).** The rule previously flagged only when the actual distance exceeded the appraiser's stated distance by more than the tolerance (understatement only). An overstatement — the appraiser claiming a comp is farther than it is — passed silently, then fell through to COMP_003, which labelled the actually-close comp "distant". The rule is now bidirectional: `Math.abs(actual - stated) > tolerance` fires in either direction. The severity default is **WARNING** (changed from FAIL): a wrong-direction label is a grading inconsistency, not a fabrication, and the bidirectionality itself narrows the tolerance. The relative tolerance anchor also changed from `relativeTolerancePct% of stated` to `relativeTolerancePct% of min(stated, actual)` so the tolerance never widens with the figure under suspicion. Pre-existing understatement outcomes are byte-for-byte unchanged: when `stated < actual`, `min === stated`, making the denominator identical to before.
 
+**`RENT_003` and `GRM_001` — Rent and GRM comparable proximity (LOA-2633, migration `0039`).** `income_approach.rent_comparables[*].proximity_miles` is now a registered numeric field extracted from both the Reducto PDF path and the Textract normalizer. The `proximity.ts` module centralises the parsing (converting e.g. `"0.8 miles"` or `".25"` to a float). Two new global rule templates seed into active rule sets and the Deephaven bundle:
+
+- **`RENT_003` — Rent Comparable Proximity:** warns when a rent comparable's `proximity_miles` exceeds the configured `maxMiles` (default `1.0`). Severity: `WARNING`.
+- **`GRM_001` — GRM Comparable Proximity:** warns when a GRM comparable's `proximity_miles` exceeds `maxMiles`. Severity: `WARNING`.
+
+Both are `WARNING`-severity, lender-configurable, and use the same `proximity_miles` field on their respective comp rows. Geocoding is not a dependency; proximity is appraiser-reported from the grid, not derived.
+
 The `appraisal_rules.operator` CHECK (`appraisal_rules_operator_check`) is the **16-value** union
 (adding `abs_less_than` and `abs_less_than_or_equal` to the base 14). Credit reached the same
 16-operator parity in migration `0190_credit_operator_abs_parity`, so the two unions now match.
@@ -614,6 +621,20 @@ Migration `0342` removes these rules from the bundle and from every lender holdi
 **`DH_053`–`DH_066`** (Category-A bundle v2 → v3, staged in `portal-appraisal-rules/staged-bundles/`) encode Deephaven's fixed LTV/CLTV caps as 14 compound bundle rules. These rules became authorable after LOA-1754 (2026-07-24) wired `ltv`, `cltv`, `fico`, `loan.purpose`, and `loan.property_state` into the eval bag for any lender with a URLA on the audit. Rule codes, thresholds, and scope (lender-wide or program-specific) are in the staged-bundle file. The same bundle update re-enables `NEIGH_001` lender-wide as a `WARNING` (was disabled; the previously promised LTV overlay was never built — these LTV rules are it).
 
 Apply via `/admin/staged-rules` → Deephaven → dry-run → promote.
+
+#### Deephaven relative LTV overlays (LOA-1779, Leg 1)
+
+`composeEffectiveMaxLtv` (in `lib/loan-eligibility/`) now accepts three parameterized relative-LTV reduction keys from `LtvModifiersSchema`:
+
+| Key | Effect |
+|---|---|
+| `decliningMarket` | Applies a percentage-point reduction when the property is in a declining market neighborhood. |
+| `listedForSale` | Applies a percentage-point reduction when the subject was listed for sale within the look-back window. Presence of the boolean is required for the operand to be graded; `listed_for_sale` null or undefined is treated as absent and the operand is ungraded. |
+| `ruralReductionPct` | Applies a percentage-point reduction for rural properties. |
+
+All three keys are nullable — when omitted the overlay is a no-op and output is byte-identical to the static-LTV baseline. They compose with the existing `condoType` caps and the `DH_053`–`DH_066` static LTV bundle; effective max LTV is the minimum of all applicable caps and reductions. Each fired overlay records a `capOrReductionSubstring` trace in the eligibility card's evidence so reviewers see which specific reduction lowered the cap.
+
+The `appraisal_rule_templates` bundle (`DH_053`–`DH_066`) re-enables `NEIGH_001` lender-wide as `WARNING` as part of the same deploy; the LTV overlays now fill the role the previously-promised overlay was intended to serve.
 
 The accessory-dwelling-unit (ADU) rules in Group B are `DH_025` (**No accessory dwelling unit** —
 a flat predicate that warns when `improvements.has_accessory_unit` is `true`) and `DH_026`
@@ -743,6 +764,7 @@ Fannie/Freddie SSR findings. One row per attempted extraction, keyed on `(runId,
 - `status` — `"pending" | "processing" | "completed" | "failed"`
 - `processingJobId` / `processingToken` — BullMQ job id and delivery token; used to fence processor writes against stale deliveries (LOA-2460)
 - `detectionConfidence` — jsonb: `{ method: SsrDetectionMethod, score: number }`. `SsrDetectionMethod` is a closed union (LOA-2460): `document_text_confirmed` | `document_text_llm_confirmed` | `document_text_only` | `marker_llm_confirmed` | `llm_unverified` | `unresolved`. Older rows may carry `llm_extracted`, `header_markers`, `ambiguous`, or `no_ssr_markers` in the `method` field — do not switch exhaustively.
+- `comps` — jsonb, nullable (migration `0040`, LOA-1897). An array of comp rows extracted from the SSR's header **Comps** table (`Comps | Comp Address | Adjusted Sale Price`). Each entry is `{ label: string | null, address: string | null, adjustedSalePrice: number | null }`. Rows with no address are stripped by `stripAddresslessComps` before persisting (the address is the join key onto the appraisal grid). `adjustedSalePrice` is coerced by `nullableNumber`, which strips a leading `$` and commas and requires at least one digit — a cell of `"$"` (the typical OCR shape of a blank Adjusted Sale Price column) yields `null` rather than `0`. These rows populate the portal's Comparables table with an **SSR** source pill, complementing the existing **Appraisal** and **LoanLight Data** pills.
 
 The unique partial index `idx_one_ssr_per_run_agency` covers only `status = 'completed'` rows (LOA-2460, migration `0326`). Two `pending` or `processing` rows for the same agency may coexist; PostgreSQL arbitrates when they transition to `completed`.
 </ResponseField>

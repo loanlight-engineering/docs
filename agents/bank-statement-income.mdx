@@ -37,9 +37,11 @@ Runs PDF-integrity and font-consistency fraud checks. PDF bytes arrive via `deps
 Classifies each extracted deposit (`deposit_classification`) by `borrowerType`. Pure; no I/O.
 </Accordion>
 <Accordion title="detectAnomalies">
-Runs large-deposit, anomaly, and income-basis (audit P2) analysis via `AnomalyDetectionService`. Threads both `category_detailed` and `income_excluded_reason` into the income basis so refund/P2P/family exclusions are honored.
+Runs large-deposit, anomaly, income-basis (audit P2), and business-type overlay analysis via `AnomalyDetectionService`. Threads `category_detailed`, `income_excluded_reason`, and — when a business-type profile is active — the profile's p2p treatment and band thresholds into each detection pass.
 
 Also receives `rejectedPeriods` from the extraction state — statement periods the model identified as incomplete or out-of-window (mapped from `extraction.rejected_periods` to `{ accountNumberMasked, coveredMonths }`). `AnomalyDetectionService` uses this list to exclude rejected periods from the anomaly window, so a statement that the extractor rejected does not silently dilute income or fire spurious anomaly findings.
+
+**Page geometry removal and `qualification_period_mismatch` (LOA-2655, migration `0038`).** Previously, statements whose stored page numbers sat outside the PDF's actual page count were rejected outright, which silently dropped the oldest months in multi-month PDFs. This check has been removed. The rejection list (`rejectedPeriods`) now comes exclusively from the extractor's own window judgment, not from page geometry. Instead, when the number of income months the graph derived differs from the reviewer's `income_qualification` setting (in either direction), the agent emits a non-blocking `qualification_period_mismatch` warning finding (`severity: "warning"`, `statementId: null`) with an evidence payload carrying `included_months` and `rejected_months`. The finding appears in the portal's **Issues Found** panel under the **Program Rules** chip and is dismissible across recompute runs. `EXTRACTION_CONTRACT_VERSION` was bumped from 1 to 2 as part of this change; the Redis extraction checkpoint invalidates stale payloads automatically.
 </Accordion>
 <Accordion title="checkIncomeTrend">
 Checks the month-over-month income trend (audit F2). Threads `incomeExcludedReason` and `borrowerType` through the `toTrendStatements` adapter so the eligibility matrix is borrower-type-aware. No DB access — all inputs come from graph state.
@@ -197,6 +199,44 @@ The `GET .../status` response carries `waiting_on` alongside `status`. The porta
 <Note>
 The 30-second per-lender rate limit on `enqueue` was also removed in LOA-2639. The endpoint is still throttled at **10 requests per minute per request IP** (the class-level `ThrottlerGuard` on `BankStatementController`) — a content-agnostic rate limit that does not constrain distinct borrowers or loans submitting from different IPs.
 </Note>
+
+## Business-type-aware income analysis (LOA-3908, #3908)
+
+When a reviewer names the borrower's business type at upload, a 31-profile registry adjusts how that file's deposits are read. The feature applies to the graph (ingestion) path and the service (recompute) path identically.
+
+### Business type at upload
+
+The bank-statement upload modal exposes a **Business type** type-ahead search over the 31 profiles' aliases and display names. It triggers at one character, uses a 200 ms debounce, and ranks matches: exact alias > prefix > substring. The matched alias is shown in parentheses. A free-text field for the description appears only when the reviewer selects **"Other"**.
+
+The chosen values persist on `borrower_files`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `business_type_key` | `text`, nullable | The profile key (e.g. `"restaurant"`, `"consulting"`), or `"other"`. |
+| `business_type_freetext` | `text`, nullable | Reviewer-supplied description when key is `"other"`. Bounded to 255 characters (migration `0044`). |
+| `business_type_profile_version` | `integer`, nullable | Registry version at upload time, for drift detection. Seeded by migrations `0041`–`0043`. |
+
+### Profile registry
+
+The registry holds 30 named profiles plus the **"Other"** sentinel. Each profile declares:
+
+- `aliases` — display names and search terms the type-ahead matches against.
+- `expenseRatioBand` — the typical `{ min, max }` expense-to-revenue ratio for the business type. Used for cash-share deviation detection.
+- `p2pTreatment` — how P2P credit transactions from this account are handled:
+  - `"excluded"` (16 of 30 profiles): marks P2P credits `income_excluded_reason = "p2p_profile_excluded"`, which the income veto honours, so qualifying income drops.
+  - `"needs_support"` (14 of 30 profiles): emits an advisory finding listing the P2P totals for manual review without excluding the income.
+
+**"Other" is a sentinel, not a profile.** It resolves to no active profile; every overlay call site is a documented no-op. Output is byte-identical to the pre-feature baseline.
+
+### Overlays the profile applies
+
+**P2P treatment.** Applied by `detectAnomalies` during ingestion and by the recompute service path. When `p2pTreatment === "excluded"`, P2P credits are vetoed from income. When `p2pTreatment === "needs_support"`, they are flagged for review without exclusion.
+
+**Profile-band large deposits.** A deposit that exceeds the profile's typical maximum (its `expenseRatioBand.max`-derived per-account P95 ceiling) is flagged as unusually large, scoped per masked account by that account's own income P95.
+
+**Cash-share deviation.** A file whose observed cash share (cash deposits as a fraction of total income) sits outside the band the profile expects raises an advisory anomaly.
+
+**Business-type narrative.** `buildProfileNarrative` supplies the detail view's `business_type_narrative` field and the advisory expense band shown in the portal's bank-statement income detail.
 
 ## Credit categorization v2 (LOA-2543)
 

@@ -97,6 +97,10 @@ Finding signatures (`lib/bank-statement/finding-signature.ts`) now exclude volat
 
 `large-deposit-overrides` carries `{ transaction_id, mode }` where `mode` is `force` (surface a deposit the detector missed) or `suppress` (hide an auto-flagged one); flagging is decoupled from income inclusion. `statements/add` keys must sit under the file's own `bank-statements/{id}/` prefix and the combined batch stays within the 50-file ceiling. These overrides are the same `large_deposit` records the [Statement Analyzer](/portal/statement-analyzer) projects read-only onto an asset run.
 
+#### Unified audit log and Transaction column (#3964)
+
+The audit log panels on the bank-statement run detail page and the appraisal/credit run detail pages now share one `AuditLogTable` component (`components/audit/audit-log-table.tsx`). The bank-statement view previously showed an **Impact** column; it now shows a **Transaction** column containing the changed transaction's date and description. Pagination uses offset-based "Load more" with retry-on-error that preserves already-loaded rows. The shared `usePaginatedAuditEvents` hook drives pagination and retry state on both surfaces. The bank-statement audit events come from `GET /api/v1/portal/bank-statements/:id/audit-events`.
+
 #### Recurring expenses
 
 The `GET :id/recurring-expenses` endpoint returns active recurring-expense groups detected from Plaid-enriched debit transactions (LOA-1816–1824, PR #3166). It is gated on `ENABLE_RECURRING_EXPENSES === "true"` and returns `403 { error: "RECURRING_EXPENSES_DISABLED" }` when the flag is off.
@@ -170,6 +174,12 @@ Optional co-borrower legal name. Stored in `borrower_files.co_borrower_name`; sa
 </ParamField>
 <ParamField body="ownershipPercentage" type="string">
 Optional business-ownership share as a 0–1 fraction with at most 4 decimal places (e.g. `"0.5"` = 50%). Business-only. Omitting this field is equivalent to 100% ownership. Stored as `borrower_files.income_ownership_percent`; the income calc applies it to qualifying income at recompute time (#2913).
+</ParamField>
+<ParamField body="business_type_key" type="string">
+Optional business-type profile key selected from the 31-profile registry (e.g. `"restaurant"`, `"consulting"`). Use `"other"` when the business type is not in the registry. When set, activates the profile's P2P treatment and deposit-band overlays on this file. Stored in `borrower_files.business_type_key`. See [Business-type-aware income analysis](/agents/bank-statement-income#business-type-aware-income-analysis-loa-3908-3908).
+</ParamField>
+<ParamField body="business_type_freetext" type="string">
+Optional free-text description of the business type. Required when `business_type_key` is `"other"`. Bounded to 255 characters. Stored in `borrower_files.business_type_freetext`.
 </ParamField>
 
 Processors: `bank-statement.processor.ts` (extraction pipeline), `ai-summary.processor.ts`, and `categorization.service.ts` (Plaid Enrich enrichment, in batches of 100). `VALID_FINDING_TYPES` is imported from the processor.
