@@ -123,10 +123,10 @@ Eligibility (which segments a field *may* use) and recall (which documents the q
 
 ## PII fields and comparison modes
 
-`PiiFieldKeySchema` enumerates the **11 canonical fields**. Each has a `comparisonMode` from `ComparisonMode` (`stringExact | caseInsensitive | digitsOnly | addressNormalized | dateNormalized`), implemented by `normalize/normalize.ts`.
+`PiiFieldKeySchema` enumerates the **12 canonical fields**. Each has a `comparisonMode` from `ComparisonMode` (`stringExact | caseInsensitive | digitsOnly | addressNormalized | dateNormalized`), implemented by `normalize/normalize.ts`.
 
 || Field | comparisonMode | Notable synonyms |
-|||---|---|---|
+||||---|---|---|
 || FullName | caseInsensitive | Name, BorrowerName, ApplicantName |
 || DateOfBirth | dateNormalized | DOB, BirthDate |
 || SocialSecurityNumber | digitsOnly | SSN, SocSecNum |
@@ -138,6 +138,15 @@ Eligibility (which segments a field *may* use) and recall (which documents the q
 || EmployerAddress | addressNormalized | WorkAddress, JobAddress |
 || PurchasePrice | stringExact | SalesContractPrice, PurchaseAmount, ContractPrice |
 || CitizenshipResidency | caseInsensitive | Citizenship, ResidencyStatus, CitizenshipResidencyType |
+|| VestingEntityName | suffixTolerant | EntityName, LegalEntityName |
+
+### VestingEntityName (LOA-2255/LOA-2256)
+
+`VestingEntityName` is the 12th field, active only on entity-vested loans. The anchor is the `Borrower`-role `LEGAL_ENTITY/LEGAL_ENTITY_DETAIL/FullName` from the MISMO XML. Two anchor-validity checks gate it: the field must carry a recognized legal-entity suffix (LLC, Corp, Inc, Trust, etc.) **and** the anchor must be corroborated by at least one in-scope document — individual-only loans and personal-name-in-entity-field cases are suppressed before the field is emitted.
+
+Retrieval is scoped to entity and title documents: `entity_vesting`, `articles_of_incorporation`, `trust`, `trust_approval_letter`, `business_license`, `preliminary_title`, `title_commitment`, `deed_of_trust`, `grant_deed`, `warranty_deed`, and `operating_agreement` (migration `0054`). EIN letters carry no classify type and are not yet in scope.
+
+The comparison is **suffix-tolerant**: typography differences (`PDR LLC` vs `PDR, L.L.C.`) are tolerated; actual suffix presence/absence differences (`PDR` vs `PDR LLC`) and core-name changes produce an `inconsistent` finding. When classify-split ran but never completed (`partial`/`failed`/`skipped`/`undefined`) and nothing corroborates the anchor, the field emits `unverifiable` (medium severity) rather than silently passing — this surfaces the gap without fabricating a false `missing`. Seeded by migrations `0052` (doc-type rules) and `0053` (`unverifiable` issueKind widening).
 
 ## Single-document validation and safety nets
 
@@ -147,10 +156,13 @@ The core prompt's `issueKind` taxonomy:
 
 | Situation | hasIssue | issueKind |
 |---|---|---|
-| Field not found | false | `missing` |
-| Found but for a different borrower | false | `missing` |
-| Found but inconsistent | true | `inconsistent` |
-| Document belongs to the wrong person | true | `identity_mismatch` |
+|| Field not found | false | `missing` |
+|| Found but for a different borrower | false | `missing` |
+|| Found but inconsistent | true | `inconsistent` |
+|| Document belongs to the wrong person | true | `identity_mismatch` |
+|| Cannot verify (classify-split incomplete, entity-vested) | false | `unverifiable` |
+
+The `unverifiable` kind is emitted only by `VestingEntityName` on a whole-index fallback path (when `searchFilters` is undefined) under an incomplete classify-split status. A scoped transient retrieval miss and a `complete` classify run both remain silent (no finding).
 
 **Deterministic safety nets** then override the LLM verdict where appropriate:
 

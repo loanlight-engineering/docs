@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **15 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 030 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **16 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 031 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -49,6 +49,7 @@ The current schema has **15 tables**. Migration `001_baseline_schema.sql` create
 || `028_add_claim_state_to_materialized_split_record` | `state`, `claimant_id`, `lease_expires_at`, `attempts` on `materialized_split_record` (LOA-2031); backfills existing rows to `state = 'delivered'` |
 || `029_audit_delivery_log_unconfirmed_status` | widens the `audit_delivery_log.status` CHECK to add `unconfirmed` (LOA-2231) — see `audit_delivery_log` below |
 || `030_add_is_ssr_only_to_transaction_state` | `transaction_state.is_ssr_only` boolean, nullable (LOA-2483); `lender_feature.feature_value` length CHECK constraint `lender_feature_value_length` (≤ 255 chars) — idempotent guard since the column predates the constraint |
+|| `031_create_findings_delivery` | `findings_delivery` table (LOA-2039) — see below |
 || `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
@@ -264,6 +265,27 @@ Atomized de-dup ledger for the document-push pipeline (migration `027`, LOA-2031
 | `push_record_id` | Set on release — links the claim to the `document_push_record` that completed it. |
 
 Unique on `(transaction_record_id, claim_key, container_norm)`.
+
+### findings_delivery
+
+Atomic claim ledger for findings delivered to Encompass via `CREATE_FINDINGS` (migration `031`, LOA-2039). One row per `(transaction_state_id, code, reference_id)` triple. A claim is acquired **before** the EPC call so two workers processing the same SQS redelivery only deliver once.
+
+| Column | Notes |
+|---|---|
+| `id` | PK (uuid) |
+| `transaction_state_id` | FK → `transaction_state` |
+| `audit_run_id` | text (the correlationId) |
+| `code` | Finding code family key. |
+| `reference_id` | Stable per-finding identity (e.g. `audit_error.id`). |
+| `status` | `in_flight` \| `delivered` \| `failed` \| `unconfirmed`. `failed` is reclaimable; all others are permanent blocks — a re-send could file a duplicate condition into a live loan pipeline. |
+| `claimant_id` | Worker identity for ownership tracking. |
+| `created_at`, `updated_at` | |
+
+Unique on `(transaction_state_id, code, reference_id)`. Index on `transaction_state_id`.
+
+<Note>
+`in_flight` has no lease expiry (unlike `document_delivery_claim`). A request that provably never left the process classifies as `not_sent` in the error handler and stays reclaimable; a sent-but-timed-out request classifies `unconfirmed` and blocks permanently. See the [audit lifecycle](/integrations/audit-lifecycle) for the delivery sequence and the safety model.
+</Note>
 
 ### lender_feature
 

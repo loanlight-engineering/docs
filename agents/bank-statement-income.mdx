@@ -127,6 +127,18 @@ The port restores several extraction-time finding categories that the legacy har
 - **Balance continuity fraud** (`detectContinuityFindingsNode`): reuses `FraudDetectionService.checkContinuity`. Its input is sourced from raw `ParsedStatement` balances (pre-`?? 0` coercion) via the `deps.continuityStatements` closure, so the legacy unparseable-balance warning remains reachable.
 - **Income-basis veto** (P2 + F2): credits flagged `incomeExcludedReason ∈ {refund, self_transfer, family_transfer, account_transfer}` drop from the income basis even when `deposit_classification === "income_deposit"`, mirroring `bank-statement.processor.ts` post-#2860.
 
+**Voided checks and `refund` display identity (LOA-2686):** A voided check is detected by the VOID token **together with check context** (either order, bounded window), e.g. `Void Official Check#` / `Voided Ck #`. When matched, the credit is stamped `income_excluded_reason = "refund"` — re-using the existing `refund` disposition rather than adding a new reason code. `refund` is now also a **reviewer-selectable dropdown entry** and has a visible display identity alongside `SELF_FAMILY_TRANSFER` and `ACCOUNT_TRANSFER`. Selecting "Refund" stamps `income_excluded_reason` directly (not a category override), matching the LOA-2543 disposition-stamp pattern. The v2 categorization pipeline picks up the same VOID/Voided detection via `REFUND_SHAPE_PATTERN`.
+
+**Account selection — which accounts feed income (LOA-2657):** When an upload contains multiple accounts, the graph determines which accounts contribute to qualifying income before aggregating. The decision is topology-first, materiality-second:
+- Accounts with **staggered coverage** (one starts where the other ends) are treated as one continuous stream — interpreted as a bank switch.
+- Accounts with **concurrent coverage** (overlapping months) are compared over their shared window. An account is **immaterial** and dropped when its deposits represent less than 10% of the window total, or when it has deposits in fewer than a third of the shared months. Concurrent material accounts are **never summed**; the account with the larger income sets the qualifying figure, and each other account is presented as its own worksheet contributing nothing to the total.
+
+`bank_statements.income_inclusion_override` (boolean, nullable, migration `0046`) lets a reviewer override the auto-detected inclusion decision. The cross-account decision is recorded as an `account_selection` finding type (migrations `0047`/`0048` — expand/contract pair widening `finding_type_check`).
+
+**P2P sender names without "from" (LOA-2683):** `extractP2pSenderName` previously anchored on `/\bfrom\b/` only, so banks that print the sender directly after the rail (`ZELLE <NAME> <phone>`) produced no sender name and the family/self exclusion never fired. A rail-anchored parse (Zelle, Venmo, Cash App, PayPal, Popmoney, QuickPay) is now applied alongside the existing `from` parse, with a newline-tolerant anchor and middle-name reconstruction. The new parse is gated to `direction === "inbound"` — the outbound and `descriptionFirst` expense paths are unchanged.
+
+**Balance-rollover continuity keyed on account (LOA-2690):** `detectContinuityFindingsNode` previously keyed continuity on the masked account number alone. A credit union printing multiple sub-accounts under one member number (same last-four) caused all sub-accounts to be interleaved into one sequence and produced false-positive `fraud_continuity` findings on every month boundary. The account key is now derived from the statement itself via `accountKeyOf(statement)`: canonical last four + normalized institution name + printed account heading (case/whitespace-folded). Two unrelated sub-accounts sharing a last-four get distinct keys; two renderings of the same account (`****6177` vs `XXXX6177`) get the same key.
+
 ### Portal upload defaults
 
 Two portal defaults changed in the same fix (LOA-2280):
@@ -238,13 +250,15 @@ The registry holds 30 named profiles plus the **"Other"** sentinel. Each profile
 
 **Business-type narrative.** `buildProfileNarrative` supplies the detail view's `business_type_narrative` field and the advisory expense band shown in the portal's bank-statement income detail.
 
-## Credit categorization v2 (LOA-2543)
+## Credit categorization v2 (LOA-2543, LOA-2659)
 
 A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categorization/pipeline.ts`) runs as a **second, parallel categorization pass** after the primary Plaid PFC enrichment. It is wired behind the `ENABLE_CREDIT_CATEGORIZATION_V2` environment variable (strict `=== "true"`; CDK sets INT to `"true"`, prod to `"false"`).
 
 When the flag is enabled, `CreditCategorizationV2Service.categorizeAndPersist(borrowerFileId)` is called from `bank-statement.processor.ts::writeResults` **after** the write transaction commits. It runs outside the transaction deliberately — the service makes sequential vendor calls (the OpenAI resolver) and holding a DB connection across them would pin it for minutes.
 
-**What it writes:** per-transaction `transactions.credit_category` columns — the v2 answer. It does **not** change `effective_category`, `is_income`, or any income surface. The v2 columns fill in while dark and the flag flip is a switch, not a reprocess.
+**What it writes:** per-transaction `transactions.credit_category` columns — the v2 answer — plus `transactions.credit_category_source` (CHECK `structural | resolver | fallback | NULL`, migration `0045`) which records how the v2 answer was derived. It does **not** change `effective_category`, `is_income`, or any income surface. The v2 columns fill in while dark and the flag flip is a switch, not a reprocess.
+
+**Institution coverage (LOA-2659):** `mapInstitution` previously admitted only three named banks and returned `null` for all others, silently skipping their statements. It now returns a `generic` layout for every unrecognized institution. To prevent cross-bank hash collisions, `RawStatementLine.namespace` is now the hash namespace (previously `institution` served both roles), falling back to `institution` for the three already-recognized banks. Two new rail rungs were also added: `Ext Deposit` (`ACH_SHAPE_PATTERNS`) and a bare `deposit` token (R4.10 — a new last rung that can only convert a `null` and never overrides R4.1–R4.9).
 
 **Portal surface:** super-admins see a **"Category (v2)"** column in the portal transaction table (gated by `isSuperAdmin` — not visible in the column picker for other roles). The column shows the raw v2 label alongside the v1 (Plaid PFC) answer for comparison. It is read-only and intentionally not sortable.
 

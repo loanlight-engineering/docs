@@ -22,7 +22,7 @@ PK `id`, `audit_run_id` (NOT NULL).
 <ParamField path="mismo_value" type="text">The value from the MISMO XML.</ParamField>
 <ParamField path="borrower_index" type="integer">Which borrower.</ParamField>
 <ParamField path="has_issue" type="boolean" />
-<ParamField path="issue_kind" type="text">CHECK: `missing | inconsistent | identity_mismatch`.</ParamField>
+<ParamField path="issue_kind" type="text">CHECK: `missing | inconsistent | identity_mismatch | unverifiable`. `unverifiable` is emitted only by `VestingEntityName` when classify-split did not complete and the field cannot be corroborated (migration `0053`).</ParamField>
 <ParamField path="severity" type="text">Default `medium`. CHECK: `high | medium | low`.</ParamField>
 
 Plus `overall_message`, `lang_smith_trace_url`, `created_at`. Indexes on `audit_run_id`, `borrower_index`, `field`, `has_issue`.
@@ -124,6 +124,7 @@ PK `id`, `audit_run_id` (NOT NULL), `code` (NOT NULL).
 <ParamField path="applied_reductions" type="jsonb">The reduction steps applied after the grid cap (e.g. declining market, multi-unit). NULL on overlay rows.</ParamField>
 <ParamField path="loan_ltv" type="numeric (nullable)">LOA-1966. The loan's own LTV — a reporting column, never a grading input. Present on every row of an evaluation that resolved one (grid and overlay alike) and carries the same value on all of them, because it is a loan fact rather than a per-finding output. Replaces the regex-scraping heuristic that LOA-2032 used to extract LTV from the `message` string — that approach was fragile; `loan_ltv` is the authoritative source going forward. Do not reintroduce any approach that derives LTV from `message`.</ParamField>
 <ParamField path="grid_base_ltv" type="numeric (nullable)">LOA-1966. The raw grid cell before the min()-of-caps stage and reductions. NULL whenever `effective_max_ltv` is NULL (both come from the same composition). Lets the portal audit trail lead with "Grid base → x%" and then show what lowered it.</ParamField>
+<ParamField path="superseded_at" type="timestamptz (nullable)">LOA-2449. Set on rows that are retained after a prune but logically de-adopted — they no longer represent the current eligibility verdict for their `code`, but are kept for audit-trail purposes. `NULL` on current (live) rows. Added by migration `0051`.</ParamField>
 
 Indexes: unique on `(audit_run_id, lender_id, code)`, composite on `(audit_run_id, code, created_at, id)` for deterministic worst-outcome-first ordering (via `eligibilityOutcomeRankDesc()`), and on `rule_id` for overlay lookups.
 

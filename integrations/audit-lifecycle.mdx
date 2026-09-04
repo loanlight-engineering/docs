@@ -53,6 +53,17 @@ The AUS publishes EventBridge events (Source `loanlight.aus`). The `AusUpdateRul
 
 `fetchV2Inputs` uses **per-endpoint timeout semantics** (LOA-2294): `results` and `property_data` are fatal (a timeout throws and requeues the SQS message), while `urla_completeness` and `credit` degrade to a null section. This is the right tradeoff because `results` alone populates the summary, `dataConsistency`, and `documentHealth` sections — losing it leaves the report empty in every meaningful respect — and `property_data` drives the split path's per-property PDF output. A degraded section is logged at error level as `audit_data.fetch.section_degraded` and never silently swallowed.
 </Step>
+<Step title="Deliver findings into Encompass (LOA-2039)">
+Before the terminal PATCH, `AusUpdateService.deliverFindings(...)` evaluates and delivers qualifying audit findings as Encompass Conditions or Tasks via the EPC `CREATE_FINDINGS` API. This step runs on both `deliverComplete` (combined path) and `deliverSplit` (routed path).
+
+**Delivery sequence within a run:** fetch audit data → generate and upload PDF → **deliver findings** → terminal completion PATCH. The ordering is bounded at both ends: placed after document uploads so it sits inside the provably-clean side of the `isAuditDataTimeout` guard, and placed before the terminal PATCH so findings reach the loan pipeline before it is marked complete.
+
+**Safety model.** A finding is claimed in the `findings_delivery` ledger (`031_create_findings_delivery.sql`) *before* the EPC call. `findings-delivery.repository.ts::acquireAll` claims all qualifying findings in one statement; it reclaims only `failed` rows (the claim was provably never sent). `delivered`, `unconfirmed`, and `in_flight` rows are never reclaimed — a duplicate `CREATE_FINDINGS` call could silently file a condition into a live loan pipeline.
+
+**Enablement** is per finding-code family, off by default. The `findings_*` flags in `feature-flags.registry.ts` carry a `feature_value` of `off` / `manual` / `auto`; only `auto` delivers in this release. When no definitions match or the registry is empty, `deliver` short-circuits before any I/O.
+
+**Best-effort.** A findings delivery failure is logged and alerted (Datadog monitor `findings-delivery-failed`) but never blocks the terminal PATCH. Completion always reaches Encompass.
+</Step>
 <Step title="PATCH the report into Encompass">
 The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResources` → generate streaming URLs → PUT bytes → resource refs), then the EPC transaction is PATCHed:
 
