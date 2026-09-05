@@ -16,15 +16,16 @@ The modal opens with the run's overview and a sidebar that lists the available s
 
 Current sections (in sidebar order):
 
-|| Section | `SectionKey` | Data source |
-||---|---|---|
-|| Overview | `overview` | loanlight-api results payload |
-|| Document Health | `document-health` | loanlight-api results payload |
-|| Data Consistency | `data-consistency` | loanlight-api results payload |
-|| URLA (1003) | `urla` | loanlight-api results payload |
-|| Appraisal Evaluation | `appraisal` | Octy DB (`appraisal_runs` + `appraisal_rule_compliance`) |
-|| IRIS Photos | *(sub-section of Appraisal)* | Octy DB (`appraisal_photos` + `appraisal_iris_taxonomy`) |
-|| Credit | `credit` | loanlight-api results payload (credit block) |
+||| Section | `SectionKey` | Data source |
+|||---|---|---|
+||| Overview | `overview` | loanlight-api results payload |
+||| Document Health | `document-health` | loanlight-api results payload |
+||| Data Consistency | `data-consistency` | loanlight-api results payload |
+||| URLA (1003) | `urla` | loanlight-api results payload |
+||| Appraisal Evaluation | `appraisal` | Octy DB (`appraisal_runs` + `appraisal_rule_compliance`) |
+||| IRIS Photos | *(sub-section of Appraisal)* | Octy DB (`appraisal_photos` + `appraisal_iris_taxonomy`) |
+||| Collateral Review | `collateral-review` | loanlight-api internal controller (`/api/audit-runs/[id]/collateral-review`) |
+||| Credit | `credit` | loanlight-api results payload (credit block) |
 
 ### Overview section
 
@@ -66,6 +67,20 @@ Octy is the **primary** viewing surface for IRIS — the lender portal Photos ta
 **Market findings.** Rental-data and property findings are sorted worst-first.
 
 The appraisal issue count fed into the Overview rollup is computed by `summarizeAppraisal()` in `src/lib/appraisal-summary.ts`. That function is a **cross-repo contract** (LOA-2113): loanlight-api's `audit_runs.finding_count` appraisal bucket is specified to match `summarizeAppraisal()` exactly. Changing the severity set, the outcome threshold, or the newest-revision rule here breaks the loanlight-api count.
+
+### Collateral Review section (LOA-2580)
+
+The Collateral Review section surfaces the automated AVM → CDA escalation state for the audit run's loan. Data is fetched from `GET /api/audit-runs/[id]/collateral-review` (Octy route handler) which calls the loanlight-api internal controller at `/internal/collateral-review/appraisals/:runId` via `x-internal-api-key` authentication.
+
+The section shows:
+- **Badge** — the decision outcome (`avm_only`, `avm_then_cda`, `below_threshold`, `skipped_*`, `shadow_would_order_avm`, etc.) as a labeled badge with live/shadow mode distinction.
+- **Score and threshold** — the firing collateral score, agency (`fannie_mae` or `freddie_mac`), and the lender's configured threshold.
+- **AVM order state** — status, requested/resolved timestamps.
+- **CDA order state** — order status, the lender's turn-time setting (24 or 48 hours), and an "Open report" link once the CDA document is delivered.
+
+The section is hidden when the loan has no live activity (`active: false`). Shadow-mode rows include an eye-slash badge. Vendor-opinion fields (e.g. `cdaRiskScore`, `cda_review_recommended`) are redacted and never shown.
+
+Octy also exposes a loan-level **paginated decision list** at the Lookup page (`/lookup`) — a separate view that lists all collateral review decisions across a lender, with mode/outcome filters and URL-persisted pagination. The list is fetched from `GET /api/collateral-review/decisions?lenderId=...`. This is a lender-scope view, not tied to a single audit run.
 
 ### Credit section (octy #103)
 

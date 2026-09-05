@@ -265,9 +265,17 @@ Key design decisions:
 
 ### Current deployment state
 
-<Warning>
-The assignment declaration **ships empty** in both `int` and `prod`. Populating it requires the LOA-2260 blast-radius gate (impact budget, per-dimension diff scoring, `refused_budget`) as a precondition. Until that gate lands, the reconciler runs successfully and exits having resolved zero lenders. The mechanism is fully built and tested; going live is a separate gated step tracked as **LOA-2260**.
-</Warning>
+<Note>
+The assignment declaration **ships empty** in both `int` and `prod`. The LOA-2260 blast-radius gate has landed (commit `84c96cc0`, LOA-2181/LOA-2260/LOA-2173), so the precondition for populating it is now met. Populating the assignment declaration is a separate operator step — until it is populated, the reconciler runs successfully and exits having resolved zero lenders. See the blast-radius gate section below.
+</Note>
+
+### Blast-radius gate (LOA-2181 / LOA-2260)
+
+Before each real `applyBundle` call the reconciler runs a dry-run pass and scores the diff against a **declared expected impact**. The gate is fail-closed: if any diff dimension exceeds its declared budget, the apply is refused and the operator sees the violation detail.
+
+The expected-impact declaration lives in `modules/portal-appraisal-rules/staged-bundles/expected-impact.ts`, keyed by `(lenderSlug, bundleId)`. A refusal message now names the two recovery actions: review the dry-run diff and either re-declare the lender's expected impact to match the intended change, or bring the lender's live state back in line with its bundle. ("Baseline capture" was an earlier plan that was not built and is no longer referenced.)
+
+`pnpm diagnose:blast-radius` (or `pnpm diagnose:blast-radius -- --environment prod`) is a read-only diagnostic that runs dry-run applies without committing anything, reporting which lenders would be refused and by how much. It is the recommended first step before populating the assignment declaration.
 
 ### Rule-system export
 
@@ -293,8 +301,9 @@ Each bundle apply captures a versioned snapshot of the lender's rule state and s
 
 ### Datadog monitors
 
-Two monitors ship with the reconciler (`observability/datadog/`):
+Three monitors ship with the reconciler (`observability/datadog/`):
 - `ruleops-reconcile-failed` — fires on `reconcile_incomplete` events.
+- `ruleops-reconcile-startup-failed` — fires when the CDK reconciler task fails to start (separate from a reconcile that starts but does not converge).
 - `ruleops-rule-export-lost` — fires when an S3 export does not land within the expected window.
 
 ## portal-income-rules

@@ -123,30 +123,41 @@ Eligibility (which segments a field *may* use) and recall (which documents the q
 
 ## PII fields and comparison modes
 
-`PiiFieldKeySchema` enumerates the **12 canonical fields**. Each has a `comparisonMode` from `ComparisonMode` (`stringExact | caseInsensitive | digitsOnly | addressNormalized | dateNormalized`), implemented by `normalize/normalize.ts`.
+`PiiFieldKeySchema` enumerates the **13 canonical fields**. Each has a `comparisonMode` from `ComparisonMode` (`stringExact | caseInsensitive | digitsOnly | addressNormalized | dateNormalized`), implemented by `normalize/normalize.ts`.
 
-|| Field | comparisonMode | Notable synonyms |
-||||---|---|---|
-|| FullName | caseInsensitive | Name, BorrowerName, ApplicantName |
-|| DateOfBirth | dateNormalized | DOB, BirthDate |
-|| SocialSecurityNumber | digitsOnly | SSN, SocSecNum |
-|| ITIN | digitsOnly | ITINNumber |
-|| MailingAddress | addressNormalized | Address, HomeAddress, CurrentAddress |
-|| PropertyAddress | addressNormalized | SubjectProperty, PropertyLocation |
-|| MaritalStatus | caseInsensitive | Marital, MarriageStatus |
-|| EmployerName | caseInsensitive | Employer, BusinessName, CompanyName |
-|| EmployerAddress | addressNormalized | WorkAddress, JobAddress |
-|| PurchasePrice | stringExact | SalesContractPrice, PurchaseAmount, ContractPrice |
-|| CitizenshipResidency | caseInsensitive | Citizenship, ResidencyStatus, CitizenshipResidencyType |
-|| VestingEntityName | suffixTolerant | EntityName, LegalEntityName |
+||| Field | comparisonMode | Notable synonyms |
+|||||---|---|---|
+||| FullName | caseInsensitive | Name, BorrowerName, ApplicantName |
+||| DateOfBirth | dateNormalized | DOB, BirthDate |
+||| SocialSecurityNumber | digitsOnly | SSN, SocSecNum |
+||| ITIN | digitsOnly | ITINNumber |
+||| MailingAddress | addressNormalized | Address, HomeAddress, CurrentAddress |
+||| PropertyAddress | addressNormalized | SubjectProperty, PropertyLocation |
+||| MaritalStatus | caseInsensitive | Marital, MarriageStatus |
+||| EmployerName | caseInsensitive | Employer, BusinessName, CompanyName |
+||| EmployerAddress | addressNormalized | WorkAddress, JobAddress |
+||| PurchasePrice | stringExact | SalesContractPrice, PurchaseAmount, ContractPrice |
+||| CitizenshipResidency | caseInsensitive | Citizenship, ResidencyStatus, CitizenshipResidencyType |
+||| VestingEntityName | suffixTolerant | EntityName, LegalEntityName |
+||| EntityTaxIdentifier | digitsOnly | EIN, FederalEIN, EmployerIdentificationNumber |
 
-### VestingEntityName (LOA-2255/LOA-2256)
+### VestingEntityName (LOA-2255/LOA-2256/LOA-2257)
 
 `VestingEntityName` is the 12th field, active only on entity-vested loans. The anchor is the `Borrower`-role `LEGAL_ENTITY/LEGAL_ENTITY_DETAIL/FullName` from the MISMO XML. Two anchor-validity checks gate it: the field must carry a recognized legal-entity suffix (LLC, Corp, Inc, Trust, etc.) **and** the anchor must be corroborated by at least one in-scope document — individual-only loans and personal-name-in-entity-field cases are suppressed before the field is emitted.
 
-Retrieval is scoped to entity and title documents: `entity_vesting`, `articles_of_incorporation`, `trust`, `trust_approval_letter`, `business_license`, `preliminary_title`, `title_commitment`, `deed_of_trust`, `grant_deed`, `warranty_deed`, and `operating_agreement` (migration `0054`). EIN letters carry no classify type and are not yet in scope.
+Retrieval is scoped to entity and title documents: `entity_vesting`, `articles_of_incorporation`, `trust`, `trust_approval_letter`, `business_license`, `preliminary_title`, `title_commitment`, `deed_of_trust`, `grant_deed`, `warranty_deed`, `operating_agreement` (migration `0054`), and IRS EIN assignment letters (`classification_type = 'ein'`, migration `0056`). The retrieval prompt now queries for the EIN letter alongside entity vesting docs.
 
 The comparison is **suffix-tolerant**: typography differences (`PDR LLC` vs `PDR, L.L.C.`) are tolerated; actual suffix presence/absence differences (`PDR` vs `PDR LLC`) and core-name changes produce an `inconsistent` finding. When classify-split ran but never completed (`partial`/`failed`/`skipped`/`undefined`) and nothing corroborates the anchor, the field emits `unverifiable` (medium severity) rather than silently passing — this surfaces the gap without fabricating a false `missing`. Seeded by migrations `0052` (doc-type rules) and `0053` (`unverifiable` issueKind widening).
+
+### EntityTaxIdentifier (LOA-2257)
+
+`EntityTaxIdentifier` is the 13th field, introduced alongside the EIN-letter integration. It compares the entity's federal EIN from the loan file against the EIN printed on the IRS EIN assignment letter (SS-4 confirmation / CP 575). The anchor is the `LEGAL_ENTITY` party's `EmployerIdentificationNumber` taxpayer identifier from the MISMO XML — attributed to the entity, not any responsible-party person — and is present only when the loan file carries an entity tax ID. A loan with no entity tax ID yields no `EntityTaxIdentifier` comparison while the `VestingEntityName` check still runs.
+
+Normalization is **digits-only** (same shape as `SocialSecurityNumber`/`ITIN`). Retrieval is scoped by the `classification_type = 'ein'` doc-type rule seeded in migration `0056`.
+
+<Warning>
+The EIN comparison is **not live on its own**: the classifier only emits a `classification_type` for which a `classify_rules` row exists. Migration `0056` adds the downstream `pii_field_doc_type_rules` keyed on `ein`, but **no `classify_rules` row for `ein`** — that row is operator-managed (same pattern as `operating_agreement` in LOA-2256). Until an operator adds the `ein` classify rule and tunes recall in each environment, an uploaded EIN letter classifies as `unknown` and the EIN comparison is inert end-to-end.
+</Warning>
 
 ## Single-document validation and safety nets
 
@@ -206,7 +217,9 @@ Migration `0248_purchase_price_doc_type_rule` (LOA-1757) widens the `pii_field_d
 
 Migration `0258_citizenship_residency_doc_type_rule` (LOA-1758) widens the `pii_field_doc_type_rules_field_key_check` constraint to include `CitizenshipResidency` and seeds one retrieval-scope row: `split_type = 'IDENTITY'`, `applies_to_loan_purpose = NULL` (loan-purpose-agnostic) — so CitizenshipResidency retrieval is scoped to identity documents on all loan types. The residency class is **inferred from document type and content** (passport issuing country, presence of a current US visa page) — never read as a literal field — so pre-LLM string comparison is skipped entirely (`requiresSemanticAnalysis: true`). The v1 scope is limited to passports and driver's licenses / state IDs; permanent-resident cards and employment authorization documents are not yet reliably retrievable and are excluded from the contradiction surface (the `CitizenshipResidency.validation.ts` decision tree is explicit about this boundary).
 
-The `pii_field_doc_type_rules` scoping matrix has columns `field_key` (CHECK = one of the 11 keys), `applies_to_loan_purpose` (CHECK NULL | PURCHASE | REFINANCE), `match_kind` (CHECK `split_type` | `classification_type`), `match_value`, `is_active`, with a unique index on `(field_key, COALESCE(applies_to_loan_purpose,'__ANY__'), match_kind, match_value)`.
+Migration `0056_vesting_entity_ein_letter_and_entity_tax_identifier` (LOA-2257) widens the `pii_field_doc_type_rules_field_key_check` constraint to include `EntityTaxIdentifier` and seeds two retrieval-scope rows: `VestingEntityName` with `classification_type = 'ein'` (EIN letter added to entity name scope) and `EntityTaxIdentifier` with `classification_type = 'ein'` (new field scoped to the same doc type).
+
+The `pii_field_doc_type_rules` scoping matrix has columns `field_key` (CHECK = one of the 13 keys in `PiiFieldKeySchema`), `applies_to_loan_purpose` (CHECK NULL | PURCHASE | REFINANCE), `match_kind` (CHECK `split_type` | `classification_type`), `match_value`, `is_active`, with a unique index on `(field_key, COALESCE(applies_to_loan_purpose,'__ANY__'), match_kind, match_value)`.
 
 <Info>
 `RetrievalHealthService.logFieldRetrievalHealth` emits a structured `event: "retrieval_health"` log (Datadog) per field with snippet counts, retrieval calls, duration, and `docTypeScoping` metrics. This is log-only, not a DB table. See [observability](/agents/observability).

@@ -170,7 +170,18 @@ The `rental` rule reads no rail — it is purely a payout-platform registry matc
 
 The `wire` rule includes a precision guard: a `wire` token that appears **only** inside an ACH payer name (e.g. a paycheck from `INSTEEL WIRE PRODUCTS`) is not treated as a wire descriptor. The guard reads the `ORIG CO NAME:` field by offset, not by text value, so a payer name that happens to print twice (once truncated in the prefix, once in full in the field) is correctly handled.
 
-**FR-5 rung — sender identity (LOA-1ad3959b).** The `Online Transfer → Account Transfer` rung (FR-5) in `CreditCategorizationV2` now derives the qualifier **identity-first**: sender name, then masked account number, then bare. Previously only the masked account was extracted, so a descriptor printing the sender's name dropped it entirely and a descriptor printing the sender's masked account number implied the borrower's own sweep rather than a third-party inflow. The fix distinguishes the two shapes by their trailing discriminator: an account type is followed by a masked number, a person by their initial.
+**FR-5 rung — sender naming and shape reading.** The `Online Transfer` rung (FR-5) in `CreditCategorizationV2` now derives the sender identity through a bank-agnostic parser (`transfer-sender.ts`) that strips the verb phrase, reference markers, masked account, and account-product phrase, leaving a clean sender string. The outcome depends on the sender shape:
+- **Person-shaped sender** (name followed by an initial-like trailing discriminator): `Account Transfer — <name>`. The Self/Family disposition downstream keys on the name.
+- **Organisation-shaped sender**: `Customer Payment — <name>`.
+- **Only a masked account** (no printed name, e.g. `x0849`): `Account Transfer — x0849` (unchanged). Treating every online transfer as the borrower's own account had previously excluded valid third-party payments.
+
+**R8 (own-account rail) runs above FR-5.** The borrower's own masked account number is an account identifier, never a "sender", so the own-account check fires before FR-5 assigns a sender string — preventing the borrower's own last-4 from being rendered as a person name.
+
+**Positional (label-less) NACHA records** (anchor pattern `<Company> <Entry Descr> <YYMMDD> <Ind ID> <Ind Name>`) are now recognized as ACH credits regardless of bank (`positional-ach.ts`). These records may print the *receiving* account's mask rather than the payer — R4.4a, which handles these rows, is ordered above the own-account check to avoid misclassifying the receiving mask as a source.
+
+**Receiver guard moved to the pipeline.** The old in-resolver `INDN:` check that caught echoed receiver names abstained the whole result and missed Chase's `Ind Name:` field. The guard now runs in `ladder.ts::applyResolverContext` (on every consumed result, including cache hits) and replaces an echoed receiver name with the structurally parsed payer instead of discarding the answer entirely. This fixed 377 production rows that had rendered a payee's own name as its own payer.
+
+**Mechanism registry.** Afterpay, Affirm, Klarna, and Sezzle are BNPL processors — they settle merchant sales, never disburse consumer loans. The resolver's `Loan — <platform>` guess is replaced by a deterministic `Merchant — <platform>` mapping from the mechanism registry.
 
 ### 2. Counterparty ledger (`applyCounterpartyLedger`)
 
