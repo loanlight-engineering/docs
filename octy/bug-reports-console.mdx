@@ -63,7 +63,7 @@ A free-text run name, max 80 characters. If you set it, the agent cannot overwri
 LangSmith CLI access and the LangChain Docs MCP are shown as read-only checked. The Datadog MCP attaches automatically when the Datadog keys are configured (see [Environment variables](/octy/environment-variables)).
 </Step>
 <Step title="Pick a model">
-`ModelPicker` is a cascading provider menu. The default is `claude-4-8-opus-xhigh`. The chosen `modelId` is passed straight through to Warp's `config.model_id`.
+`ModelPicker` is a cascading provider menu. The default is **`claude-5-opus-high`** (Opus 5 · High). The chosen `modelId` is passed straight through to Warp's `config.model_id`. Available options include Opus 5 (Low/Medium/High/Extra high/Max), Fable 5/5.1, GPT-5.6 Sol/Terra/Luna, and GPT-6 Astra variants — all verified against the live `oz model list` on 2026-09-05.
 </Step>
 <Step title="Pick an affected area">
 The **Affected Area** dropdown is populated by `GET /api/v1/audit_runs/:id/bug-reports/agent-options` (LOA-1669). Options are derived per audit run as the union of the run's expected plan (`audit_runs.agent_config`) and the observed `agent_runs` for that audit. Adding a new area is a backend change; the area must be present in `BUG_REPORT_AGENT_TYPES` in `shared-types`.
@@ -129,9 +129,18 @@ Every Octy bug report owns at most one Linear ticket, regardless of how many Oz 
 
 **Retiring in-house labels:** migration `0256` dropped `octy_labels` and `octy_issue_labels`. Labels now live on the Linear ticket and are mirrored in `linear_snapshot`. The previous in-house label assignments were not migrated — Linear provides a fresh taxonomy.
 
+## Ask Octy
+
+The Bug Reports page also exposes **Ask Octy** — an in-app chat panel that lets you describe an issue in natural language and have the agent file reports, look up loans, and attach traces without going through the manual Trigger Octy flow. The panel is opened via the **Ask Octy** button in the top-right area of the Bug Reports page or via the Octy icon in the app navigation.
+
+Ask Octy and the Bug Reports console are complementary: use the chat panel to discover and file, use the console to manage the resulting issue queue and launch deeper Oz investigations. See [Ask Octy](/octy/octy-chat) for the full reference.
+
 ## Related pages
 
 <Columns cols={2}>
+<Card title="Ask Octy" href="/octy/octy-chat" icon="message-circle">
+File reports and look up loans through the in-app chat agent.
+</Card>
 <Card title="Oz run lifecycle" href="/octy/oz-run-lifecycle" icon="workflow">
 What happens after you click Launch.
 </Card>

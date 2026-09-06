@@ -34,6 +34,9 @@ Octy is internal-only. Every protected route requires a WorkOS-authenticated use
 Beyond the Oz loop, Octy gives engineers a set of read-and-configure surfaces over the shared LoanLight database and loanlight-api.
 
 <Columns cols={2}>
+  <Card title="Ask Octy" href="/octy/octy-chat" icon="message-circle">
+    File bug reports and look up loans through the in-app chat agent — no Slack or Oz run required.
+  </Card>
   <Card title="Bug reports console" href="/octy/bug-reports-console" icon="bug">
     Triage the issue queue, delegate runs, pick a skill and model, and review summaries and PRs.
   </Card>
@@ -79,6 +82,7 @@ There is also a Dashboard (issue and run aggregates), **Lookup** (`/lookup` — 
 | loanlight-api | Internal API for classify-split dry-runs, audit results, and the agent-platform graph/entitlements, via shared secret |
 | Integrations service | Internal routing-config admin API for the [routing config](/octy/routing-config) editor, via a separate base URL + shared secret |
 | GitHub | A GitHub App installation backing [GitOps](/octy/gitops) — deploy triggers and the PR dashboard, over an allowlist of repos |
+| Anthropic | `claude-sonnet-5` model for Ask Octy in-app chat (key from Secrets Manager `LLApi/ANTHROPIC_API_KEY`) |
 | Slack | Best-effort relay of [Doc Refreshes](/octy/doc-refreshes) records (bot token), one channel + thread |
 | S3 | Three allowlisted buckets the agent can list and read (fail-closed) |
 

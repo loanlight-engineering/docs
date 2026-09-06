@@ -1,0 +1,139 @@
+---
+title: Ask Octy (in-app chat)
+description: The in-app LangGraph agent that files bug reports and answers questions through a persistent chat panel.
+icon: message-circle
+---
+
+Ask Octy is an in-app LangGraph agent embedded in the Octy UI. You chat with it to file bug reports, look up loans and audits, and get answers about what happened in a run — without leaving the browser or waiting for a Slack reply.
+
+<Note>
+Ask Octy is available in production. Open **Bug Reports → Ask Octy** or click the Octy icon beside the Pets dock on any main app page to start a conversation.
+</Note>
+
+## Where to open it
+
+Two controls open the chat panel — both are 48 px circular buttons sitting above the footer:
+
+- **Bug Reports → Ask Octy** — opens from the bug-reports page.
+- **Octy icon beside the Pets dock** — available on every main app page.
+
+On desktop, **Expand panel** opens a full-page view with a conversation list on the left and the active chat alongside it. Collapsing returns to the compact panel. Drafts, active requests, and open widget choices stay mounted through the layout change.
+
+## Chat interface
+
+Each turn streams Markdown as it arrives. Active tool calls are listed as they run (including parallel calls); completed phases fold away behind a **View work** disclosure. Long user messages expand with **Show more / Show less** rather than a nested scrollbar.
+
+- **Enter** sends; **Shift+Enter** adds a newline.
+- **Stop** cancels an active request. Closing the panel or refreshing does not.
+- **Retry request** re-runs the same task in the same conversation — use this after a dropped connection to avoid duplicate reports.
+- Following a loan, audit, or report link opens it in the same tab; the panel and its draft stay intact.
+
+Loan, audit, and trace references appear as inline chips. An unread completion, error, or question adds a brief animated nudge, an amber badge, and a pop-up that opens the relevant conversation. Reduced-motion preferences are respected.
+
+## Conversation history
+
+Conversations are stored in **localStorage under the authenticated account** — they survive refreshes, closing and reopening the app, and signing back in on the same browser. They do not sync across browsers or devices.
+
+The **Conversations** control (below the panel header, always visible) shows the current chat, opens a searchable history menu, and marks working or unread conversations. Discarding a chat removes its local transcript — never its filed reports. Clearing site data removes chats.
+
+In the expanded full-page view a persistent sidebar lists all conversations. Search, switch, and start conversations from the list; working and unread indicators appear next to each chat.
+
+If localStorage is blocked or full, Octy keeps working in memory and notes that the latest changes may not survive a refresh. An active reply reconnects after reload using its saved request ID.
+
+<Note>
+Reports created through Ask Octy persist normally in the database. Octy can reference reports from the current conversation on follow-up turns; it cannot retrieve another browser's transcript.
+</Note>
+
+## Model
+
+Ask Octy uses **Sonnet 5** (`claude-sonnet-5`) with medium effort and native context compaction. Temperature is omitted to support Sonnet 5's adaptive thinking.
+
+Context compaction triggers at **50,000 input tokens**. A checkpoint (summary + last user-message ID) is streamed to the browser and persisted per conversation; subsequent turns use it. Original messages remain in browser storage and are supplied to source-verification tools; `read_conversation` retrieves them by index when exact quotes or references are needed.
+
+Pending references and committed report receipts are maintained outside model context and reintroduced on every model call, so compaction cannot erase them.
+
+## Filing reports
+
+Octy inventories all affected references (`plan_bug_reports`), then commits one report at a time (`create_bug_report`), working in groups of up to three before investigating the next. The manifest tracks remaining work; the run finishes only when it is fulfilled or explicitly pauses.
+
+Reports are written to `public.octy_issues`. `reporter_id` carries a versioned `octy-agent:v1:<user>:<conversation>` marker. Deterministic primary keys and a PostgreSQL advisory transaction lock prevent concurrent or repeated requests in the same conversation from duplicating reports.
+
+A failed later report does not roll back earlier saves. Partial saves are preserved; retries reconcile them.
+
+**The reporting agent does not launch Oz investigations or modify product rules.** It creates and associates reports only.
+
+### Report limits and safeguards
+
+- Up to 100 reports per request, 430 tool calls, 20-minute execution ceiling.
+- 3-minute deadline per model response. A truncated response is discarded and retried (up to twice) with 16,000 output tokens and a one-report instruction.
+- Interrupted provider streams retry from the last completed step (up to twice).
+- Three consecutive failures of identical tool arguments stop an unproductive loop; failures of independent optional lookups do not consume each other's retry allowance.
+- Requests accept up to 2,000 messages / 1,000,000 source characters.
+
+### Concurrency
+
+Each authenticated user can run up to four separate conversations concurrently per replica, with one active request per conversation. Model state, tool evidence, cancellation, activity streams, and response snapshots belong to that invocation. Recovery and Stop reject another user's request ID.
+
+## Questions and interactive evidence
+
+When Octy needs missing intent, a material ambiguity it cannot resolve, or a choice you explicitly want to make, it asks. Optional missing traces do not block filing.
+
+A question can offer suggested answers with an evidence-backed recommendation preselected. Pick an option and choose **Continue**, use **Let me put it my way** to enter your own answer, or reply in the regular composer. Your answer continues the original task; you do not need to repeat the request. Answered question widgets collapse and are still available to inspect.
+
+Questions end the current graph turn. The next answer starts a new graph invocation that picks up browser-local conversation state — no suspended server process, database checkpoint, or API migration is required.
+
+A pending question and your unsent choices survive refreshes. Old answered widgets cannot resubmit.
+
+## Trace selector widget
+
+When choosing traces needs human judgment, Octy can show the same checkbox selector used by report associations, with its candidates preselected. Change the selection or leave it empty, add context, and continue. Verified audit/trace associations never be invented from unverified references; unverified associations are omitted with an explicit note.
+
+## Linking and navigation
+
+Markdown links, pasted absolute URLs, and bare Octy routes (e.g. `/lookup?loan=12345`) all use the same route registry and render as compact inline chips. Code snippets stay literal. Same-tab navigation keeps the chat panel open with its draft intact.
+
+## Runtime details
+
+**Server-side** Octy retains response snapshots in bounded process memory for up to 24 hours (200 requests / ~32 MB per replica; results may be evicted earlier under pressure). The existing two ECS replicas use a 24-hour ALB affinity cookie. No additional database table or service is required.
+
+**After a server restart or eviction:** the browser keeps the conversation, checks saved reports, and offers an explicit retry. This version does not checkpoint graph execution through a server restart; starting a new chat creates a separate reporting context.
+
+**Storage model:** reports use only existing `public.octy_issues` columns. The association editor validates loan/audit/trace ownership and uses `updated_at` for optimistic concurrency. No schema migration is required for the in-app agent.
+
+## API routes
+
+| Route | Purpose |
+|---|---|
+| `GET /api/octy-agent/capabilities` | Reports whether the agent is enabled and whether history is browser-local |
+| `POST /api/octy-agent/chat` | Starts an idempotent agent request; streams activity and events |
+| `GET /api/octy-agent/chat` | Replays the latest activity/widgets/result for a saved request ID |
+| `DELETE /api/octy-agent/chat` | Explicitly stops an active request |
+| `GET /api/octy-agent/reports` | Lists saved reports from the current conversation (paginated, 20 per page) |
+| `GET/POST /api/bug-reports/context` | Supplies per-audit context for the reporting agent |
+
+All routes require WorkOS authentication. Writes check origin. POST starts an idempotent request; GET replays and streams new events; DELETE stops it.
+
+LangSmith traces record diagnostic inputs and outputs (conversation messages, tool arguments/results, and public replies), with credentials, SSNs, and private provider reasoning redacted. The project is **Octy** — no additional environment variables are needed for tracing.
+
+## Local development
+
+See the `octy-agent.md` internal developer guide (in `octy/docs/`) for local setup instructions, including the `USE_LOCAL_AUTH` bypass, required environment variables (`OCTY_AGENT_ANTHROPIC_API_KEY`, `OCTY_AGENT_MODEL`, `OCTY_AGENT_LANGSMITH_PROJECT`), and the `pnpm agent:dev` start command.
+
+The feature is enabled by the `OCTY_AGENT_ENABLED` environment variable (`true` in production). CDK injects `OCTY_AGENT_ANTHROPIC_API_KEY` from `LLApi/ANTHROPIC_API_KEY` in Secrets Manager — the same existing key used by the LoanLight API. No new secret is created.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Bug Reports console" href="/octy/bug-reports-console" icon="bug">
+The operator surface for Oz investigations — a companion to Ask Octy's report-filing flow.
+</Card>
+<Card title="Oz run lifecycle" href="/octy/oz-run-lifecycle" icon="workflow">
+How Oz autonomous investigations work after a report is filed.
+</Card>
+<Card title="Issues, runs, labels API" href="/octy/issues-runs-labels-api" icon="code">
+The underlying `octy_issues` endpoints Ask Octy writes to.
+</Card>
+<Card title="Doc Refreshes" href="/octy/doc-refreshes" icon="book-open-check">
+The nightly documentation refresh ledger.
+</Card>
+</Columns>

@@ -70,7 +70,11 @@ sequence-sync.spec.ts`) keeps them aligned.
 <Accordion title="aggregate (terminal)">
 Assembles the `AggregateWritePlan` — per-table write-batches for `borrower_files`, `bank_statements`, `transactions`, `income_filters`, and `findings` — and returns it. The node itself performs **no DB write** (IC-3/D9). Two additional detectors run inline inside aggregate's glue wrapper (NOT registered StateGraph nodes, so the topology stays at 9 nodes): `detectBalanceFindingsNode` (NSF + negative-balance at extraction time) and `detectContinuityFindingsNode` (balance-continuity fraud). Their outputs thread into `AggregateInput` directly.
 
-A third inline pass, `detectReciprocalCounterparties` (LOA-2314), also runs inside aggregate. It scans credits and debits for counterparties with roughly-equal bidirectional flow ("wash" transfers). Each such counterparty produces one borrower-level `reciprocal_counterparty` finding (severity `info`, `statement_id = null`) and is written to the `findings` table via the write plan. The `FINDING_TYPE_SET` and `VALID_FINDING_TYPES` allowlists are kept in sync by a drift spec (`reciprocal-counterparty-finding-type.spec.ts`).
+A third inline pass, `detectReciprocalCounterparties` (LOA-2314), also runs inside aggregate and persists `reciprocal_counterparty` findings (severity `info`, `statement_id = null`) via the write plan. The `FINDING_TYPE_SET` and `VALID_FINDING_TYPES` allowlists are kept in sync by a drift spec.
+
+<Note>
+`reciprocal_counterparty` is currently **switched off**: the detector still runs and still persists findings, but the finding type has been removed from the portal Issues Found allowlist and the export Risk Summary catalog (#4030). It surfaces in the AI summary narration and the income editor (which bypass the allowlists) but nowhere else. Restoring both allowlist entries turns it back on.
+</Note>
 
 `collectLegs` applies two gates before any name enters the candidate set (#3905):
 - **Non-person marker gate** — names containing institution/entity/transfer vocabulary (`bank`, `credit union`, `chk`, `sav`, `confirmation`, `transfer`, `llc`, `inc`, `corp`, etc.) are dropped immediately. A related party is a person; an institution or boilerplate name cannot be one.
@@ -106,6 +110,14 @@ Two additional Datadog monitors cover extraction retries and budget exhaustion (
 
 `detectNsfFinding` now describes the finding by the **total transaction count**: `"N NSF/overdraft transactions detected"` (singular when `N === 1`). Earlier versions embedded a sample of occurrence dates in the description; those dates moved exclusively to `evidence.sample_transactions`. Every surface that renders an `nsf_overdraft` finding derives the display sentence from `evidence` via `nsfDescriptionFromEvidence` — `distinct_days` is read first (see below); `count` is the fallback. Persisted rows written before LOA-2313 retain their stored description; only the append-recompute path rewrites one.
 
+### View Transactions link (#4030)
+
+`nsf_overdraft` and `large_deposit` rows now carry a **View Transactions** link in the Issues Found panel. Clicking it applies the matching transactions filter and scrolls to it. Both filters already existed in `INCOME_STATUS_OPTIONS`; the link is a pointer, not a separate definition of which transactions match. The link renders once per finding group, never per member row.
+
+<Note>
+A "View Transactions" link on a `large_deposit` row can land on an empty table if the finding was written before `evidence.transaction_id` existed on that row. The link renders on finding type alone; no per-finding reachability check exists yet.
+</Note>
+
 ### Same-day occurrence collapsing per lender (LOA-2315)
 
 A per-lender `nsf_same_day_occurrence` feature flag controls whether multiple NSF fees on the same calendar day are counted as **one occurrence**. When enabled:
@@ -127,6 +139,26 @@ The port restores several extraction-time finding categories that the legacy har
 - **Balance continuity fraud** (`detectContinuityFindingsNode`): reuses `FraudDetectionService.checkContinuity`. Its input is sourced from raw `ParsedStatement` balances (pre-`?? 0` coercion) via the `deps.continuityStatements` closure, so the legacy unparseable-balance warning remains reachable.
 - **Income-basis veto** (P2 + F2): credits flagged `incomeExcludedReason ∈ {refund, self_transfer, family_transfer, account_transfer}` drop from the income basis even when `deposit_classification === "income_deposit"`, mirroring `bank-statement.processor.ts` post-#2860.
 
+### Finding rule changes (#4030)
+
+**Balance Rollover message rewritten.** `fraud_continuity` findings now display the account and both balances:
+
+> Balance mismatch between statements ending in 2345: Dec 2025 (ending balance: $1,000.00) → Jan 2026 (starting balance: $800.00) — $200.00 difference.
+
+The sentence is **derived from evidence on read**, not from the persisted `description` column, so existing findings read the new message immediately without a reprocess. `continuity-description.ts` (API) and `continuity-summary.ts` (app) are a sanctioned cross-package mirror pair, kept in sync by `continuity-summary-sync.spec.ts`.
+
+**`validation_balance_mismatch` renamed to "Statement Transactions Mismatch".** The finding type key is unchanged; the display label and message are new:
+
+> Statement transactions do not reconcile for the statement ending in 2345: Jan 1 – Jan 31, 2026 (starting balance: $1,000.00) + 4 transactions (+$500.00) = $1,500.00 expected, but the ending balance is $2,000.00 — $500.00 difference.
+
+The message names the **statement period** (not a month label), which is correct at extraction time before `sequenceStatementMonths` has run. Like the rollover message, it is derived on read (`balance-mismatch-description.ts` / `balance-mismatch-summary.ts`).
+
+**`negative_balance` added to the export Risk Summary catalog.** `negative_balance` findings have been produced since LOA-1688 and rendered in the portal, but had no export catalog entry. Files with negative-balance days now include them in the partner Risk Summary.
+
+**`fraud_pdf_integrity` severity changed to critical.** Embedded JavaScript and overlay-capable annotations are active tamper mechanisms; the finding was already `critical` at the signal level but the finding boundary had flattened it to warning. Font-consistency (`fraud_font_consistency`) remains a warning.
+
+**Three producerless export checks removed.** `income_classification`, `llm_source_mismatch`, and `validation_duplicate` were present in the export risk catalog but no code writes those finding types, so they produced a permanent misleading PASS on every file. They are removed from the catalog. The four types remain in `VALID_FINDING_TYPES` and the DB `CHECK` constraint (an `ALTER TYPE` to tighten them requires verifying no legacy rows exist in production). They are now named exemptions in the catalog guard.
+
 **Voided checks and `refund` display identity (LOA-2686):** A voided check is detected by the VOID token **together with check context** (either order, bounded window), e.g. `Void Official Check#` / `Voided Ck #`. When matched, the credit is stamped `income_excluded_reason = "refund"` — re-using the existing `refund` disposition rather than adding a new reason code. `refund` is now also a **reviewer-selectable dropdown entry** and has a visible display identity alongside `SELF_FAMILY_TRANSFER` and `ACCOUNT_TRANSFER`. Selecting "Refund" stamps `income_excluded_reason` directly (not a category override), matching the LOA-2543 disposition-stamp pattern. The v2 categorization pipeline picks up the same VOID/Voided detection via `REFUND_SHAPE_PATTERN`.
 
 **Account selection — which accounts feed income (LOA-2657):** When an upload contains multiple accounts, the graph determines which accounts contribute to qualifying income before aggregating. The decision is topology-first, materiality-second:
@@ -137,7 +169,12 @@ The port restores several extraction-time finding categories that the legacy har
 
 **P2P sender names without "from" (LOA-2683):** `extractP2pSenderName` previously anchored on `/\bfrom\b/` only, so banks that print the sender directly after the rail (`ZELLE <NAME> <phone>`) produced no sender name and the family/self exclusion never fired. A rail-anchored parse (Zelle, Venmo, Cash App, PayPal, Popmoney, QuickPay) is now applied alongside the existing `from` parse, with a newline-tolerant anchor and middle-name reconstruction. The new parse is gated to `direction === "inbound"` — the outbound and `descriptionFirst` expense paths are unchanged.
 
-**Balance-rollover continuity keyed on account (LOA-2690):** `detectContinuityFindingsNode` previously keyed continuity on the masked account number alone. A credit union printing multiple sub-accounts under one member number (same last-four) caused all sub-accounts to be interleaved into one sequence and produced false-positive `fraud_continuity` findings on every month boundary. The account key is now derived from the statement itself via `accountKeyOf(statement)`: canonical last four + normalized institution name + printed account heading (case/whitespace-folded). Two unrelated sub-accounts sharing a last-four get distinct keys; two renderings of the same account (`****6177` vs `XXXX6177`) get the same key.
+**Balance-rollover continuity keyed on account (#4030, supersedes LOA-2690):** `detectContinuityFindingsNode` previously keyed continuity on the printed mask alone, which caused false-positive `fraud_continuity` criticals whenever one mask covered two accounts (e.g. a credit union issuing a business checking and a primary share account under the same member number). The account key is now built on two components:
+
+1. **Shared account identity** (`accountIdentityBucketKeyOf` from `statement-month-sequence.ts`): canonical last four, composing `bank|suffix` only where the same suffix is observed across multiple institutions. Two unrelated sub-accounts with the same last-four get distinct keys; two renderings of the same account (`****6177` / `XXXX6177`) get the same key.
+2. **Printed account heading** — appended to the key **only where one identity carries two or more distinct headings**. This scoping is load-bearing: `account_name` is LLM-extracted and nullable. Appending it unconditionally would give a statement whose heading failed to extract its own singleton bucket, causing the check to return `insufficientData` and silently go dark. The same key is handed to `sequenceStatementMonths` so the month labels the findings print agree with the account grouping.
+
+A companion guard, `monthsAreConsecutive`, was added to `checkContinuity` to prevent pairing two statements of the same calendar month (which can occur once an interposed statement from another sub-account is correctly moved to its own bucket). The `account-sequence.ts` module introduced in LOA-2690 was deleted; `continuityAccountKeyOf` in `detectContinuityFindings/node.ts` replaces it.
 
 ### Portal upload defaults
 
@@ -261,17 +298,27 @@ The registry holds 30 named profiles plus the **"Other"** sentinel. Each profile
 
 **Business-type narrative.** `buildProfileNarrative` supplies the detail view's `business_type_narrative` field and the advisory expense band shown in the portal's bank-statement income detail.
 
-## Credit categorization v2 (LOA-2543, LOA-2659)
+## Credit categorization v2 (LOA-2543, LOA-2659, LOA-2696)
 
-A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categorization/pipeline.ts`) runs as a **second, parallel categorization pass** after the primary Plaid PFC enrichment. It is wired behind the `ENABLE_CREDIT_CATEGORIZATION_V2` environment variable (strict `=== "true"`; CDK sets INT to `"true"`, prod to `"false"`).
+A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categorization/pipeline.ts`) runs as a **second categorization pass** after the primary Plaid PFC enrichment. It is wired behind the `ENABLE_CREDIT_CATEGORIZATION_V2` environment variable (strict `=== "true"`; CDK sets INT to `"true"`, prod to `"false"`).
 
-When the flag is enabled, `CreditCategorizationV2Service.categorizeAndPersist(borrowerFileId)` is called from `bank-statement.processor.ts::writeResults` **after** the write transaction commits. It runs outside the transaction deliberately — the service makes sequential vendor calls (the OpenAI resolver) and holding a DB connection across them would pin it for minutes.
+`CreditCategorizationV2Service.categorizeAndPersist(borrowerFileId)` is called from `bank-statement.processor.ts::writeResults` **after** the write transaction commits. It runs outside the transaction deliberately — the service makes sequential vendor calls (the OpenAI resolver) and holding a DB connection across them would pin it for minutes. DI failure of `CreditCategorizationV2Service` is now loud at boot (the `@Optional()` decorator was removed in LOA-2696).
 
-**What it writes:** per-transaction `transactions.credit_category` columns — the v2 answer — plus `transactions.credit_category_source` (CHECK `structural | resolver | fallback | NULL`, migration `0045`) which records how the v2 answer was derived. It does **not** change `effective_category`, `is_income`, or any income surface. The v2 columns fill in while dark and the flag flip is a switch, not a reprocess.
+**What it writes:** per-transaction `transactions.credit_category` columns plus `transactions.credit_category_source` (CHECK `structural | resolver | fallback | NULL`, migration `0045`) which records how the v2 answer was derived.
 
-**Institution coverage (LOA-2659):** `mapInstitution` previously admitted only three named banks and returned `null` for all others, silently skipping their statements. It now returns a `generic` layout for every unrecognized institution. To prevent cross-bank hash collisions, `RawStatementLine.namespace` is now the hash namespace (previously `institution` served both roles), falling back to `institution` for the three already-recognized banks. Two new rail rungs were also added: `Ext Deposit` (`ACH_SHAPE_PATTERNS`) and a bare `deposit` token (R4.10 — a new last rung that can only convert a `null` and never overrides R4.1–R4.9).
+**How v2 is served (LOA-2696):** `creditCategoryVocabulary()` (`lib/bank-statement/credit-category-vocabulary.ts`) is the **single flag reader** — all read paths delegate to it rather than reading the env var directly. When the flag is on, `servedCategory()` returns from `v2CreditCategoryVocabulary`; when off, from `v1CreditCategoryVocabulary`. The v2 vocabulary serves answers in three tiers:
 
-**Portal surface:** super-admins see a **"Category (v2)"** column in the portal transaction table (gated by `isSuperAdmin` — not visible in the column picker for other roles). The column shows the raw v2 label alongside the v1 (Plaid PFC) answer for comparison. It is read-only and intentionally not sortable.
+1. **Override** — a human-authored reviewer correction wins unconditionally.
+2. **Structural / resolver** — when `credit_category_source` is `structural` or `resolver`, the v2 `credit_category` is returned directly.
+3. **Fallback tier** — when `credit_category_source` is `fallback`, a v1→v2 translation (`v1-to-v2-translation.ts`) maps the legacy v1 category to the nearest v2 equivalent; the original v1 answer is the backstop if no translation exists.
+
+Rows with no v2 answer (`credit_category_source IS NULL`) fall back to the v1 Plaid PFC answer, so flag-on does not break rows that pre-date the v2 pass.
+
+**Income surfaces under flag-on:** `effective_category`, income eligibility (`baselineIncome`), filter values, and qualifying-deposit grouping all use the vocabulary, so v2 categories affect what counts as income without a reprocess. The `filter-income-transactions.ts` baseline reads `isV2Category()` to select the correct eligibility matrix.
+
+**Institution coverage (LOA-2659):** `mapInstitution` previously admitted only three named banks and returned `null` for all others, silently skipping their statements. It now returns a `generic` layout for every unrecognized institution. To prevent cross-bank hash collisions, `RawStatementLine.namespace` is now the hash namespace, falling back to `institution` for the three already-recognized banks. Two rail rungs were also added: `Ext Deposit` (`ACH_SHAPE_PATTERNS`) and a bare `deposit` token (R4.10 — last rung, converts only a `null`).
+
+**Portal surface:** the separate `credit-category-select-filter` dropdown (which was v2-only and gated to super-admins) was removed in LOA-2696. Category filtering now uses the single shared vocabulary and `category-select.tsx`.
 
 ## Dispatch and entitlement
 

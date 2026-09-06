@@ -265,6 +265,7 @@
           {
             "group": "Octy application",
             "pages": [
+              "octy/octy-chat",
               "octy/alerts",
               "octy/bug-reports-console",
               "octy/findings-explorer",
