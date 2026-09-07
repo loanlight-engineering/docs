@@ -265,11 +265,15 @@ Two citation shapes exist:
 - **Short-circuit rules (CRED_004, CRED_005)** — the first matched tradeline is named. The message
   reads as a representative example (`"including…"`) rather than an exhaustive list, because
   these rules stop at the first hit and may not accumulate every offending account.
-- **Accumulating rules (CRED_006, CRED_015, CRED_017, CRED_021, CRED_026)** — the full offending
+- **Accumulating rules (CRED_015, CRED_017, CRED_021, CRED_026)** — the full offending
   set is already held by the rule (these rules filter rather than short-circuit), so up to
   `MAX_CITED_ACCOUNTS` (3) accounts are cited, sorted by amount descending. Overflow is expressed
   as `+N more`. Rules that cite by dollar amount also sort entries deterministically to avoid
   diff churn across re-evaluations.
+
+**CRED_006 (Active Delinquency)** was simplified in #4038: the finding no longer names individual
+past-due accounts. The message reports the count and total owed — for example,
+`"2 tradeline(s) currently past due totaling $3250.00."` — without account citations.
 
 The AI summary generator (`generateCreditSummary`) strips account citations before sending text to
 OpenAI, preserving the egress control: tradeline identity never leaves the LoanLight boundary.

@@ -30,6 +30,54 @@ Each turn streams Markdown as it arrives. Active tool calls are listed as they r
 
 Loan, audit, and trace references appear as inline chips. An unread completion, error, or question adds a brief animated nudge, an amber badge, and a pop-up that opens the relevant conversation. Reduced-motion preferences are respected.
 
+## Page context
+
+When the current URL identifies a specific audit run, loan, or lender, a **Current page** indicator
+appears above the composer showing a short label — for example, `Audit a1b2c3d4` or
+`Loan 2024-001234` — that links to that record.
+
+Context is extracted from the URL only. Octy cannot see the page's visible documents, findings,
+or screenshots. Describe the symptom in your message.
+
+Three URL patterns populate the indicator:
+
+| Pattern | Captured |
+|---|---|
+| `/audit-runs?audit=<UUID>` | Audit run ID |
+| `/lookup?q=<ref>&lenderId=<UUID>` | Loan reference; optional lender ID |
+| `/lenders/<UUID>` | Lender ID |
+
+Octy treats the page snapshot as an **unverified hint**, not a trusted record. It re-fetches
+the referenced IDs with tools (`get_audit_run`, `lookup_loan`, `lookup_lender`) before
+associating anything. Verified findings and explicit corrections take precedence over the hint.
+
+To exclude the current page from the next message, click **×** beside the indicator. Click
+**Include current page context** to restore it. The toggle resets whenever the URL changes.
+
+Each sent message that carried a page snapshot shows a **Viewed** reference below it in the
+conversation history, linking to the record it was sent from.
+
+### Proactive discovery
+
+When a message includes a page hint, Octy starts from the most specific known anchor and follows
+verified relationships in either direction — without making you supply the whole hierarchy:
+
+- An **audit run ID** lets Octy fetch the audit, its loan, and its lender. You do not need to
+  name the lender or paste the loan number.
+- A **loan reference or ID** resolves the lender when you supply a name; an unlabelled UUID is
+  classified against loan, Encompass, audit, and lender IDs in one call.
+- A **lender ID alone** resolves the lender identity, then Octy asks for the missing loan or
+  incident context.
+
+A loanless audit stays loanless — Octy never invents a parent loan. If several records match a
+name, Octy offers real candidates with their IDs instead of picking the first.
+
+### Audit deep links
+
+Opening `/audit-runs?audit=<UUID>` shows the selected audit run even when it does not appear in
+the currently loaded table (for example, it was filtered out). The detail panel fetches the run
+directly by ID via `GET /api/audit-runs?id=<uuid>` so the loaded table state does not matter.
+
 ## Conversation history
 
 Conversations are stored in **localStorage under the authenticated account** — they survive refreshes, closing and reopening the app, and signing back in on the same browser. They do not sync across browsers or devices.
