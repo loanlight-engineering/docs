@@ -245,6 +245,7 @@ Committed monitor files in `packages/api/observability/datadog/`:
 | `appraisal-ssr-dual-label-dropped.monitor.json` | An SSR document carries both `fnma_ssr` and `fhlmc_ssr` labels and was dropped from routing rather than double-attached (LOA-2460) |
 | `appraisal-ssr-extraction-failed.monitor.json` | SSR extraction reached a terminal failure after retry exhaustion (LOA-2460) |
 | `appraisal-ssr-routing-fault.monitor.json` | SSR routing fault during the Encompass-sourced SSR dispatch path (LOA-2460) |
+| `ruleops-export-gap-recovery-broken.monitor.json` | RuleOps export-gap safety check faulted — repair hit an unclassified fault (`ruleops_export_repair_failed`) or deploy reconcile could not verify persisted export history (`rule_system_export_gap_detection_failed`) |
 | `ruleops-reconcile-failed.monitor.json` | RuleOps reconcile run failed to complete |
 | `ruleops-rule-export-lost.monitor.json` | RuleOps rule-system export lost |
 | `waf-blocked-requests-int.monitor.json` | WAF block-rate elevated in the INT account (LOA-2244) |

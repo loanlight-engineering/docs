@@ -360,9 +360,11 @@ Key columns:
 - `kind` — `'scene' | 'element' | 'condition'` (CHECK constraint)
 - `code` — unique within a kind (ON CONFLICT target for idempotent seed INSERTs)
 - `description` — model-facing text rendered verbatim into the IRIS system prompt
-- `flaggable` / `default_severity` — whether the taxonomy entry surfaces as a finding and at what severity (`info | low | medium | high | critical`)
-- `applicable_scenes` — used post-detection for the out-of-scene anomaly scan, **not** a detection filter
-- `out_of_scene_severity` — severity for an out-of-scene finding when applicable
+- `default_severity` / `applicable_scenes` / `out_of_scene_severity` — **one setting** decoded by `langgraph/agents/iris/flag-resolution.ts` (LOA-2638): which sightings, if any, raise a finding and at what severity. `default_severity` is the severity inside `applicable_scenes` (everywhere when there is no scene list; `NULL` = silent inside). `applicable_scenes` lists scenes where this item is **normal**. `out_of_scene_severity` is the severity outside those scenes (`NULL` = silent outside; dead config when there is no list). The former `flaggable` boolean — a second copy of `default_severity IS NOT NULL` — was dropped in migration `0059`.
+
+<Note>
+Before LOA-2638, operators controlled flagging via two separate cards ("Flagging" and "Expected scenes") whose settings could contradict each other. LOA-2638 merged these into a single **"Where it raises a finding"** selector with three modes — everywhere (any sighting is a finding), only outside specified scenes, or never (inventory only). The editor (`FlaggingCard` in Octy's Taxonomy tab) writes the same three columns the run reads, so the summary sentence is an exact preview of runtime behaviour.
+</Note>
 
 **Fact-group columns** (migration `0308`, LOA-1901): fact groups are now taxonomy config, not hardcoded logic. Every distinct `fact_tags` tag across active element/condition rows defines a fact group at read time.
 
@@ -436,7 +438,7 @@ The portal **Photos** tab is gated to `super_admin` only via `canSeeIrisPhotos` 
 
 Octy also provides a dedicated `/appraisals-iris` admin page with five tabs:
 - **Appraisal Runs** — a paginated table of all IRIS-analyzed appraisal runs across lenders, with faceted filters and prev/next row navigation in the detail panel.
-- **IRIS Taxonomy** — browse and inspect the seeded taxonomy rows, including fact-group, photo-band, and `places` columns.
+- **IRIS Taxonomy** — browse and edit the seeded taxonomy rows. LOA-2638 replaced the separate "Flagging" and "Expected scenes" cards with one **"Where it raises a finding"** card (`FlaggingCard`) offering three modes: everywhere, only outside specified scenes, or never. The card writes the three flag-zone columns (`default_severity`, `applicable_scenes`, `out_of_scene_severity`) that the runtime reads. Other columns available to edit include fact-group, photo-band, and `places`.
 - **Relevance Rules** — view, author, and measure `appraisal_iris_relevance_rules` rows. Four rule archetypes are available (different property, no single home in frame, wrong place, and custom/catch-all). Each rule's conditions can be measured against real historical runs before saving: the preview panel shows how many observations would have been suppressed per run, and a diff view identifies which photo findings would disappear. See [Relevance gate](#relevance-gate-appraisal_iris_relevance_rules-loa-23422344-2346) below.
 - **How It Works** — an explanatory schematic of the IRIS perception and scoring pipeline, built from static content in `tabs/how-it-works/content.ts`.
 - **Dry Run** — internal multi-model compare harness; send a source PDF through multiple vision models side by side (`POST /api/appraisals-iris/dry-run`, SSE endpoint). The dry-run tab now starts all selected documents in parallel and shows each target's stored result alongside the live run result.
@@ -746,7 +748,7 @@ the `appraisalIris` entitlement runs).
 </ResponseField>
 
 <ResponseField name="appraisal_iris_taxonomy" type="table">
-The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (no `lender_id`), drift-guarded by two specs. Migrations `0308`/`0309` (LOA-1901) added fact-group columns (`fact_tags`, `fact_min_strength`, `fact_scenes`, `instance_flag_over`, `instance_flag_severity`) and the report-band column (`photo_group` on scene rows). Migration `0336` (LOA-2342/2344/2346) added `places` (jsonb, nullable) — the set of spatial locations where this element or condition is worth counting. See [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
+The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (no `lender_id`), drift-guarded by two specs. Migrations `0308`/`0309` (LOA-1901) added fact-group columns (`fact_tags`, `fact_min_strength`, `fact_scenes`, `instance_flag_over`, `instance_flag_severity`) and the report-band column (`photo_group` on scene rows). Migration `0336` (LOA-2342/2344/2346) added `places` (jsonb, nullable) — the set of spatial locations where this element or condition is worth counting. Migration `0059` (LOA-2638) replaced the `flaggable` boolean with the three-column flag-zones model (`default_severity`, `applicable_scenes`, `out_of_scene_severity`) and dropped the now-redundant `flaggable` column; see [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
 </ResponseField>
 
 <ResponseField name="appraisal_photos" type="table">

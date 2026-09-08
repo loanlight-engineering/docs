@@ -33,8 +33,28 @@ Filters are URL-driven, so a filtered view is shareable:
 The default page size is 20 (options 10/20/50/100). The `StatusChangerBadge` lets you change an issue's `intake_status` inline; it PATCHes `/api/octy-issues/[id]`.
 
 <Info>
-Issues are created from three surfaces: the loanlight-api portal, Octy's own Lookup BugReportPanel (both supply an `audit_run_id`), and the **New Report** button on the Bug Reports page itself (ad-hoc, no `audit_run_id`). See [Issues, runs, labels API](/octy/issues-runs-labels-api) for the intake contract.
+Issues are created from four surfaces: the loanlight-api portal, Octy's own Lookup BugReportPanel (both supply an `audit_run_id`), the **New Report** button on the Bug Reports page itself (ad-hoc, no `audit_run_id`), and **spot-check annotations** directly from the audit-run modal or IRIS analysis panel (see below). See [Issues, runs, labels API](/octy/issues-runs-labels-api) for the intake contract.
 </Info>
+
+## Spot-check annotations
+
+Reviewers can annotate findings directly inside the audit-run modal or IRIS analysis panel and file them as bug reports in bulk without leaving the page.
+
+**How it works:** turn on **Annotate** mode via the toolbar that appears in annotatable sections. Click any finding, field, or photo detail to attach a text note. When your notes are ready, **Create N bug reports** groups them by audit + agent context and submits them in one request. Normal page interactions (navigating sections, opening photos) keep working while notes are being added.
+
+**Filing rule:** one report is created per unique combination of audit run, loan, lender, appraisal revision, and affected agent set. All notes in that group become numbered observations, preserving the reviewer’s exact text, captured field values, finding/field IDs, timestamps, and visible excerpt. Notes that span a shared section across multiple agents stay in one named group so none are duplicated. Separate audit runs and appraisal revisions stay separate even for the same agent.
+
+IRIS photo annotations identify the agent as **IRIS photo analysis** and capture the actual appraisal revision and photo IDs — not the generic `appraisalEvaluation` agent type.
+
+**Components:** `SpotCheckProvider` (app boundary, independent of `OctyAgentProvider`), `SpotCheckSurface` (record identity), `SpotCheckScope` (curated context per agent area), `SpotCheckRegion` (navigation ancestry for count badges), `SpotCheckTarget` (captures one meaningful detail). All components live in `src/components/common/spot-check/`.
+
+**Draft lifecycle:** notes are saved in `sessionStorage` scoped to the account/origin/tab and survive navigation and reload. Text autosaves while typing. An unfiled-note badge appears globally. Closing an audit or changing the expanded appraisal row prompts to review or keep the draft. Browser exit warns while notes remain unfiled. Storage failures retain in-memory notes and offer JSON export.
+
+**Submission:** `POST /api/bug-reports` accepts an optional `spot_check: SpotCheckPackage` payload alongside the existing manual-report contract. The server derives groups, validates package bounds and non-blank notes, checks audit/loan/lender associations, and inserts all reports in one Postgres transaction with a deterministic advisory lock to protect against duplicate submits after a lost response. Successful receipts replace the unfiled state with report links.
+
+<Note>
+No LoanLight API endpoint, migration, schema column, or permission is added by this feature. Persistence uses the existing `octy_issues` columns. If the connected API does not expose the appraisal revision table/column, only that filing operation returns `503` and retains the notes; other pages and non-appraisal reports remain usable.
+</Note>
 
 ## Creating an ad-hoc report
 

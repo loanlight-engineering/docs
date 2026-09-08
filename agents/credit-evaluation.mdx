@@ -187,43 +187,57 @@ and unsecured balances), `delinquencies`, `utilization`, `counts`, `score`
 `EmploymentSchema` drive rule CRED_016.
 ## Credit rules
 
-The 26 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
-(`rule-registry.ts`, looked up by `getCreditRuleByCode`) across 11 categories:
+The 30 rules live in `lib/credit-pipeline/rules`, registered in `CREDIT_RULE_REGISTRY`
+(`rule-registry.ts`, looked up by `getCreditRuleByCode`) across 12 categories:
 
-|| Code | Name | Category |
-|||---|---|---|
-|| CRED_001 | Address Consistency | Consistency |
-|| CRED_002 | Name Consistency | Consistency |
-|| CRED_003 | SSN Consistency | Consistency |
-|| CRED_029 | Credit Report Date Consistency | Consistency |
-|| CRED_030 | Credit Reference Number Consistency | Consistency |
-|| CRED_004 | Late Payments (12mo) | Payment History |
-|| CRED_005 | Late Payments (24mo) | Payment History |
-|| CRED_006 | Active Delinquency | Payment History |
-|| CRED_017 | Housing Payment History | Payment History |
-|| CRED_007 | Bankruptcy | Public Records |
-|| CRED_008 | Foreclosure / Short Sale | Public Records |
-|| CRED_009 | Tax Lien / Judgment | Public Records |
-|| CRED_018 | Credit-event Seasoning | Public Records |
-|| CRED_024 | Credit-event Seasoning LTV Cap | Public Records |
-|| CRED_010 | Disputed Accounts | Disputed Accounts |
-|| CRED_023 | Active Disputes | Disputed Accounts |
-|| CRED_011 | Recent Inquiries | Credit Inquiries |
-|| CRED_012 | Credit Score Minimum | Credit Scores |
-|| CRED_013 | Score Discrepancy | Credit Scores |
-|| CRED_020 | All-Borrower Min FICO | Credit Scores |
-|| CRED_014 | DTI Ratio | DTI & Liabilities |
-|| CRED_016 | Work Number Income Qualify Addendum Present | DTI & Liabilities |
-|| CRED_015 | Collection Accounts | Collections |
-|| CRED_021 | Aggregate Collections + Charge-Offs | Collections |
-|| CRED_019 | Minimum Tradelines | Tradelines |
-|| CRED_022 | First-Time Homebuyer Program Eligibility | Program Eligibility |
+||| Code | Name | Category |
+||||---|---|---|
+||| CRED_001 | Address Consistency | Consistency |
+||| CRED_002 | Name Consistency | Consistency |
+||| CRED_003 | SSN Consistency | Consistency |
+||| CRED_029 | Credit Report Date Consistency | Consistency |
+||| CRED_030 | Credit Reference Number Consistency | Consistency |
+||| CRED_004 | Late Payments (12mo) | Payment History |
+||| CRED_005 | Late Payments (24mo) | Payment History |
+||| CRED_006 | Active Delinquency | Payment History |
+||| CRED_017 | Housing Payment History | Payment History |
+||| CRED_007 | Bankruptcy | Public Records |
+||| CRED_008 | Foreclosure / Short Sale | Public Records |
+||| CRED_009 | Tax Lien / Judgment | Public Records |
+||| CRED_018 | Credit-event Seasoning | Public Records |
+||| CRED_024 | Credit-event Seasoning LTV Cap | Public Records |
+||| CRED_028 | Public-Record FAIL-Default | Public Records |
+||| CRED_023 | Active Disputes | Disputed Accounts |
+||| CRED_011 | Recent Inquiries | Credit Inquiries |
+||| CRED_012 | Credit Score Minimum | Credit Scores |
+||| CRED_013 | Score Discrepancy | Credit Scores |
+||| CRED_020 | All-Borrower Min FICO | Credit Scores |
+||| CRED_031 | Minimum Usable Score Count | Credit Scores |
+||| CRED_014 | DTI Ratio | DTI & Liabilities |
+||| CRED_016 | Work Number Income Qualify Addendum Present | DTI & Liabilities |
+||| CRED_025 | Max DTI + Residual Income | DTI & Liabilities |
+||| CRED_015 | Collection Accounts | Collections |
+||| CRED_021 | Aggregate Collections + Charge-Offs | Collections |
+||| CRED_026 | Aggregate Collections Cap (Medical/Window Carve-out) | Collections |
+||| CRED_019 | Minimum Tradelines | Tradelines |
+||| CRED_022 | First-Time Homebuyer Program Eligibility | Program Eligibility |
+||| CRED_032 | Fraud Alert Present | Fraud & Alerts |
 
 <Note>
 The active-dispute detection rule is **CRED_023** (Active Disputes), seeded by migration
 `0198_seed_cred_023_active_dispute_template` into the shared `appraisal_rule_templates` catalog
 (`module = 'credit'`) and backfilled into every active credit rule set. CRED_017 is **Housing
-Payment History**, not active disputes.
+Payment History**, not active disputes. **CRED_010** (Disputed Accounts) and **CRED_027** were
+removed from the registry in migration `0266` — both read the producerless
+`tradelines[].account.dispute` / `.remarks` fields and could never fire.
+</Note>
+
+<Note>
+**CRED_032 (Fraud Alert Present)** is registered in code but **no DB template has been seeded
+via a migration.** The RuleOps write-path canary (`ruleops-sql-allowlist.ts`) freezes raw-SQL
+writes to rule tables, so the template row must be created through the RuleOps-governed mutation
+path (`/admin/staged-credit-rules`) before any lender can adopt it. CRED_028 (Public-Record
+FAIL-Default) is registered shared but adopted only by First Colony.
 </Note>
 
 **CRED_029 — Credit Report Date Consistency** and **CRED_030 — Credit Reference Number Consistency** (LOA-1759)
