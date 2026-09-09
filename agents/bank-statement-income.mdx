@@ -300,7 +300,7 @@ The registry holds 30 named profiles plus the **"Other"** sentinel. Each profile
 
 ## Credit categorization v2 (LOA-2543, LOA-2659, LOA-2696)
 
-A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categorization/pipeline.ts`) runs as a **second categorization pass** after the primary Plaid PFC enrichment. It is wired behind the `ENABLE_CREDIT_CATEGORIZATION_V2` environment variable (strict `=== "true"`; CDK sets INT to `"true"`, prod to `"false"`).
+A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categorization/pipeline.ts`) runs as a **second categorization pass** after the primary Plaid PFC enrichment. It is wired behind the `ENABLE_CREDIT_CATEGORIZATION_V2` environment variable (strict `=== "true"`; CDK sets this to `"true"` in all environments, including prod, as of LOA-2705).
 
 `CreditCategorizationV2Service.categorizeAndPersist(borrowerFileId)` is called from `bank-statement.processor.ts::writeResults` **after** the write transaction commits. It runs outside the transaction deliberately — the service makes sequential vendor calls (the OpenAI resolver) and holding a DB connection across them would pin it for minutes. DI failure of `CreditCategorizationV2Service` is now loud at boot (the `@Optional()` decorator was removed in LOA-2696).
 

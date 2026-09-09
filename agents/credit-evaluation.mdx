@@ -430,6 +430,12 @@ All under `api/v1/portal/credit` (`PortalCreditController`):
 - **Reserves axis** (`documentedReserveMonths`): `lib/loan-context/reserves.ts` now computes this from URLA §2a liquid assets. The computation runs through `loan-context.service.ts::buildForAuditRun` and is threaded into `EligibilityContext` and `LoanContextAxes`. This field now has a producer and CRED_025's reserves evaluation can proceed.
 - **HPML gate** (`isHpml`, `annualPercentageRate`, FFIEC APOR table, rate-set lock date): all four required fields have **no producer**. `grep` over `packages/api/src` returns zero instances of `annualPercentageRate`, no APOR table or HPML computation, and only a `rateLockStatus` string (not a date). Until these producers are built, CRED_025's HPML branch evaluates to `NEEDS_INFO`.
 
+### First Colony (LOA-2718)
+
+**CRED_007 / CRED_008 retired in favor of CRED_018.** The `firstcolony-credit` bundle (version 4) disables `CRED_007` (Bankruptcy presence) and `CRED_008` (Foreclosure / Short Sale / Deed-in-Lieu presence) via `disables[]` entries. Any lender running both rule generations got duplicate findings on a single derogatory event; worse, a seasoned event that passed CRED_018 still failed unconditionally via the presence rule, defeating the lender’s seasoning policy. Luxury completed the same retirement earlier; First Colony was the last production lender with the double-finding bug.
+
+`CRED_009` (Tax Lien / Judgment) is **not** retired — CRED_018’s vocabulary does not cover `tax_lien` or `judgment`, so CRED_009 remains the sole backstop for those record types.
+
 Custom credit-rule authoring lives in a separate `portal-credit-rules` module
 (`PortalCreditRulesController`): natural-language parsing (`credit-nl-parse.service.ts`), a
 dry-run preview (`credit-preview.service.ts`), the credit field registry, a compound-condition

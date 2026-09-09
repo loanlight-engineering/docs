@@ -308,6 +308,7 @@ across cost-ordered tiers until a signature is found or the tiers are exhausted.
 
 - `all_signed` — every verified page has a signature.
 - `partially_signed` — some verified pages signed, some not.
+- `not_applicable` — the requirement's only candidate is an unexecuted blank form template (LOA-2738). Persisted to `doc_signature_verification_results` for auditability but excluded from `audit_errors` and all finding counts. See below.
 - `unsigned` — no signatures detected **and** vision examined every page (full coverage).
 - `verification_failed` — no page results, **or** no signature found while coverage was incomplete
   (doc exceeds the sweep cap, page count unknown, or screenshots unavailable).
@@ -315,6 +316,10 @@ across cost-ordered tiers until a signature is found or the tiers are exhausted.
 This verdict ladder is the false-blocker fix: a failed vision call (429/timeout) degrades to the
 non-blocking `verification_failed`, never a false `unsigned`, and a properly signed bundle's blank
 coverage pages no longer force a false `partially_signed`.
+
+**`not_applicable` — unexecuted template suppression (LOA-2738).** A credit bureau may staple a blank IRS Form 4506-C template (plus its instruction page) into a tri-merge report. `classify-split` correctly labels those pages `form_4506` → `borrower_authorization`, which is signature-required. Without the fix, the pipeline demanded a signature that the IRS forbids on an unfilled form, emitting a CRITICAL `unsigned` blocker against the credit report.
+
+The vision step now also reports `isUnexecutedTemplate` per page — a structured observation the model returns alongside `hasSignature`. When the requirement's scoped pages are all confirmed unexecuted templates (no in-scope vision failures, no signed pages), `build-result` emits `not_applicable` instead of `unsigned`. Suppression is conservative: it requires every in-scope verified page to be a template, and any in-scope vision failure blocks suppression outright. `pageReference` may suppress a verdict but never relaxes the `everyPageVerified` host-page-count gate (see code comment `CRITICAL ASYMMETRY, DO NOT "FIX" THIS`).
 
 <Note>
 Vision fan-out is bounded by process-scoped `p-limit`s (vision 4, cue 12, screenshot 8; each
@@ -353,7 +358,7 @@ LOA-1566) so a failed vision call is distinct from a real "no signature on this 
 <ResponseField name="audit_errors" type="table">
 Written for every non-`valid` expiration issue (`agent_name: "documentHealth"`,
 `error_type: "validation"`) and for signature `unsigned` / `partially_signed`
-(`issueKind: "signature_missing"`). Per-agent failures never fail the run.
+(`issueKind: "signature_missing"`). `not_applicable` is **excluded** — an unexecuted blank template is not a finding. Per-agent failures never fail the run.
 </ResponseField>
 
 ## Purchase contract extraction
