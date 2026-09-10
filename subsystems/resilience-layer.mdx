@@ -20,14 +20,20 @@ Both share **one** Reducto circuit (the same Redis key `resilience:reducto:state
 ```text
 src/common/resilience/
   circuit-store.ts             — generic keyed CircuitStore (Lua CAS, Redis-backed)
-  reducto-circuit-store.ts     — ReductoCircuitStore extends CircuitStore (key: "resilience:reducto:state")
+  reducto-circuit-store.ts     — ReductoCircuitStore extends CircuitStore + recordTerminalFailure
   call-class.ts                — CallClass type + REDUCTO_CIRCUIT definition (breaker config)
-  reducto-runtime.ts           — shared executor: executeWithReductoResilience, classifyReductoError, etc.
-  queue-and-recover/
-    disposition.ts             — resolveCircuitDisposition / shouldHold / canProbe (unified truth table)
-    port.ts                    — QueueAndRecoverAdapter interface
-    registry.ts                — QueueAndRecoverRegistry (adapters self-register on onModuleInit)
-    orchestrator.ts            — QueueAndRecoverOrchestrator (one probe→drain-all timer, fleet rollup, break-glass)
+  reducto-runtime.ts           — shared executor: executeWithReductoResilience, assertReductoCallAllowed, classifyReductoError, etc.
+  reducto-terminal-policy.ts   — fleet-wide terminal-failure threshold (3 distinct PDFs / 5 min)
+
+src/common/reducto/
+  lifecycle.ts                 — getReductoJobLifecycle / withReductoJobLifecycle hooks
+  async-job.ts                 — runReductoExtractJob + error types
+
+src/common/resilience/queue-and-recover/
+  disposition.ts               — resolveCircuitDisposition / shouldHold / canProbe (unified truth table)
+  port.ts                      — QueueAndRecoverAdapter interface
+  registry.ts                  — QueueAndRecoverRegistry (adapters self-register on onModuleInit)
+  orchestrator.ts              — QueueAndRecoverOrchestrator (one probe→drain-all timer, fleet rollup, break-glass)
   ResilienceModule             — NestJS module; imported by PortalAppraisalModule + BankStatementModule
 ```
 
@@ -36,12 +42,18 @@ src/common/resilience/
 The Reducto circuit uses the **cockatiel** library with a `consecutive` policy:
 
 | Config | Value |
-|---|---|
-| `failureThreshold` | 2 consecutive vendor failures to open |
-| `halfOpenAfterMs` | 60 000 ms (1 minute) before probing |
-| `retryable` | based on `classifyReductoError` — transient vendor errors open the breaker; local errors (parse failures) do not |
+||---|---|
+|| `failureThreshold` | 2 consecutive vendor failures to open |
+|| `halfOpenAfterMs` | 60 000 ms (1 minute) before probing |
+|| `retryable` | based on `classifyReductoError` — transient vendor errors open the breaker; local errors (parse failures) do not |
 
 Circuit state is persisted in Redis at `resilience:reducto:state`. A single `QueueAndRecoverOrchestrator` owns the recovery-driver timer (one per process; `.unref()`'d) so there is no race between the two domains.
+
+### Terminal-failure outage policy (LOA-c4cdb7bd)
+
+The circuit breaker now has a second opening mechanism independent of the consecutive policy: a **fleet-wide terminal-failure threshold**. `ReductoCircuitStore.recordTerminalFailure(documentFingerprint)` is called by the shared executor each time a distinct original PDF receives a `Failed` response from Reducto. When 3 distinct documents fail within a 5-minute sliding window, the circuit opens immediately — without waiting for the cockatiel consecutive count to accumulate. This catches fleet-wide outages faster than the 2-consecutive policy, which requires two failures in the same call chain.
+
+The `reducto-terminal-policy.ts` module owns the sliding-window accounting. `lifecycle.ts` exports `getReductoJobLifecycle` and `withReductoJobLifecycle` hooks used by test harnesses and the break-glass probe to override lifecycle behavior. The shared executor now exposes `assertReductoCallAllowed()`, which callers invoke before submission to check either the lifecycle hooks or the circuit store.
 
 ### Redis read outcomes and indeterminate state (LOA-2361)
 

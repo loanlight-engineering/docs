@@ -10,7 +10,9 @@ The page lives in `src/app/(app)/bug-reports/page.tsx` plus its panel components
 
 ## The issue list
 
-The left side is a paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. Each issue carries aggregate counts (run count, latest run status, PR count, comment count). The anchor model is a three-tier ladder:
+The left side is a single, unified paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. All reports — whether filed manually by engineers or filed autonomously by Oz/Octy runs — appear in the same list. Oz-filed rows are distinguished by a **tentacle indicator** in the first cell that sways on hover (`OctyIcons.tsx`, `BugReportPanelBody.tsx`). The earlier separate "Bug reports" / "Octy reports" tab split was removed in favor of this unified view.
+
+Each issue carries aggregate counts (run count, latest run status, PR count, comment count). The anchor model is a three-tier ladder:
 
 | Tier | `audit_run_id` | `loan_id` | Example |
 |---|---|---|---|
@@ -83,7 +85,7 @@ A free-text run name, max 80 characters. If you set it, the agent cannot overwri
 LangSmith CLI access and the LangChain Docs MCP are shown as read-only checked. The Datadog MCP attaches automatically when the Datadog keys are configured (see [Environment variables](/octy/environment-variables)).
 </Step>
 <Step title="Pick a model">
-`ModelPicker` is a cascading provider menu. The default is **`claude-5-opus-high`** (Opus 5 · High). The chosen `modelId` is passed straight through to Warp's `config.model_id`. Available options include Opus 5 (Low/Medium/High/Extra high/Max), Fable 5/5.1, GPT-5.6 Sol/Terra/Luna, and GPT-6 Astra variants — all verified against the live `oz model list` on 2026-09-05.
+`ModelPicker` is a cascading provider menu. The default is **`gemini-3.8-flash`** (Gemini 3.8 Flash). The chosen `modelId` is passed straight through to Warp's `config.model_id`. The Gemini group includes 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.5 Flash, and 3.1 Pro. The GLM group includes GLM 5.3 Flash (Fireworks) and GLM 5.2 (Fireworks); GLM 5.1 was removed when Warp dropped it from its model catalog. Claude, OpenAI, Grok, and other groups remain available. All IDs are Oz slugs verified against `oz model list` and Warp's "Agent model choice" docs (2026-09-09).
 </Step>
 <Step title="Pick an affected area">
 The **Affected Area** dropdown is populated by `GET /api/v1/audit_runs/:id/bug-reports/agent-options` (LOA-1669). Options are derived per audit run as the union of the run's expected plan (`audit_runs.agent_config`) and the observed `agent_runs` for that audit. Adding a new area is a backend change; the area must be present in `BUG_REPORT_AGENT_TYPES` in `shared-types`.

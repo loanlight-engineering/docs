@@ -14,6 +14,13 @@ lenderCode, borrowerNames, loanProgram)`. It consumes the outputs of two upstrea
 `ConsolidatedProperty` objects from [Property-Data](/agents/property-data) and the
 `UrlApplicationView` + borrower `Name[]` from [URLA extraction](/agents/urla-extraction).
 
+Since LOA-1947 the graph state also accepts a `driveReport` (`DriveReportFacts | undefined`) and a
+`piiFieldPlan` (`readonly DisclosedAddressFieldPlanEntry[] | undefined`). The DataVerify DRIVE public-records
+report is threaded through the graph so DRIVE rules can access coded conditions, named property
+addresses, and completed/pre-foreclosure annotations. Both DRIVE rule families remain disabled for
+every lender while acceptance criterion AC2 (USPS street-suffix normalization for addresses like
+"4 Sunset Way" vs. "4 Sunset Wy") is unmet.
+
 ## Graph topology
 
 A single node:
@@ -94,7 +101,7 @@ config of `false` is disabled; `true` or an object is enabled. Thresholds come f
 | `RENTAL_VALUE_CHANGE` | MEDIUM | rental price-history change exceeds the tier |
 | `ACTIVE_FORECLOSURE` | CRITICAL | preforeclosure records within last 3 years (appends upcoming auction within ±90 days) |
 || `ZONING_MISMATCH` | HIGH | `lot.zoning` is not residential |
-|| `RAPID_RESALE` | HIGH | two most recent sales within `months` (default 6) |
+|| `RAPID_RESALE` | HIGH | two most recent ownership transfers within `months` (default 6); financing recordings (mortgages, stand-alone finance, quit-claims with no price/seller) are excluded |
 || `LLC_TO_LLC_SALE` | HIGH | most recent sale buyer and seller both match an entity pattern |
 || `PRICE_DECLINE_FROM_PRIOR` | HIGH | current price < most recent prior sale amount |
 || `PURCHASE_PRICE_ABOVE_MARKET` | HIGH / CRITICAL | PURCHASE loan, contract purchase price > listing price and/or ATTOM AVM by threshold; one anchor exceeded → HIGH, both → CRITICAL; AVM anchor skipped when forecast std-dev (`fsd`) is missing or ≥ threshold, or confidence < `purchase_price_avm_min_confidence` (default 80); thresholds: `purchase_price_vs_listing_percent` (default 10) and `purchase_price_vs_avm_percent` (default 10) |
@@ -122,7 +129,7 @@ Gated on `occupancy === "INVESTMENT"`.
 |---|---|---|
 | `VALUE_EXCEEDS_PRIMARY` | MEDIUM | subject value > borrower primary value |
 | `BORROWER_RENTING_PRIMARY` | MEDIUM / HIGH | A: current address housing expense is RENT. B: OWN but `ownerOccupied === false` and no REO entry at current address |
-| `RENT_VS_1003_MISMATCH` | MEDIUM | rent zestimate > 1003 rental income and percent diff > 10 |
+|| `RENT_VS_1003_MISMATCH` | MEDIUM | Zillow rent zestimate vs. 1003 `estimatedGrossMonthlyRentAmount` percent diff > 10; net rent (`estimatedNetMonthlyRentAmount`) is never used as the comparison basis and a gross value ≤ 0 (e.g. a "rent not used to qualify" PITIA negative) causes the rule to skip |
 </Tab>
 
 <Tab title="Second home (enabled: false)">
@@ -144,6 +151,10 @@ Category GENERAL. These run by default with no config.
 | `RESIDENCE_RENTER_ON_TITLE` (Rule C) | MEDIUM | current address housing expense is RENT, but a borrower exact-matches an ATTOM owner on title |
 </Tab>
 </Tabs>
+
+<Note>
+`RAPID_RESALE` reads ATTOM's recorded-transaction history, which interleaves genuine resales, refinances, stand-alone mortgage recordings, and quit-claims. Before LOA-2739, every entry was treated as an ownership transfer. The rule now classifies entries before comparing dates: financing recordings (`saleDocType: MORTGAGE`, `saleTransType: "Stand Alone Finance"`, no `saleAmt`, no `sellerName`) are excluded. Only entries that establish an ownership transfer are counted toward the resale window.
+</Note>
 
 Name matching (`utils/name-matching.ts`) returns a `MatchSeverity` of `HIGH | MEDIUM | INFO | null`,
 where `null` is an exact match (a pass that emits no flag). An exact match on any owner suppresses

@@ -165,6 +165,22 @@ ownership (owners, absentee, vesting type, trust indicator, owner-occupied resol
 title, liens (foreclosure + preforeclosure), sales history, assessment history, tax history, and
 AVM valuation.
 
+**ATTOM trust indicator and entity-owner resolution (LOA-2737).** Owner names and the trust
+indicator now resolve from one ordered list of owner blocks so the name source and indicator source
+cannot drift apart. The trust indicator sits on the owner _entry_ at
+`assessment.owner.owner1.trustIndicator` with the literal value `"Name is a Trust"`; reading
+the parent block or comparing against `"Y"` (both previous bugs) resolved permanently `false` and
+silently suppressed the `if_entity_vesting` document requirement for all trust-vested loans.
+The owner block selection now requires a block that actually names an owner — a block can carry an
+indicator with no name, and selecting it would satisfy the ownership guard while producing an empty
+owner list.
+
+Entity owners are now cross-checked against the vesting deed: a named party on the deed that
+vested title in a trust or LLC is a legitimate match even when the ATTOM owner field shows the
+entity name rather than the borrower's name. USPS street-suffix normalization (e.g. "Way" ≡ "Wy")
+is also applied to suppress false-positive `SUBJECT_OWNER_BORROWER_MISMATCH` findings where
+address variations differ only in suffix abbreviation.
+
 `computeCoverageBuckets()` produces 10 buckets — `ids`, `coordinates`, `ownership`, `mortgages`,
 `assessmentCurrent`, `assessmentHistory`, `salesHistory`, `propertyFacts`, `lot`, `freshness` — and
 `attomBucketsPercent = round(present / 10 * 100)`. Missing buckets are the ones with a value of 0.

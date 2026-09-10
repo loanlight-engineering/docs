@@ -14,7 +14,7 @@ See [Service overview](/integrations/service-overview) for the Datadog service-n
 |---|---|
 | `EcrStack` | Container registry (`loanlight-integrations:{int,prod}-latest`). |
 | `NetworkStack` | Shared VPC, private subnets, FQDN helper. |
-| `DatabaseStack` | Aurora Serverless v2 PostgreSQL (0.5–4 ACU), KMS-encrypted. `DbInit` + `DbMigrate` Lambda custom resources. Secrets `LLIntegrations/DbMasterSecret` and `LLIntegrations/DbAppSecret` (app user `ll_integrations_app`). |
+| `DatabaseStack` | Aurora Serverless v2 PostgreSQL cluster — writer + one reader for automatic failover (LOA-2702). Both instances are `db.serverless`; the reader uses `scaleWithWriter: true` (PromotionTier 1), so it tracks the writer ACU. KMS-encrypted. `DbInit` + `DbMigrate` Lambda custom resources. Secrets `LLIntegrations/DbMasterSecret` and `LLIntegrations/DbAppSecret` (app user `ll_integrations_app`). |
 | `DatabaseAccessStack` | SSM bastion for tunneled DB access (shared with the API DB). |
 | `WorkerStack` | The SQS queues + DLQ and the two EventBridge rules. See [Messaging](/integrations/messaging). |
 | `ApplicationStack` | ECS Fargate NestJS service (Datadog service `loanlight-integrations`) behind an NLB + VPC Link. Wired with the DB endpoint, all queue URLs, and `loanLightApiUrl = https://<api FQDN>`. |
@@ -55,6 +55,16 @@ The low-level `EpcApiClientService` authenticates to Encompass with OAuth2 clien
 The database is KMS-encrypted. App credentials come from Secrets Manager (`LLIntegrations/DbAppSecret`). `DEPLOYED_ENVIRONMENT` (int/prod/test) is injected at runtime via the ECS task definition.
 </Accordion>
 </AccordionGroup>
+
+## SQS DLQ Datadog monitors
+
+Since LOA-2363 the SQS dead-letter queues are monitored in both `int` and `prod`. Monitor JSON files live in `packages/encompass/observability/datadog/` and are applied with `apply-monitors.ts`. The prod variants are named `aus-update-dlq-depth.prod`, `aus-update-queue-age.prod`, and `document-push-dlq-depth.prod`.
+
+Key behaviors documented by LOA-2765:
+
+- **DLQ retention** is determined by the original enqueue timestamp, not the timestamp when the message entered the DLQ. `ApproximateAgeOfOldestMessage` on a DLQ reports when the message _moved_ to the DLQ, not when it was originally sent. The standard DLQ has no `retentionPeriod` override, so messages expire after **4 days** (345 600 s default).
+- **Queue-age redrive guidance:** `aus-update.service.ts::resetAuditStatusIfRetryableTimeout` resets retriable timed-out audits so they re-enqueue; the `aus-update-queue-age` alert is the signal to trigger it manually when the queue backs up.
+- **Monitor guards** validate that every monitor JSON references only the env/account it was built for (`env-account-consistency.spec.ts`). The `audit-data-section-degraded` monitor is int-only and carries the `.int.monitor.json` suffix.
 
 ## Fargate and Docker
 

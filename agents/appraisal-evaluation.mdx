@@ -158,6 +158,12 @@ Reuses the `jobid://` handle from `parse` (no second upload or parse charge); on
 replay second pass it reuses its own cached `_reductoResult`. Preserves the canonical form type
 (`1025` vs `1004` schema).
 
+**Full-schema submissions are always agentic (LOA-2770).** Reducto's non-agentic path cannot carry the full ~356-field appraisal schema; submitting it with `deep_extract: false` caused 100% extraction failures in production for `1004`/`1004D` runs (every base job returned `Failed` ~45 seconds after submission while the agentic sibling was still `Pending`). The fix is scope-based: any submission carrying the full appraisal schema for a `1004`/`1004D` run now uses `deep_extract: true` (agentic). Sub-schema submissions (e.g. `SPLIT_DXF_DEFAULT_SECTIONS` pole groups for `1025`/`1007`) may still be non-agentic because they are smaller — those forms were not failing. A guard test asserts this principle across every form type the schema registry can extract; restoring `deep_extract: false` on a full-schema call reds exactly `1004` and `1004D`.
+
+<Note>
+Two deferred items remain: the agentic top-up pass is now redundant (the agentic base duplicates the work and doubles the paid agentic credit per run), and the `doExtractAgenticFull` phase-2 recovery path for `1073`/`2055`/`2000`/`1075`/`coop` still re-submits the full schema non-agentically on a wedge — those forms are not currently failing in production. Both are logged, not silently deferred.
+</Note>
+
 **HVAC and plumbing condition ratings from narrative text (LOA-2261, PR #3574).** The adapter runs `evaluateConditionRating(evidence, system)` (`lib/appraisal-pipeline/condition-rating-evidence.ts`) to extract condition ratings for `improvements.hvac_condition_rating` and `improvements.plumbing_condition_rating` from the appraisal's free-text narrative. The function uses a positive grammar: it accepts only a direct assignment clause (`"HVAC is in Good condition"`, `"Plumbing: Fair"`) rather than any occurrence of a rating word. It splits the evidence string into lines and clauses, discards comparator grid blocks (to avoid grading a comp's system instead of the subject's), and skips table rows, material-slash-rating cells, negated predicates, and non-subject-system references. Returns one of:
 
 - `{ rating: "Good" | "Average" | "Fair" | "Poor", reason: null }` — unambiguous extraction
