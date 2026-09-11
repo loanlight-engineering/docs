@@ -95,6 +95,8 @@ The proxy uses `src/lib/loanlight-api-client.ts`, which calls `${LOANLIGHT_API_U
 
 The client uses a 120-second timeout and surfaces failures as `ApiClientError`.
 
+**Staged taxonomy on file uploads (#143).** When the Dry Run tab has **Taxonomy** set to **Staged** and you upload a local file, the route now reads the `configOverride` field from the multipart body and forwards it to loanlight-api verbatim, so the staged taxonomy is used for classification. Previously the route rebuilt the upstream request field-by-field and never forwarded `configOverride`, causing file uploads to always measure the live taxonomy even when Staged was selected. The JSON branch (loan documents, staged targets) already passed the body through untouched and was unaffected. A malformed `configOverride` envelope returns 400 before the upstream call.
+
 <Warning>
 The dry-run is gated by `OCTY_INTERNAL_API_KEY`. If the secret does not match loanlight-api's `InternalApiKeyGuard`, the proxied request is rejected. See [Environment variables](/octy/environment-variables).
 </Warning>

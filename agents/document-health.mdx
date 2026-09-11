@@ -213,6 +213,16 @@ Absence is provable only when a classifier can produce the document type
 `uncertain` and the check degrades to a non-blocking `conditional_document_unknown` review note
 rather than a false `missing_document` block.
 
+### Program-gated outputs (LOA-2787)
+
+Some built-in checks set `requiresProgramConfiguration: true`. When this flag is set, each check output is emitted only if the **resolved program's YAML** configures that document type. If the program omits the type, the declaration check produces no finding for it — the program's document set is the authority, and the declaration check cannot introduce requirements that the program does not own.
+
+The `decl.status.self_employed` check carries this flag. Its two possible outputs (`tax_returns_personal`, `tax_returns_business`) are emitted only when the lender YAML program configures them. Alt-doc programs — bank statement, 1099, asset qualifier, and DSCR — that do not include personal or business tax returns in their `required_documents` or `document_requirements` lists no longer receive self-employment declaration findings. Full-doc programs that do configure those types are unaffected.
+
+<Note>
+Independent declaration checks (those without `requiresProgramConfiguration`) and the program-required-document pass run unchanged. Only self-employment output types are gated this way today.
+</Note>
+
 ### Kill-switch and opt-out
 
 - **`ENABLE_BORROWER_DECLARATION_CHECKS`** env var — set to `"false"` to disable all declaration

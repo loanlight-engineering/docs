@@ -630,6 +630,10 @@ Migration `0342` removes these rules from the bundle and from every lender holdi
 
 Apply via `/admin/staged-rules` → Deephaven → dry-run → promote.
 
+**Standalone-second CLTV grading (LOA-2665, eligibility bundle v4).** Deephaven EA (Effective Affordability) and EAE (Effective Affordability Extended) programs now grade the CLTV axis for standalone-second loans, not LTV. The evaluator reconstructs the senior-lien balance from the LOS fields `HCLTV`, the LOS property-value basis, and the subject loan amount. It then rebases the total liens to the current appraised value to produce the grading CLTV. If any operand (HCLTV, property value, loan amount, or appraised value) is absent or inconsistent, the reconstruction fails closed and the axis returns `NEEDS_INFO(cltv)`. The existing shared `axes.cltv` behavior for non-second-lien loans is unchanged. `delivered combined_ltv` (from the LOS) is never used as a grading fallback. The selected `graded_ratio` (`LTV` or `CLTV`) plus the companion `loan_cltv` numeric are persisted on every `eligibility_results` row (migration `0066`) and surfaced through the portal's eligibility card and the DevConnect evidence block.
+
+EAD programs remain blocked from CLTV grading pending a separate PITIA/DSCR gap fix.
+
 #### Deephaven relative LTV overlays (LOA-1779, Leg 1)
 
 `composeEffectiveMaxLtv` (in `lib/loan-eligibility/`) now accepts three parameterized relative-LTV reduction keys from `LtvModifiersSchema`:
@@ -707,6 +711,12 @@ All rules are lender-wide (`loan_program_id NULL`). Built-ins are inherited at d
 #### Luxury WSE Credit bundle update (LOA-1652)
 
 The `luxury-wse-credit` bundle now **disables `CRED_011`** (hard-inquiry count check) lender-wide, including DSCR programs. This replaces the earlier `report_only` approach from #2542 (never applied in prod). Rationale: `CRED_011` with no threshold adds no signal for Luxury — virtually every borrower has at least one inquiry, so a threshold-less WARNING would mark every loan Medium risk without identifying a real underwriting concern. Re-apply the bundle via `/admin/staged-credit-rules` on deploy.
+
+#### Luxury Mortgage Corp production appraisal assignment (LOA-2561)
+
+Luxury Mortgage Corp (`luxury-mortgage-corp`, `luxury-wse`) is declared in the production appraisal assignment manifest (assignment version 5, expected-impact version 10, `portal-appraisal-rules/staged-bundles/`). The bundle was applied to production by hand before this declaration; the first automated reconcile registers a composition root while preserving the effective rule state.
+
+Operational note: the first reconcile is expected to produce no rule-count or version changes, provided the hand-applied state has not drifted. A named human watcher is required at first automated reconcile; the Luxury-scoped forward-stop procedure is documented in the handoff plan attached to LOA-2561.
 
 ## Review summary export
 
