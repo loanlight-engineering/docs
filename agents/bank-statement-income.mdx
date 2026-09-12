@@ -324,22 +324,64 @@ Rows with no v2 answer (`credit_category_source IS NULL`) fall back to the v1 Pl
 
 **Portal surface:** the separate `credit-category-select-filter` dropdown (which was v2-only and gated to super-admins) was removed in LOA-2696. Category filtering now uses the single shared vocabulary and `category-select.tsx`.
 
+**`credit_category_label_safety` column (LOA-2763, migration `0067`).** `transactions` carries a
+new `credit_category_label_safety` column (CHECK: `'safe' | 'unsafe' | NULL`). `NULL` means no
+safety verdict was written for this row — its absence routes a pre-existing row to the
+`legacyVerdict` path in `credit-category-label-safety.ts` rather than treating it as `safe`.
+No default is set deliberately: a code-side omission stays `NULL` and visible, rather than
+being silently stamped `safe`. The companion migration `0067` also guards column integrity with a
+CHECK constraint that enumerates the two allowed non-null values.
+
+**Reviewer sentinels in the v2 category picker (#4199).** Three reviewer sentinel options —
+previously removed during the v2 migration — have been restored to
+`CREDIT_CATEGORIES_V2_PICKER_OPTIONS`. Three defects fixed alongside the restoration: sentinel
+fallback behavior, exclusion re-display after a sentinel is cleared, and the per-row patch
+lifecycle when a sentinel is applied and then reverted.
+
 ## Dispatch and entitlement
 
-`bankStatementIncome` is dispatched on the **partner lane only** (`defaultOnLanes: ["partner"]`). It declares `requiresExplicitGrant`, so the router's zero-rows fallback that entitles un-seeded lenders to other active agents deliberately does **not** apply here.
+`bankStatementIncome` declares `requiresExplicitGrant`, so the router's zero-rows fallback that
+entitles un-seeded lenders to other active agents deliberately does **not** apply here. The Octy
+grant is the switch on every path. The agent reaches the plan through **two entry points**:
 
-For a partner audit to run this agent:
-- The lender must hold an **explicit** `lender_agent_entitlements` row with `enabled = true`.
-- A request naming `"bankStatementIncome"` in `agents[]` without a grant is dropped from the plan and surfaced in `denied[]` — never silently.
-- With `agents[]` omitted, the partner-lane default plans the agent **only** for explicitly-granted lenders.
+1. **Router planning (partner lane):** A partner audit request must name
+   `"bankStatementIncome"` in `agents[]`, and the lender must hold an explicit
+   `lender_agent_entitlements` row with `enabled = true`. There is no `defaultOnLanes`
+   declaration; an omitted or empty `agents[]` never plans it.
 
-Grants are managed in Octy. A grant takes effect immediately — an entitled lender's partner audits run metered Reducto extraction from that moment.
+2. **EPC pre-enrollment (LOA-1951):** EPC audit requests carry no `agents[]` DTO.
+   `resolveBsiPreEnrollment` in `integration-orchestration.service.ts` pre-enrolls the agent
+   for entitled lenders on qualifying programs. An entitlement read failure plans the agent
+   speculatively to hold the audit open; the `afterPhase(0)` trigger re-checks and seals
+   an unentitled lender as skipped. Pre-enrollment is not a grant — only execution confirms
+   entitlement.
 
-<Warning>
-`bankStatementIncome` is **not** a UI agent. It does not appear in `UiAuditAgentType`, `EXECUTOR_AGENT_KEYS`, or `GraphRegistryService`. The agent's findings appear in the portal's `/results` income section (LOA-2016) and in the partner API `results.agents.bankStatementIncome` block, but there is no audit-result card in the standard portal audit view.
-</Warning>
+Grants are managed in Octy. A grant takes effect immediately.
 
-## Partner audit lifecycle
+<Note>
+`bankStatementIncome` is now a member of `UiAuditAgentType` (LOA-1951 — EPC sidebar gating). This means it **does** appear in `UI_AUDIT_AGENT_TYPES`. It is absent from `GraphRegistryService` and `EXECUTOR_AGENT_KEYS` (queue_worker constraint). The agent's findings appear in the portal's `/results` income section and in the partner API `results.agents.bankStatementIncome` block, but there is no audit-result card in the standard portal audit view. The `UiAuditAgentType` membership enables the **Bank Statements** sidebar tab in the Encompass EPC plugin.
+</Note>
+
+## EPC lane (LOA-1951)
+
+Entitled lenders on the EPC lane receive automatic enrollment for qualifying programs. The
+experience differs from the partner lane in several ways:
+
+- **Iframe review.** Encompass underwriters review the existing portal income UI inside an
+  iframe embedded in the EPC plugin. The staff income section continues to use its own
+  section payload.
+- **Write access.** EPC iframe viewers can write (category overrides, reviewer selections)
+  subject to the existing CSRF checks. Popup/read-only EPC viewers remain restricted. EPC
+  writes are attributed to the partner organization with no individual user ID. Iframe cookies
+  use Partitioned (CHIPS) to support cross-site embedding.
+- **eFolder delivery.** EPC exports always submit PDF and hide format controls. Each export
+  gets a unique object key; the integrations companion delivers the PDF to the Encompass
+  eFolder via its consumer. The server communicates delivery behavior through `deliveryStatus`.
+- **`epc_audit` source.** EPC batches are minted with `borrower_files.source = 'epc_audit'`
+  (migration `0068` adds the column value; migration `0069` validates it). EPC writes suppress
+  asset-run triggers and carry persisted EPC buckets through extraction.
+
+## Audit lifecycle and source isolation
 
 The agent runs as a `queue_worker` triggered via `triggerBankStatementIncome`. The execution lifecycle is managed by `AgentRunReconciler` with hand-rolled `agent_runs` ledger semantics:
 
@@ -347,9 +389,14 @@ The agent runs as a `queue_worker` triggered via `triggerBankStatementIncome`. T
 - **Complete with output**: the income summary (qualified income, monthly breakdown, statement count, findings count) is frozen atomically onto `agent_runs.output.summary` at the terminal flip.
 - **Fail**: terminal only on exhausted attempts; per-attempt retries leave the row open.
 
-### Source isolation
+`borrower_files.source` now has three allowed values: `'portal'`, `'partner_audit'`, and
+`'epc_audit'`. `portalBorrowerFileSourcePredicate()` returns `source = 'portal'` (was
+`IS DISTINCT FROM 'partner_audit'`), so both partner and EPC batches are excluded from every
+portal / lender-wide / status-driven `borrower_files` read or mutation. A portal credential
+cannot read, mutate, delete, or reprocess a partner or EPC batch even with a leaked id.
 
-Partner batches are minted with `loans.id = NULL` and `borrower_files.source = 'partner_audit'`. The `portalBorrowerFileSourcePredicate()` predicate excludes `source = 'partner_audit'` rows from every portal / lender-wide / status-driven `borrower_files` read or mutation. A portal credential cannot read, mutate, delete, or reprocess a partner batch even with a leaked id.
+EPC pending rows are included in deadline recovery alongside partner rows, preserving the portal
+pending-backlog exemption.
 
 ### Income summary snapshot
 
@@ -357,7 +404,7 @@ The income summary is frozen onto `agent_runs.output` at completion (LOA-1701). 
 
 ## Catalog identity
 
-`bankStatementIncome` is the 10th member of `CatalogAgentType` (after `liabilitiesAssessment`) and has **no UI audit-result card** — it is a 4th member of the set of catalog agents absent from `UiAuditAgentType` (alongside `preAuditClassification`, `redFlags`, and `liabilitiesAssessment`). Activated by migration `0285_activate_bank_statement_income_agent.sql`.
+`bankStatementIncome` is the 10th member of `CatalogAgentType` (after `liabilitiesAssessment`) and has **no UI audit-result card** (no standard portal audit view card). It is in `UiAuditAgentType` (LOA-1951) for EPC sidebar gating. Activated by migration `0285_activate_bank_statement_income_agent.sql`.
 
 | Column | Value |
 |---|---|

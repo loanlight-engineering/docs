@@ -185,6 +185,18 @@ Reconciles bank-statement account numbers against URLA Section 2 assets, validat
 count + continuity, deduplicates results, resolves human-readable document names, and persists to
 Postgres. Emits `EVENTS.AGENT.DOCUMENT_HEALTH.COMPLETE` and returns `{ completed: true }` (even on
 error, to avoid loops).
+
+**Completeness document name resolution (LOA-2725).** The document-completeness branch sources
+file names directly from the LlamaCloud pipeline list, so its names retain the raw
+`B2.<encompassAttachmentId>_` storage prefix that the expiration branch has stripped since
+LOA-797. Before persisting, `aggregate` runs `resolveCompletenessDocumentNames()` against a
+`SourceFileNameLookup` built from `loan_documents`. The waterfall — `llama_cloud_file_id` match,
+then `file_name` match, then shape-based `B2.<id>_` extraction, then keep as-is — strips the
+prefix so the persisted name matches what readers and the reader's filter expect.
+Without this fix, every completeness-only document (one that exists in the completeness results
+but not in the expiration results) was silently deleted by `getDocumentHealthData` because its
+storage-shaped name never matched any expiration row. A DB backfill (migration
+`0070_loa_2725_completeness_document_name.sql`) repaired existing rows.
 </Step>
 </Steps>
 

@@ -157,6 +157,34 @@ LTR comps are capped to the 10 nearest properties (LOA-1869) so the median LTR r
 </Accordion>
 </AccordionGroup>
 
+## ATTOM unit scope detection (LOA-2724)
+
+When the subject property includes a unit number, ATTOM may return building-level records instead
+of unit-level records — for example, an `ExaStr` (exact street, no unit) `matchCode` — producing
+property facts, ownership, and sales history that describe the whole building rather than the
+borrower's unit. `resolveAttomUnitScope()` (`consolidation/unit-scope.ts`) detects this condition
+and stamps the consolidated record so downstream consumers can surface it to reviewers.
+
+**Scope types:**
+
+- `PropertyDataScope` — `"unit"` (ATTOM resolved the specific unit) or `"building"` (ATTOM resolved the building or a wider parcel). Absent when the subject has no unit (`undefined`).
+- `BuildingScopeReason` — one or both reasons can fire independently:
+  - `"attom_did_not_resolve_expected_unit"` — the loan names a unit but at least one contributing ATTOM record either has no `situsUnitValue`, a street-only `matchCode` (`ExaStr`), or a unit token that differs from the expected unit.
+  - `"attom_multi_parcel_record"` — the ATTOM response carries a `multiApn` value, indicating a building-spanning parcel regardless of whether a unit was requested.
+
+**How scope is determined:** `resolveAttomUnitScope()` iterates the `property[0]` entry of every contributing ATTOM endpoint (all except `propertyDetail`, which is fetched but never merged). A record `confirmUnit` only when it has a non-street `matchCode` **and** its `situsUnitValue` equals the expected unit token. The function fails closed: a single non-confirming record marks the whole consolidation `"building"`. Both reasons can accumulate on the same response.
+
+**Effect on the consolidated record:**
+
+- `ConsolidatedProperty` gains `dataScope?: PropertyDataScope` and `dataScopeReasons?: BuildingScopeReason[]`.
+- When `dataScope === "building"`, `describeBuildingScope()` pushes a human-readable flag into `consolidated.flags[]` explaining which unit was expected, which (if any) ATTOM resolved, and the raw `matchCode` values.
+- Sales-history red flags in the Property-Red-Flags agent are gated on unit scope: flags that compare sale prices against the subject unit's value are suppressed for building-scoped records.
+- `computeCoverageBuckets` receives `dataScope`; when `"building"`, the `unitScope` bucket is set to 0, reducing `attomBucketsPercent` by one-tenth.
+
+<Note>
+`"building"` scope does not suppress other Property-Data coverage buckets or ATTOM data. It is an advisory annotation: the consolidated property profile is still populated from ATTOM, but reviewers and downstream rules can see that the facts describe the building, not the unit.
+</Note>
+
 ## ConsolidatedProperty and coverage metrics
 
 `attomExtractAll(attomData)` extracts ids (attomId/apn/fips), coordinates, property facts (beds,

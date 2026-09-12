@@ -247,6 +247,23 @@ FAIL-Default) is registered shared but adopted only by First Colony.
 
 CRED_022 is now scoped to DSCR loans only. Previously it could fire on non-DSCR Purchase/PrimaryResidence loans when MISMO carried `<HomeownerPastThreeYearsType>No</HomeownerPastThreeYearsType>`, causing `deriveIsFirstTimeHomebuyer("NO") === true` and a false `FAIL`. The defect was scope, not derivation logic: the first-time homebuyer eligibility signal is an underwriting consideration only on DSCR programs. A non-DSCR loan where the borrower self-declares non-ownership yields `SKIPPED`.
 
+**FTHB rebuttal from housing tradelines (LOA-2723).** `mergeCandidates` now runs a second
+pass — `rebutFirstTimeHomebuyerFromHousingTradelines()` (`lib/credit-pipeline/derivations/first-time-homebuyer.ts`) — after the URLA ownership-interest declaration check. When the borrower has at
+least one **open** housing tradeline (`account_type === "mortgage"` or `account_type === "heloc"`
+with `account_status === "open"`) on their credit report, the rebuttal overwrites
+`borrower.is_first_time_homebuyer` to `false`, regardless of what the URLA Section 5 declaration
+stated.
+
+The rebuttal abstains — preserving the current FTHB value — in three cases:
+- `applicationBorrowerPartyCount` is absent (solo/portal credit path or URLA extraction failed).
+- `applicationBorrowerPartyCount` is greater than 1: a multi-borrower application may carry
+  housing tradelines that belong to a co-borrower, not the primary. The rebuttal does not attempt
+  to reconcile bureau `borrower_id`s against URLA ordinals.
+- The borrower has no open housing tradelines.
+
+`applicationBorrowerPartyCount` is a new graph state field, seeded by `langgraph.service.ts::
+buildUrlaHandoff` from the URLA extraction result and threaded into `mergeCandidates`.
+
 **CRED_017 — Housing Payment History (LOA-2722)**
 
 CRED_017 previously could silently `PASS` a borrower with no payment history on any housing tradeline — or could `PASS` one who had delinquencies. Root cause: `summarizeIncidentMonths` set `sawUsableIncidentDate` only inside the incident loop, so an empty incident list left the flag unset, and OR-accumulation across tradelines let a single undated late cancel abstention. Fix: the rule now tracks two new signals — `unplaceableLateCount` (lates with no usable date) and `hasUnboundedHousingLates` (an undated late at or above the severity floor). A borrower with housing tradelines but no payment history abstains as `NEEDS_INFO`. A borrower with an undated late surfaces as `FAIL`; the rule never PASS-es silently again.
