@@ -67,6 +67,7 @@ The compiled `StateGraph` (`buildGraph.ts`) runs split, then classify, then reso
 
 ```text
 __start__ → splitDocuments → documentClassification → classificationResolution
+  → esignCertificateFold
   → [conditional: buildExtractFanout]
       → extractBankStatementMetadata ─┐
       → extractPropertyAddressMetadata ┤
@@ -98,6 +99,9 @@ __start__ → splitDocuments → documentClassification → classificationResolu
 ## Nodes
 
 <Steps>
+<Step title="esignCertificateFold (new in LOA-2790)">
+Class `EsignCertificateFoldNode`. Runs after `classificationResolution`. For each `loan_document_id` group, identifies segments whose `classificationType` is in the `FOLDABLE_ESIGN_CLASSIFICATION_TYPES` set (currently: `esign_certificate`) and reattaches them to the segment with the greatest `pageEnd` below the certificate's `pageStart` — by page order, not by bucket. The attachment is a write to `document_classifications.folded_into_classification_id` (FK to `document_classifications.id`); neither row's `page_start`/`page_end` is changed, because those ranges gate PII retrieval scope. `planEsignFolds` (pure, no DB) builds the plan; per-plan failures are caught and pushed to `errors`; the node downgrades `status` to `partial` only when at least one write fails. A certificate with no preceding non-foldable segment on the same document is left alone; two adjacent certificates never chain onto each other. The delivery projection in `getClassificationsWithRun` reads `folded_into_classification_id` to merge the certificate pages into the parent; the raw PII scoping query (`getActiveClassificationsForLoan`) does not select the pointer.
+</Step>
 <Step title="splitDocuments">
 Class `SplitDocumentsNode`. Phase 1 of classify-split. Calls `classifySplitPersistence.splitAndStage(context, this.documents, forceReclassify, { isDryRun, mode: modeOverride })` — uploads each PDF to LlamaCloud, splits it into segments, and persists split-only rows. Returns `{ splitStage, classifySplitRunId }`. Zero-doc input returns an empty buffer-free stage (skip path). `modeOverride` (Octy dry-run only) forces the `ClassificationMode` and bypasses the lender's `classification_split_mode` column.
 </Step>
@@ -169,7 +173,7 @@ This agent persists to the classify-split schema (`database/schema/classify-spli
 
 - **`classify_split_runs`** — one run row (`status` defaults `pending`; `classification_mode` defaults `per_segment`; `is_dry_run` filters Octy dry-runs out of every loan-level read).
 - **`loan_documents`** — source-of-truth doc rows (includes `llama_cloud_file_id`, `llama_pipeline_id`, `llama_ingestion_status`).
-- **`document_classifications`** — one row per segment. Key columns: `split_type`, `classification_type`, `llm_raw_classification`, `classification_resolution_context` (jsonb), `extracted_metadata` (jsonb), `classification_decision` (jsonb), `page_start`, `page_end`, `requires_review`, `classification_status` (`split` → `classified` → `classification_failed`). Unique on `(classify_split_run_id, loan_document_id, segment_index)`.
+- **`document_classifications`** — one row per segment. Key columns: `split_type`, `classification_type`, `llm_raw_classification`, `classification_resolution_context` (jsonb), `extracted_metadata` (jsonb), `classification_decision` (jsonb), `page_start`, `page_end`, `folded_into_classification_id` (uuid FK, nullable — set by `esignCertificateFold` to reattach a certificate to its parent; partial index on non-null values), `requires_review`, `classification_status` (`split` → `classified` → `classification_failed`). Unique on `(classify_split_run_id, loan_document_id, segment_index)`.
 
 ## Metadata extraction client
 

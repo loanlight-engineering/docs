@@ -116,12 +116,12 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
 `DocumentHealthResponse`, `PropertyDataResult` / `RedFlagResult`,
 `UrlaRulesEngineResult`, and more; the portals render them into tables.
 
-`shared-types@1.23.0` exports these modules (all re-exported from `src/index.ts`):
+`shared-types@1.24.0` exports these modules (all re-exported from `src/index.ts`):
 `field-value.types`, `table.types`, `audit-response.types`, `credit.types`,
 `common.types`, `api-response.types`, `property-data.types`,
 `urla-completeness.types`, `octy.types`, `portal-audits.types`, `role.types`,
-`access-policy.types`, `epc-document-events.types`, `brand.types`, and
-`workos-config`. The contract-bearing ones:
+`access-policy.types`, `epc-document-events.types`, `brand.types`,
+`workos-config`, and `cda-efolder-delivery-events`. The contract-bearing ones:
 
 <AccordionGroup>
   <Accordion title="credit.types — the credit-evaluation contract (LOA-1461)">
@@ -182,6 +182,15 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
     (`brand(value)`, `isBrand(value)`) that let callers create and validate a
     branded value without a runtime class. Used internally to tighten WorkOS user
     identifiers and similar opaque ids across the codebase.
+  </Accordion>
+  <Accordion title="cda-efolder-delivery-events — CDA eFolder delivery contract (LOA-2703)">
+    Producer: loanlight-api (collateral review module). Consumer: loanlight-integrations (future eFolder delivery path for the CDA appraisal PDF).
+
+    - `CDA_EFOLDER_DELIVERY_REQUESTED_DETAIL_TYPE` = `"loanlight.cda.efolder.delivery.requested.v1"` — the EventBridge detail-type.
+    - `CdaEfolderDeliveryRequestedEvent` interface: `{ orderId, loanId, lenderId, encompassLoanId, pdfS3Key, pdfSha256, filename }`. `pdfS3Key` is canonically `collateral-review/{loanId}/cda-{orderId}.pdf`; `filename` is `cda-{orderId}.pdf`.
+    - `parseCdaEfolderDeliveryRequestedEvent(input)` — validates the envelope with strict UUID/GUID/SHA-256 patterns. Loanlight-internal IDs must be lowercase canonical UUIDs; Encompass GUIDs are case-tolerant.
+    - `canonicalizeCdaEfolderDeliveryRequestedEvent(input)` — returns deterministic JSON for digest computation.
+    - `fingerprintCdaEfolderDeliveryRequestedEvent(input)` — returns a SHA-256 fingerprint for idempotency keys.
   </Accordion>
   <Accordion title="workos-config — WorkOS base-URL seam (LOA-2599)">
     Exports `getWorkosBaseUrl()`, which returns the WorkOS API base URL for the

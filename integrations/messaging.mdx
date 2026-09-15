@@ -36,6 +36,7 @@ Three rules (`worker-stack.ts`) route external events into SQS.
 Matches source `["loanlight.aus"]` and a fixed allow-list of detail-types, routing to the `handle-aus-updates` queue:
 
 ```text
+bsi:export:delivery
 workflow:start
 workflow:complete
 workflow:error
@@ -52,6 +53,7 @@ agent:liabilities_assessment_*
 
 `QueueConsumerService.handleAusUpdate` parses both nested (`detail.data.*`) and flat (`detail.*`) formats, extracts `correlationId` (falling back to `auditRunId`), and dispatches:
 
+- `bsi:export:delivery` → `AusUpdateService.handleBsiExportDelivery({ auditRunId, s3Key, documentName, borrowerFileId })`. Triggered when a portal BSI export queues eFolder delivery. Reads the transaction state, fetches the PDF from S3, and attaches it to the Encompass eFolder using the same routing logic as `deliverComplete` (the lender's `aus_property_indexing` flag **or** this run's own `extensions.indexingShouldRun`). The income report routes to the `bank_statement_income_report` container (seeded by integrations migration `032`). This is a **best-effort path** — every failure logs and ACKs with no DLQ entry; shadow loans and loans whose transaction state cannot be resolved are silently skipped. BSI export does not mark the audit Complete and carries a local-only `deliveryKind: bsi_export` marker in persisted history so the AUS recovery sweep cannot confuse it with AUS/property-report delivery. See [LOA-2802](https://linear.app/loanlight-eng/issue/LOA-2802/bsi-export-delivery-recover-swallowed-delivery-failures-without) for planned retry/reconciliation work.
 - `workflow:complete` → `AusUpdateService.handleAusUpdate({ auditState: Complete })`. When the audit's appraisal agent succeeded, `Detail.data` also carries `appraisalReviewPdfS3Key`, `appraisalReviewPdfFilename`, and `appraisalReviewPropertyAddress` — the consumer threads these into `DeliverCompleteContext` so `AusUpdateService.deliverComplete` can best-effort fetch the PDF and file it inline in the same eFolder batch as the AUS + property-data push (LOA-1677). Fields are absent for non-appraisal audits or a failed/timed-out appraisal.
 - `workflow:error` → `auditState: Error` (recoverable); `DUPLICATE_AUDIT` is ignored; skipped if already in a final state.
 - `workflow:start` → reset `audit_details` to `Processing` and PATCH Encompass to `Processing`; shadow runs are skipped entirely.
