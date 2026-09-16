@@ -1,0 +1,139 @@
+---
+title: Loan Lab
+description: Generate synthetic mortgage loans and submit them for a real audit run — team-accessible from any deployed Octy.
+icon: test-tubes
+---
+
+Loan Lab (`/loan-lab`) generates synthetic mortgage loans — borrower data plus a generated PDF document set — and submits them to LoanLight int for a real audit run. It is a port of [loanclone](https://github.com/loanlight-engineering/loanclone), a local-only tool that previously ran on one engineer's machine with one set of credentials. The port makes scenarios team-accessible from any deployed Octy instance and makes a scenario something you can describe and save rather than a pull request.
+
+Source: `octy/src/lib/loan-lab/` (core library), `octy/src/app/(app)/loan-lab/` (UI), `octy/src/app/api/loan-lab/` (Next.js API routes). Internal spec: `octy/docs/loan-lab.md`.
+
+<Warning>
+**Loan Lab is off by default.** `loanLabEnabled` is `"false"` in both `infra/cdk.context.*.json`. The flag gates both the `LOAN_LAB_ENABLED` env var and the CDK references to three required secrets — they are gated together because `createSecret` emits a reference and ECS refuses to start a task whose referenced secret does not exist. See [Enabling Loan Lab](#enabling-loan-lab) for how to turn it on.
+</Warning>
+
+## Where loans go
+
+**Nowhere near production, from any environment.** `src/lib/loan-lab/config/destinations.ts` compiles in LoanLight **int**'s partner API and the **Concept (UAT)** Encompass instance. Both int Octy and prod Octy post to those same two endpoints — the URLs are code constants, not configuration. Only credentials are configured, and they carry int-scoped values in both environments.
+
+| Destination | Payload | Run ends at | IDs recorded |
+|---|---|---|---|
+| LoanLight int | MISMO XML | **audit started** | loan id, audit id |
+| Encompass UAT | loan-entity JSON | **loan + documents delivered** | GUID, loan number |
+
+The two destinations are not symmetric. Creating a loan through the partner API does not start an audit — that is a separate call which the run makes. Creating via Encompass produces no LoanLight audit; start one through the normal pipeline and the loan appears in int under the test lender.
+
+A run started from **prod** Octy creates its loan in **int**, so result links are absolute rather than relative.
+
+## Isolation model
+
+`audit_runs` has no `is_test` column. The only thing separating synthetic data from real data is the **name** of the lender it belongs to — `OCTY_TEST_LENDER_NAME`, shared with the EPC Simulator — and only a handful of call sites filter on it (`src/lib/billing.ts`, `classify-split-config/actions/staged-targets.ts`, the epc-sim modules).
+
+Before creating anything, `loanlight/preflight.ts` calls the partner API's `GET /api/v1/partner/whoami` endpoint to confirm which lender the configured key belongs to, and **refuses the run** if it is not the test lender. It fails closed: an unreachable identity endpoint is treated the same as a key pointed somewhere unexpected.
+
+<Note>
+Int is shared. Synthetic loans are visible in int dashboards, aggregate counts, the alert feed, and Datadog monitors alongside real runs. Scenarios designed to fail look like real incidents there. Int alert noise is expected to rise; check the lender before treating an alert as a regression.
+</Note>
+
+## Scenarios and runs
+
+### A scenario is data
+
+`src/lib/loan-lab/scenario/schema.ts` defines `ScenarioSpec` — a single Zod object describing a loan's shape, its borrower, which documents are produced, and which of them deliberately disagree with the loan.
+
+Everything converges on this object: the 30 built-in presets are spec literals, the Generate agent emits one, deriving from a production loan produces one, and saving stores one. A spec is PII-free by construction (`scenario/overrides.ts` is an enumerated allowlist, not a free-form map), which is what makes derivation safe and lets a scenario move between environments as plain JSON.
+
+`buildScenario(spec, { seed, clock })` turns a spec into MISMO XML, an Encompass payload, and document files. The **seed lives on the run, not the spec**: the same scenario run twice produces two different borrowers, while the same seed and clock produce byte-identical output — which is how the previewed borrower is the one that actually gets created.
+
+### Surfaces
+
+- **Generate** — describe a scenario in prose or edit the form. Both edit one object. A live preview shows the document manifest and borrower. Re-submitting edited prose replaces the whole spec and warns first.
+- **Scenarios** — the library. Presets and your own scenarios in one list; presets are read-only and offer **Duplicate**.
+- **Runs** — history, polled. Statuses are `running`, `succeeded`, `partial`, `failed`, `interrupted`. A `partial` run is flagged *audit outcome unreliable*, because an audit over an incomplete document set reports on the upload rather than the loan.
+- **From a loan** — derive a scenario from a real production loan, showing what was read next to what was produced.
+
+### Database tables
+
+Loan Lab's scenario library and run history are stored in two tables in loanlight-api's Aurora database. Both are vendored into `src/db/schema/loan-lab.ts`; the migrations belong to the loanlight-api repo.
+
+**`loan_scenarios`** stores scenario specs. Key columns:
+
+| Column | Type | Purpose |
+|---|---|---|
+| `slug` | `text` (unique) | Stable identity — presets carry their historical slug so `seedPresets()` can upsert without creating duplicates |
+| `spec` | `jsonb` | A `ScenarioSpec` — validated by Zod on every read and write |
+| `spec_version` | `integer` | Schema version, currently 1 |
+| `source` | `text` | One of `preset`, `agent`, `derived`, `manual` |
+| `source_prompt` | `text` | The prose prompt when the scenario came from an agent |
+| `derived_from_loan_id` | `uuid` | Provenance pointer (never surfaced outside Octy — mild re-identification risk) |
+
+**`loan_scenario_runs`** stores run history. Key columns:
+
+| Column | Type | Purpose |
+|---|---|---|
+| `spec` | `jsonb` | The spec **actually** used — not a pointer, so editing a scenario does not silently rewrite what history claims was run |
+| `seed` | `text` | Reproduces the exact borrower for this run |
+| `destination` | `text` | `loanlight` or `encompass` |
+| `status` | `text` | `running`, `succeeded`, `partial`, `failed`, `interrupted` |
+| `loanlight_loan_id` / `loanlight_audit_id` | `uuid` | Set on the partner-API path |
+| `encompass_loan_guid` / `loan_number` | `text` | Set on the Encompass path |
+| `document_outcomes` | `jsonb` | Per-file upload outcomes |
+| `heartbeat_at` | `timestamptz` | Written while the run is active; the reconciler moves abandoned `running` rows to `interrupted` after a deploy |
+
+Octy tolerates the absence of these tables: `src/lib/loan-lab/scenario/store.ts` falls back to the in-code preset specs when the tables are unavailable, so scenario generation still works before the migration lands. Saving and run history are unavailable without the tables.
+
+## Enabling Loan Lab
+
+Loan Lab ships **off** in all environments. To turn it on:
+
+<Steps>
+<Step title="Create the three secrets">
+```bash
+aws secretsmanager create-secret --name Octy/LoanLab/PartnerApiKey --secret-string '<key>'
+aws secretsmanager create-secret --name Octy/LoanLab/EncompassUatClientSecret --secret-string '<secret>'
+aws secretsmanager create-secret --name Octy/LoanLab/EncompassUatPassword --secret-string '<password>'
+```
+Where the partner key comes from: see [Cross-repo prerequisites](#cross-repo-prerequisites).
+</Step>
+<Step title="Fill non-secret identifiers in the CDK context">
+Add `encompassUatClientId`, `encompassUatUsername`, and `encompassUatInstanceId` to the environment's `cdk.context.*.json` file.
+</Step>
+<Step title="Set the flag and deploy">
+Set `loanLabEnabled` to `"true"` in the context file and run the CDK deploy.
+</Step>
+</Steps>
+
+With the flag on but a credential missing, the feature degrades rather than crashing: `isPartnerApiConfigured()` and `isEncompassConfigured()` check the env vars, the config route reports `configured: false`, and the UI disables **Run** against that destination.
+
+## Running locally
+
+```bash
+LOAN_LAB_ENABLED=true pnpm dev
+```
+
+Set `LOANLIGHT_API_URL` to point at a local API instance to avoid touching int. See `octy/.env.example` for the credential variables.
+
+## Cross-repo prerequisites
+
+Two things live in **loanlight-api**, not in `octy`. Loan Lab degrades rather than breaks without them:
+
+1. **`GET /api/v1/partner/whoami`** returning `{ lenderId, lenderName }` for the authenticated key. Without it the preflight cannot confirm the lender and refuses every run.
+2. **The `loan_scenarios` and `loan_scenario_runs` tables.** Generate them with `pnpm db:generate:custom` in loanlight-api (hand-written `.sql` files break CI). Until the migration lands, presets still list (the store falls back to the built-in specs), but nothing can run: `POST /api/loan-lab/runs` answers `503 PERSISTENCE_UNAVAILABLE` because `startRun` writes a row before any work begins.
+
+Also needs provisioning once, by whoever owns loanlight-api partner setup: the test lender row and its Encompass client-id mapping in int, a `partner_api_keys` row bound to it, and that key stored as a secret in both Octy environments.
+
+## What was dropped from loanclone
+
+The following loanclone features were not ported:
+
+- **Clone Loan** — the Encompass GUID → clean → recreate → copy-docs wizard.
+- **Load Test** — bulk staging, and the `$HOME`-browsing directory route.
+- **`custom_upload` and `doc_set_builder`** — two non-generative modes; `documents.include` / `exclude` / `extras` cover the latter's purpose as data on the spec.
+- **The MISMO-to-Encompass converter.** loanclone offered two paths into Encompass; Loan Lab uses the native-JSON path only. The converter was lossy — it silently dropped employer phone, previous-employment income, and HMDA race — so scenarios arrived carrying findings nobody asked for.
+
+## Things worth knowing
+
+- **The vendored lender config** (`config/default.yaml`) is hand-synced from loanlight-api, like the Drizzle schema. `findUnknownConditions()` fails the test suite if it gains a `day_1` condition the resolver does not understand.
+- **Document type names disagree** between the YAML and the generator registry. `config/doc-type-aliases.ts` maps them and `findUnmappedDocTypes()` guards the gap. In loanclone this mismatch silently omitted the 1003, the paystub, and the W-2 from every YAML-driven document set — including the scenario called "Perfect Loan".
+- **Listings are vendored**, not scraped. Six scenarios need real, publicly-resolvable addresses; loanclone fetched Zillow live. Refresh `config/listings.fixture.json` by re-capturing.
+- **Runs are database-backed**, not in memory. Octy runs 2–4 ECS tasks, so a poll can land on a task that never heard of the run. A reconciler moves abandoned `running` rows to `interrupted` rather than leaving them stuck after a deploy.

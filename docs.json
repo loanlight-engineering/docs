@@ -272,6 +272,7 @@
               "octy/loan-lookup",
               "octy/llm-experiments",
               "octy/epc-simulator",
+              "octy/loan-lab",
               "octy/db-studio",
               "octy/classify-split-config",
               "octy/routing-config",

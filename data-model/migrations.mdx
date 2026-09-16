@@ -183,6 +183,26 @@ Never hand-collapse migrations or hand-edit `meta/_journal.json`, the
 populated local DB, drop and rebuild, clearing the **`drizzle` schema** (not just `public`).
 </Warning>
 
+## Migration Lambda runtime guards (LOA-1919)
+
+The `DbMigrate` Lambda runs as a CloudFormation custom resource on every deploy. Before LOA-1919, a blocked statement would silently exhaust the Lambda's full budget (up to 15 minutes), and CloudFormation's failure reason named neither the statement nor its blocker. Three hardening measures now apply:
+
+**Session guards.** Immediately after connecting, the handler applies three Postgres session-level settings to the migration connection:
+
+```sql
+SET lock_timeout = '5s';
+SET statement_timeout = '60s';
+SET idle_in_transaction_session_timeout = '30s';
+```
+
+`lock_timeout` caps how long a migration waits for a table lock — and, as a side effect, how long it parks application queries behind it in the lock queue. `statement_timeout` bounds any individual statement that does acquire a lock. `idle_in_transaction_session_timeout` evicts a connection that opens a transaction and stalls. Source: `packages/api/infra/lambda/db-migrate/session-guards.ts`.
+
+**Failure pointer.** Every Lambda error is re-thrown with the CloudWatch log group and stream name prepended (`failure-pointer.ts`). CloudFormation truncates long failure reasons at an internal limit, so the pointer leads and the detail trails — without this, an operator reading a red stack must grep all invocations to find which produced the error.
+
+**Preflight edited-migration check.** After ledger reconciliation and before applying any pending migration, the Lambda checks whether any already-applied migration file has changed on disk (`preflight.ts`). Drizzle selects migrations by content hash, so an edit silently re-runs the migration, and not all are idempotent. If any edited migration is found, the Lambda fails fast with a list of the offending tags rather than proceeding.
+
+**Lambda timeout.** `DbMigrateFn` timeout was reduced from 15 minutes to 5 minutes (300 s). The prior 15-minute budget was the ceiling for the whole function; a single statement blocking for that long manifested as an opaque Lambda timeout rather than a lock-wait error. The session guards now bound statement execution well within 5 minutes, so the shorter timeout brings CloudFormation failures to the surface faster.
+
 ## aus-db shared package (LOA-1961)
 
 `@loanlight-engineering/aus-db` in `loanlight-shared` is the canonical, versioned distribution of the AUS database migration chain. It was created to make the chain consumable by the API deploy process, the Postgres release docker image, and Octy without each consumer duplicating the SQL files.
