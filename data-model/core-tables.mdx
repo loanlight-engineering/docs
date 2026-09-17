@@ -31,7 +31,7 @@ The central loan record (`loans.ts`). PK `id` uuid, `lender_id` → `lenders.id`
 <ParamField path="loan_number" type="text NOT NULL">The lender's loan number.</ParamField>
 <ParamField path="latest_version" type="integer">Default `1`.</ParamField>
 <ParamField path="llc_pipeline_id" type="text">The loan's 1:1 LlamaCloud pipeline id.</ParamField>
-<ParamField path="encompass_loan_id" type="text">Unique where not null.</ParamField>
+<ParamField path="encompass_loan_id" type="text">Unique where not null. Migration `0072` (LOA-2838) added a nonblank check: when non-null, the value must equal its ECMAScript-whitespace-trimmed form and must not be the empty string (`loans_encompass_loan_id_nonblank_check`). This is enforced on every write from migration `0072` onward; migration `0076` ran `VALIDATE CONSTRAINT` to scan existing rows.</ParamField>
 <ParamField path="los_provider" type="text">Default `encompass`.</ParamField>
 <ParamField path="processing_status" type="text">Default `ready`. CHECK `loans_processing_status_check`: `processing | ready_for_audit | ready | error`.</ParamField>
 <ParamField path="loan_type" type="text">Plain text (not the `loan_type` pgEnum). `loan_program_name` is also stored.</ParamField>

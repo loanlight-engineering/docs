@@ -64,6 +64,8 @@ Before the terminal PATCH, `AusUpdateService.deliverFindings(...)` evaluates and
 
 **Enablement** is per finding-code family, off by default. The `findings_*` flags in `feature-flags.registry.ts` carry a `feature_value` of `off` / `manual` / `auto`; only `auto` delivers in this release. When no definitions match or the registry is empty, `deliver` short-circuits before any I/O.
 
+**LL-Appraisal-01 — first registered finding (LOA-2040).** `APPRAISAL_FINDING_DEFINITION` is the first entry in `FINDING_DEFINITIONS` (`findings.registry.ts`). It fires when the appraisal section state is `"ran"` AND the appraisal payload contains at least one finding. The finding code is `LL-Appraisal-01`; `registeredName` is `"LoanLight Appraisal Findings Available — Review Required"`. Its `family` is `"appraisal"` and its `cardinality` is `"run"` (one finding per audit run, not per issue). The appraisal payload is fetched lazily inside `FindingsDeliveryService` via a `loadAppraisal()` closure that calls `AuditResultsFetcherService.fetchAppraisal`; the fetch is best-effort and resolves to a degraded load on failure so a failed appraisal fetch never blocks findings delivery for other families. The `sectionState` for `"appraisal"` reads the load's own state, not the pre-computed `availability` map, because `availability` is resolved before the lazy fetch and cannot reflect its result.
+
 **Best-effort.** A findings delivery failure is logged and alerted (Datadog monitor `findings-delivery-failed`) but never blocks the terminal PATCH. Completion always reaches Encompass.
 </Step>
 <Step title="PATCH the report into Encompass">

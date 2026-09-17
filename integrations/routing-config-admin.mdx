@@ -115,6 +115,18 @@ The resolver emits a new routing outcome `bucket_fallback` (a success outcome) w
 
 **Shipped inert.** No `bucketRules` are seeded. Every document falls through to today's behaviour until LOA-2464 seeds the first bucket rules.
 
+### Per-property and per-account eFolder routing (LOA-2839)
+
+When a global rule uses `{property_address}` or `{account_number}` placeholders in its `nameTemplate`, documents are routed to per-property or per-account eFolders. Two authoring-time validations enforce split consistency:
+
+**Half-split guard.** `authorGlobalVersion` rejects a global rule set where `nameTemplate` and `typeTemplate` do not split on the same fields. The check compares the field set of each template (with `{x_slug}` folded onto `{x}`) against the rule's `descriptionTemplate` axis fields:
+- A field present in `typeTemplate` but absent from `nameTemplate` is rejected: the type splits per property while the name is static, so Encompass, which matches folders by name, would file two containers into one folder.
+- A field that is an axis field (in `descriptionTemplate`) and present in `nameTemplate` but absent from `typeTemplate` is rejected for the same reason in the opposite direction.
+
+**Override placeholder guard.** `authorLenderVersion` rejects a per-lender `nameTemplate` override that drops a placeholder present in the global `nameTemplate`. If the global name splits per property and the lender override removes `{property_address}`, the type still splits but the name no longer does.
+
+**Generated document type exemption.** Both guards exempt LoanLight-generated document types (`aus_results`, `property_report`, `appraisal_review_summary`, `bank_statement_income_report`). LoanLight emits one report per property already labelled by `descriptionTemplate`; a lender may legitimately want all generated reports in a single folder without naming it per property. The exemption is intentional — applying the guard to generated types would make that configuration unsaveable.
+
 ## Error responses
 
 | Status | Body | When |

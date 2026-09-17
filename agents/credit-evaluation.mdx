@@ -133,11 +133,25 @@ As of LOA-2188 follow-up: `buildFactsFromCandidates` no longer fabricates `repor
 <Accordion title="evaluateRules — DB-backed rule evaluation">
 Resolves `loanProgramId` for program-scoped credit rules (LOA-1080) and calls
 `evaluateWithCreditRules`. The DB evaluator is authoritative; this node does no rule-set
-pre-lookup. Returns `complianceResults`, `ruleSetId`, and `ruleSetVersion`. The node threads
+pre-lookup. Returns `complianceResults`, `ruleSetId`, `ruleSetVersion`, `scopedGrossMonthlyIncome`, and `dtiIncomeSuppressed`. The node threads
 `loanAmount`, `creditReportDate`, `creditReferenceNumber`, and `applicationBorrowers` from the
 graph state into `CreditRuleContext`. `loanAmount` is used by CRED_024; `creditReportDate` and
 `creditReferenceNumber` are the assertion side for CRED_029/030; `applicationBorrowers` is the per-person
 roster used by CRED_001/002/003 for multi-borrower consistency checks (see [Multi-borrower loan view](#multi-borrower-loan-view)).
+
+**Per-borrower credit group DTI scoping (LOA-2741).** On a multi-application loan, the
+dispatcher hands every credit document the same loan-level `grossMonthlyIncome` because the
+document's owning credit group is only knowable after that document's borrowers are extracted.
+`mergeCandidates` resolves the group; `evaluateRules` applies it via `scopeDtiAxesToCreditGroup`:
+- When the report resolves to a credit group that has qualifying income, DTI rules use that
+  group's income (`scopedGrossMonthlyIncome`) and the group's `hasNonOccupantCoBorrower`
+  indicator. The scoped values are also threaded into `generateAiSummary` so the DTI header
+  and the AI narrative agree with the rule verdicts.
+- When the report cannot be placed in a credit group and the MISMO declared grouping, DTI
+  income is **suppressed** (`dtiIncomeSuppressed: true`) rather than divided by a population
+  the report does not represent. Rules that require income (`CRED_014`, `CRED_025`) return
+  `NEEDS_INFO` in this case.
+- A loan whose MISMO declared no grouping keeps the flat loan-level scalar (prior behavior).
 </Accordion>
 <Accordion title="generateAiSummary — DTI and narrative">
 Computes `dtiRatio = totalMonthlyDebt / grossMonthlyIncome`, guarding `grossMonthlyIncome > 0`.

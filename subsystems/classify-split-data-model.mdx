@@ -10,19 +10,20 @@ sit in the wider schema, see [data model overview](/data-model/overview).
 
 ## classify_split_runs
 
-One row per classification run.
+One row per classification run. For income runs, there is one row **per source document** (not per income run) since LOA-2371.
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid PK | |
-| `audit_run_id` | uuid FK → `audit_runs.id` (cascade) | Set for EPC runs only; NULL for partner/income runs |
-| `loan_id` | uuid FK → `loans.id` (cascade) | Set on all new runs; drives loan-level lookups |
-| `triggered_by` | varchar(30) | CHECK ∈ `epc_audit_run`, `partner_create_loan`, `partner_upload_documents`, `income_run` |
-| `status` | varchar(20) default `'pending'` | CHECK ∈ `pending`, `running`, `complete`, `failed`, `skipped`, `partial` |
-| `classification_mode` | text NOT NULL default `'per_segment'` | The mode the run actually used. CHECK ∈ `per_segment`, `majority_bucket`, `two_pass` |
-| `is_dry_run` | boolean NOT NULL default `false` | True for octy dry-runs; stamped at INSERT |
-| `cost` | `jsonb` | Per-document LlamaCloud split/classify spend (migration `0271`). Same `AgentRunCost` JSONB shape as `agent_runs.cost`; lines carry `docRef = loan_document_id` so spend rolls up per source document. Written once at run completion from the usage-metrics endpoint. NULL on legacy rows. |
-| `started_at`, `completed_at`, `error_message`, `created_at` | timestamps / text | |
+|| Column | Type | Notes |
+||---|---|---|
+|| `id` | uuid PK | |
+|| `audit_run_id` | uuid FK → `audit_runs.id` (cascade) | Set for EPC runs only; NULL for partner/income runs |
+|| `loan_id` | uuid FK → `loans.id` (cascade) | Set on all new runs; drives loan-level lookups |
+|| `triggered_by` | varchar(30) | CHECK ∈ `epc_audit_run`, `partner_create_loan`, `partner_upload_documents`, `income_run` |
+|| `status` | varchar(20) default `'pending'` | CHECK ∈ `pending`, `running`, `complete`, `failed`, `skipped`, `partial`, `staged` |
+|| `classification_mode` | text NOT NULL default `'per_segment'` | The mode the run actually used. CHECK ∈ `per_segment`, `majority_bucket`, `two_pass` |
+|| `is_dry_run` | boolean NOT NULL default `false` | True for octy dry-runs; stamped at INSERT |
+|| `cost` | `jsonb` | Per-document LlamaCloud split/classify spend (migration `0271`). Same `AgentRunCost` JSONB shape as `agent_runs.cost`; lines carry `docRef = loan_document_id` so spend rolls up per source document. Written once at run completion from the usage-metrics endpoint. NULL on legacy rows. |
+|| `income_run_id` | uuid FK → `income_runs.id` (set null, added LOA-2371) | Links a source-scoped income classification to its income run. NULL on all non-income rows. |
+|| `started_at`, `completed_at`, `error_message`, `created_at` | timestamps / text | |
 
 Indexes: `uq_classify_split_runs_audit` (unique on `audit_run_id` where not null — one run per audit),
 `idx_classify_split_runs_loan_id`, `idx_classify_split_runs_status`.
@@ -30,8 +31,11 @@ Indexes: `uq_classify_split_runs_audit` (unique on `audit_run_id` where not null
 <Note>
 `pending` is the column default but the **code never writes it**. New runs start at `running`
 (skipped runs at `skipped` via `createSkippedRun`); the TS `ClassifySplitRunStatus` union is
-`running | complete | partial | failed | skipped`. The CHECK still lists `pending`.
+`running | complete | partial | failed | skipped | staged`. The CHECK lists `pending` and `staged` too.
+`staged` is used exclusively by income classification: an income classification row sits in `staged` after the split/classify vendor calls complete but before the publication transaction commits it to the `income_run_sources` table. A `staged` row that is never published is reaped by `sweepAbandonedStagedGenerations`.
 </Note>
+
+`income_run_sources` (added by LOA-2371) gains a `classify_split_run_id` column (uuid FK → `classify_split_runs.id`, set null on delete, indexed). This is the per-source pointer from the income run to its classify run; `income_run_sources_classification_first_writer` (DB trigger) enforces first-writer-wins on this link to prevent a stale concurrent worker from overwriting an already-published classification.
 
 Run-status rollup at the end of Phase 2: `totalFailedCount = splitFailCount + classifyFailCount`;
 `complete` when there are no failures, `failed` when every document failed at split

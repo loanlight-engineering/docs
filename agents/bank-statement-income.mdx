@@ -310,6 +310,12 @@ A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categ
 
 **What it writes:** per-transaction `transactions.credit_category` columns plus `transactions.credit_category_source` (CHECK `structural | resolver | fallback | NULL`, migration `0045`) which records how the v2 answer was derived.
 
+**`Interest` category income eligibility fix (LOA-2767, 2026-09-16).** The `ENABLE_CREDIT_CATEGORIZATION_V2` flag went fleet-wide on 2026-09-08. The v2 vocabulary maps Plaid PFC codes `INCOME_DIVIDENDS` and `INCOME_INTEREST_EARNED` to the category `Interest`. In v1 those same codes mapped to `"Investment Income"` — ineligible for both borrower profiles. In v2, `Interest` had been marked `{ personal: true, business: true }`, silently moving interest and dividend credits into qualifying income when the flag flipped. As of LOA-2767, `Interest` is now ineligible for both profiles, restoring parity with v1. A reversal-shaped `Interest` row is no longer demoted to `Credit` (the `REVERSAL_DEMOTABLE_CATEGORIES` set was updated accordingly).
+
+<Note>
+Divergences between v1 and v2 eligibility verdicts for 13 `(PFC code, profile)` pairs are intentionally preserved as of LOA-2767 and tracked in LOA-2835. Ten inflate income (retirement pension, child support, unemployment, long-term disability, and cash advances route to `Deposit` or `P2P Payment` in v2). Two are accepted improvements (`TRANSFER_IN_ACCOUNT_TRANSFER` and `INCOME_MILITARY`). These are underwriting policy calls, not bugs.
+</Note>
+
 **How v2 is served (LOA-2696):** `creditCategoryVocabulary()` (`lib/bank-statement/credit-category-vocabulary.ts`) is the **single flag reader** — all read paths delegate to it rather than reading the env var directly. When the flag is on, `servedCategory()` returns from `v2CreditCategoryVocabulary`; when off, from `v1CreditCategoryVocabulary`. The v2 vocabulary serves answers in three tiers:
 
 1. **Override** — a human-authored reviewer correction wins unconditionally.

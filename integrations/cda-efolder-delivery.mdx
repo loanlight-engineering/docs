@@ -1,0 +1,152 @@
+---
+title: CDA eFolder delivery
+description: The loanlight-api producer that publishes completed CDA PDFs to Encompass eFolders via EventBridge.
+icon: send
+---
+
+The CDA eFolder delivery system delivers completed collateral data audit (CDA) PDFs from `loanlight-api` into Encompass eFolders. It is split across two services: `loanlight-api` owns the **producer** (PDF identity, lender eligibility, publication outbox, and EventBridge emission), and `loanlight-integrations` owns the **consumer** (eFolder credentials, destination selection, provider delivery, and the consumer ledger). This page covers the producer side only.
+
+## How it works
+
+When a `collateral_review_orders` row of type `cda` reaches `status = 'succeeded'` and the lender's `cda_efolder_delivery_enabled` flag is on, the order becomes **eligible**: the producer sets `cda_efolder_eligible_at` and binds the Encompass loan GUID and the PDF's SHA-256 to the order. A background sweep picks up eligible orders and publishes one EventBridge event per order to the default bus. `cda_efolder_event_published_at` is set only after EventBridge acknowledges the event — it does not mean the eFolder delivery completed.
+
+The integrations consumer subscribes to that event type and handles eFolder credentials, destination selection, and actual delivery.
+
+## Feature flag
+
+`cda_efolder_delivery_enabled` is a per-lender `lender_feature_flags` row. Set it to `false` to pause new claims and new republishes. A disable is checked atomically at claim time; it does not cancel an already-acquired lease or retract an event that EventBridge has already accepted.
+
+Keep every lender absent/off until the cross-service preflight below is complete. Set it to `true` to resume; the flag write releases only eligible rows that are unleased, already due, or carry a retry error.
+
+## Producer outbox columns on `collateral_review_orders`
+
+Migrations `0073`–`0076` (LOA-2703) add these columns to `collateral_review_orders`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `cda_efolder_eligible_at` | `timestamptz` | Set when the order becomes eligible for delivery. NULL means the order is inert (pre-feature, or `cda_efolder_delivery_enabled` was off when it succeeded). |
+| `cda_efolder_encompass_loan_id` | `text` | The Encompass loan GUID bound at claim time. A row cannot publish without a non-null, nonblank value. |
+| `cda_efolder_pdf_sha256` | `text` | Lowercase 64-character SHA-256 of the PDF at the bound S3 key. CHECK `^[0-9a-f]{64}$`. Bound at eligibility time. |
+| `cda_efolder_event_attempt_count` | `integer NOT NULL default 0` | Monotonic claim generation counter. A non-zero future `cda_efolder_event_next_attempt_at` with no error code is an active lease. |
+| `cda_efolder_event_next_attempt_at` | `timestamptz` | When the next claim attempt is due. NULL after a successful publication. |
+| `cda_efolder_event_published_at` | `timestamptz` | Set when EventBridge acknowledges the event. Non-null means the event was sent; it does not mean eFolder delivery completed. |
+| `cda_efolder_event_last_error_code` | `text` | The most recent error, or NULL when the last attempt succeeded or no attempt has been made. |
+
+CHECK constraints:
+- `collateral_review_orders_efolder_eligibility_check` — `cda_efolder_eligible_at` is non-null only when `order_type = 'cda'`, `status = 'succeeded'`, and both `pdf_s3_key` and `cda_efolder_pdf_sha256` are non-null.
+- `collateral_review_orders_efolder_publication_check` — `cda_efolder_event_published_at` is non-null only when `cda_efolder_eligible_at`, `cda_efolder_encompass_loan_id`, and `cda_efolder_event_attempt_count > 0` are all set.
+- `collateral_review_orders_efolder_sha256_check` — the SHA-256 matches `^[0-9a-f]{64}$` when non-null.
+- `collateral_review_orders_efolder_loan_id_check` — `cda_efolder_encompass_loan_id` is non-blank when non-null.
+
+## The sweep
+
+The advisory-locked sweep runs every five minutes. It picks up eligible, unleased, and due rows, acquires a generation-fenced lease, and publishes to EventBridge. The sweep emits Datadog metrics with the `environment` tag:
+
+- `loanlight.cda_efolder.publication_claim`
+- `loanlight.cda_efolder.eventbridge_accepted`
+- `loanlight.cda_efolder.publication_retry`
+- `loanlight.cda_efolder.expired_claim`
+- `loanlight.cda_efolder.sweep_heartbeat` — emitted twice per tick (once on advisory-lock acquisition, once after the batch). A tick can run for tens of minutes at the batch cap; the leading emit is what keeps the absence monitor alive.
+
+`oldest_eligible_unpublished_age_seconds` measures time since a row became **due** (`COALESCE(next_attempt_at, eligible_at)`), not since it became eligible. A row inside its lease or backoff reads 0.
+
+## Error codes
+
+| Code | Meaning |
+|---|---|
+| `missing_encompass_loan_id` | No Encompass loan GUID is bound to the order. Reparable — see below. |
+| `invalid_encompass_loan_id` | The bound GUID is not in the canonical format the contract requires. Reparable — see below. |
+| `loan_lender_mismatch` | The loan's lender changed after the order was written. No repair path. |
+| `invalid_pdf_s3_key` | `pdf_s3_key` diverged from the expected key. No repair path. |
+| `invalid_pdf_sha256` | The stored SHA-256 does not match the PDF at the bound key. No repair path. |
+| `eventbridge_rejected` | EventBridge rejected the publication call. No automatic repair. |
+| `eventbridge_transport_error` | Transient network/transport error. Retries with exponential backoff capped at six hours. |
+
+`loan_lender_mismatch`, `invalid_pdf_s3_key`, and `invalid_pdf_sha256` have no remedy inside this repository — they retry every six hours indefinitely while the `cda-efolder-backlog-aged` monitor pages. Escalate to the owning team with the order row.
+
+## Encompass loan ID repair
+
+When an order is parked on `missing_encompass_loan_id` or `invalid_encompass_loan_id`, an internal super-admin repair endpoint can bind or rebind the Encompass loan GUID. The repair:
+
+- Is internal-super-admin-only. Two attestations are required: `provider_ui_verified` and `reviewed_support_case`.
+- Refuses to overwrite a GUID the contract already accepts (the existing value is valid — not a repair target).
+- Requires an 8–200 character printable-ASCII evidence note. Do not include borrower data, loan terms, tokens, credentials, or document contents.
+- Audits both outcomes: `loan.encompass_id_linked` (first link) and `loan.encompass_id_repair_replayed` (replay of an already-correct ID). Both record `rescheduledOrderIds`.
+- Wakes only rows parked on `missing_encompass_loan_id` or `invalid_encompass_loan_id`. Rows carrying `loan_lender_mismatch`, `invalid_pdf_s3_key`, `invalid_pdf_sha256`, or `eventbridge_rejected` are not touched.
+
+<Note>
+**Known window:** A row being claimed right now has a NULL error code (the claim nulls it; `scheduleRetry` re-sets it). A repair landing in this window matches nothing and audits `rescheduledOrderIds: []`. Re-run the repair — it is idempotent and audited.
+</Note>
+
+## Cross-service preflight
+
+Before enabling a lender, verify:
+- AWS account and region for the API producer.
+- The EventBridge default bus and IAM permission.
+- S3 bucket/key access and KMS decrypt access for the recorded PDF.
+- The shared event contract release.
+- The integrations consumer deployment.
+
+The following are owned by `loanlight-integrations` and are not configurable here: target-DLQ re-PutEvents, consumer-DLQ redrive, archive replay, consumer ledger, manual-review, eFolder credentials, destination selection, and provider reconciliation.
+
+## Datadog monitors
+
+Three monitors cover the CDA eFolder producer path (`packages/api/observability/datadog/`):
+
+| Monitor | Threshold |
+|---|---|
+| `cda-efolder-backlog-aged` | Warns at 2 h, alerts at 6 h of oldest unpublished age. |
+| `cda-efolder-publication-stuck` | Alerts when a publication claim is in-flight past a deadline. |
+| `cda-efolder-sweep-missing` | Alerts after 15 minutes without a sweep heartbeat. |
+
+## Querying the producer outbox
+
+```sql
+-- Inspect a specific order's producer state.
+SELECT id, lender_id, loan_id, status, pdf_s3_key, cda_efolder_eligible_at,
+       cda_efolder_encompass_loan_id, cda_efolder_pdf_sha256,
+       cda_efolder_event_published_at, cda_efolder_event_attempt_count,
+       cda_efolder_event_next_attempt_at, cda_efolder_event_last_error_code
+FROM collateral_review_orders
+WHERE id = :order_id;
+
+-- List eligible, unpublished rows for a lender (enabled backlog).
+SELECT orders.id, orders.lender_id, orders.loan_id,
+       orders.cda_efolder_eligible_at, orders.cda_efolder_event_published_at,
+       orders.cda_efolder_event_next_attempt_at,
+       orders.cda_efolder_event_last_error_code
+FROM collateral_review_orders AS orders
+JOIN lender_feature_flags AS flags
+  ON flags.lender_id = orders.lender_id
+ AND flags.feature_key = 'cda_efolder_delivery_enabled'
+ AND flags.enabled = TRUE
+WHERE orders.order_type = 'cda'
+  AND orders.status = 'succeeded'
+  AND orders.cda_efolder_eligible_at IS NOT NULL
+  AND orders.cda_efolder_event_published_at IS NULL
+ORDER BY COALESCE(
+  orders.cda_efolder_event_next_attempt_at,
+  orders.cda_efolder_eligible_at
+), orders.id;
+```
+
+<Note>
+A historical succeeded CDA row with `cda_efolder_eligible_at IS NULL` is deliberately inert — it predates the feature or was written while the flag was off. Do not backfill it into delivery.
+</Note>
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Integrations service overview" href="/integrations/service-overview" icon="layers">
+    The integrations consumer that delivers to the Encompass eFolder.
+  </Card>
+  <Card title="Audit lifecycle" href="/integrations/audit-lifecycle" icon="workflow">
+    How the AUS report delivery and findings delivery fit together.
+  </Card>
+  <Card title="Core tables" href="/data-model/core-tables" icon="table">
+    The `loans.encompass_loan_id` column that the producer binds.
+  </Card>
+  <Card title="Integrations database schema" href="/integrations/database-schema" icon="database">
+    The full integrations DB schema including delivery ledgers.
+  </Card>
+</Columns>

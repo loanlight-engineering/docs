@@ -172,7 +172,8 @@
               "integrations/lender-resolution",
               "integrations/orchestration-pipeline",
               "integrations/results-access",
-              "integrations/legacy-dev-connect"
+              "integrations/legacy-dev-connect",
+              "integrations/cda-efolder-delivery"
             ]
           },
           {

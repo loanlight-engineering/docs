@@ -65,10 +65,17 @@ assembler will silently drop the field for SQS-delivered messages.
 </ParamField>
 <ParamField path="loanMetadata" type="loanMetadataSchema" required>
   Loan number, program, closing dates, ratios, citizenship, `lenderCode`, and other loan
-  fields (shared schema). Recently gained two optional fields: `incomeType` (from
-  `CX.LOANLIGHT.INCOMETYPE`) and `noteRate` (note rate, percent), both surfaced on the audit
-  PDF's Loan Details card. The top-level `IntegrationAuditRequestSchema` contract is otherwise
-  unchanged.
+  fields (shared schema). Two recent additions:
+
+  - `incomeType` (from `CX.LOANLIGHT.INCOMETYPE`) and `noteRate` (note rate, percent)—both surfaced on the audit PDF's Loan Details card.
+  - `transactionId` (string, optional) — the EPC transaction id (`transaction.id`). Added by LOA-2838; used by loanlight-api to correlate the audit run back to the Encompass EPC transaction.
+  - `encompassLoanId` (string, optional) — the Encompass loan GUID, parsed from the EPC entity ref (`entityRef.entityId`). Added by LOA-2838. Stored on `loans.encompass_loan_id`. The CDA eFolder delivery producer binds this identifier to each `collateral_review_orders` row at claim time.
+
+  <Note>
+  `encompassLoanId` is sourced from `parseLoanNumberFromEntityId(transaction.entityRef.entityId)`, not from `loanGuid`. The latter falls back to the correlation id (a UUID of a different record), so it cannot be used here.
+  </Note>
+
+  - `applications` (array, optional) — added by LOA-2804. Each entry is `ApplicationMetadata` containing the same per-application fields as the flat scalars (`bottomRatioPercent`, citizenship fields, residence/employment foreign-address indicators, REO indicator), index-aligned with `loan.applications`. Entry 0 duplicates the flat scalars; entries 1+ carry data for additional credit groups that `applications?.[0]` alone was dropping. Omitted entirely when the Encompass loan has no applications.
 </ParamField>
 <ParamField path="documents[]" type="array (passthrough)">
   Optional document manifest. Each entry:
