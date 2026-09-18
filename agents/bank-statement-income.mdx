@@ -313,7 +313,27 @@ A deterministic credit-categorization pipeline (`lib/bank-statement/credit-categ
 **`Interest` category income eligibility fix (LOA-2767, 2026-09-16).** The `ENABLE_CREDIT_CATEGORIZATION_V2` flag went fleet-wide on 2026-09-08. The v2 vocabulary maps Plaid PFC codes `INCOME_DIVIDENDS` and `INCOME_INTEREST_EARNED` to the category `Interest`. In v1 those same codes mapped to `"Investment Income"` — ineligible for both borrower profiles. In v2, `Interest` had been marked `{ personal: true, business: true }`, silently moving interest and dividend credits into qualifying income when the flag flipped. As of LOA-2767, `Interest` is now ineligible for both profiles, restoring parity with v1. A reversal-shaped `Interest` row is no longer demoted to `Credit` (the `REVERSAL_DEMOTABLE_CATEGORIES` set was updated accordingly).
 
 <Note>
-Divergences between v1 and v2 eligibility verdicts for 13 `(PFC code, profile)` pairs are intentionally preserved as of LOA-2767 and tracked in LOA-2835. Ten inflate income (retirement pension, child support, unemployment, long-term disability, and cash advances route to `Deposit` or `P2P Payment` in v2). Two are accepted improvements (`TRANSFER_IN_ACCOUNT_TRANSFER` and `INCOME_MILITARY`). These are underwriting policy calls, not bugs.
+**LOA-2835** (2026-09-17) encodes the product ruling on the divergent groups that LOA-2767 surfaced:
+
+**Two new categories** join `CreditCategory` and `CREDIT_CATEGORIES` (the vocabulary now has 19 members):
+- `Retirement` — personal-eligible, business-not. Pension credits (Plaid code `INCOME_RETIREMENT_PENSION`) route here.
+- `Gov. Support` — ineligible for both profiles. Child support (`INCOME_GOVERNMENT_AND_NON_PROFIT_*`), unemployment (`INCOME_UNEMPLOYMENT`), and long-term disability (`INCOME_DISABILITY`) route here.
+
+**Five Plaid codes rerouted** via `V1_TO_V2_TRANSLATION` and `pfcServedOverride`:
+
+| Plaid PFC code | Old v2 category | New category | Personal eligible | Business eligible |
+|---|---|---|---|---|
+| `INCOME_RETIREMENT_PENSION` | `Deposit` | `Retirement` | Yes | No |
+| `INCOME_GOVERNMENT_AND_NON_PROFIT_*` (child support) | `P2P Payment` | `Gov. Support` | No | No |
+| `INCOME_UNEMPLOYMENT` | `Deposit` | `Gov. Support` | No | No |
+| `INCOME_DISABILITY` (long-term) | `Deposit` | `Gov. Support` | No | No |
+| `INCOME_LOAN_PAYMENTS` / `LOAN_DISBURSEMENTS_*` (cash advances) | `Deposit` | `Loan` | No | No |
+
+The override applies only when the v2 pipeline answers with a **generic** structural/resolver category (`Deposit`, `ACH Deposit`, `Customer Payment`, `P2P Payment`, or `Wire`). A specific structural answer (e.g. own-account `Account Transfer`, `W2`, `Refund/Reimbursement`) overrides regardless of Plaid code. The `pfcServedOverride` function in `pfc-served-override.ts` implements this, and the five codes are registered in `DISPOSITION_GATED_DETAILED` so category corrections and the counterparty ledger do not rewrite them.
+
+**v1 updated to match.** `loanlight-categories.ts` in both `loanlight-api` and `loanlight-shared` now marks `Retirement` personal-eligible and `Military` ineligible for both profiles, eliminating the remaining eligibility divergence between v1 and v2 for these groups. The only accepted divergences remaining are `TRANSFER_IN_ACCOUNT_TRANSFER` (v2 keeps it non-income; reverting would re-admit own-account inflation that LOA-2658 / LOA-2772 removed) and `INCOME_MILITARY` (accepted as an improvement).
+
+**Stored category label withheld on mismatch.** When the served (runtime-translated) category differs from the stored `credit_category` column value, `credit_category_label` is omitted from the API response to prevent a stale label from appearing on a benefit payment. Historical files are not recomputed; the served category changes on read immediately.
 </Note>
 
 **How v2 is served (LOA-2696):** `creditCategoryVocabulary()` (`lib/bank-statement/credit-category-vocabulary.ts`) is the **single flag reader** — all read paths delegate to it rather than reading the env var directly. When the flag is on, `servedCategory()` returns from `v2CreditCategoryVocabulary`; when off, from `v1CreditCategoryVocabulary`. The v2 vocabulary serves answers in three tiers:

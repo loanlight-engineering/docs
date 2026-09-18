@@ -31,6 +31,10 @@ The three source fetches run as equal-depth parallel siblings under one shared w
 `fetchProperty` bundles Zillow + ATTOM so the instrumentation channel is written once per
 super-step.
 
+A fourth concern — **listing screenshot capture** — runs as a side effect inside `fetchProperty`
+(Zillow) and `fetchRedfin`, not as a separate node, so it never adds to the wall-clock ceiling.
+See [Listing screenshots](#listing-screenshots) below.
+
 <Info>
 **Wall-clock ceiling.** `PROPERTY_DATA_CEILING_MS = 10 minutes`. `withWallClockCeiling(...)` races
 each fetch against `graphStartedAt + ceilingMs`; on exceed it resolves to `null` (a no-data
@@ -64,6 +68,10 @@ subject-only.
 `hasData.getPropertyDetails(...)` scrapes the listing, photos, and zestimate; `attom.getPropertyData(...)`
 fetches official records. The borrower fetch is gated by `shouldFetchBorrower(state)`, and there is
 a REO loop per `reoAddresses`.
+
+When `listing_screenshot_enabled` is on for the lender, a subject-only Zillow listing screenshot
+is captured here via `ListingScreenshotService.captureIfMissing` and stored on the
+`subjectZillowScreenshot` state channel.
 </Step>
 
 <Step title="fetchHazard">
@@ -73,6 +81,11 @@ channels, disjoint from the instrumentation channel.
 
 <Step title="fetchRedfin (enabled in int + prod)">
 Gated by `ENABLE_REDFIN_SOURCE === "true"`. Since LOA-2091 this variable is set `"true"` in integration and production environments — the step is no longer off by default. When active, it resolves a redfin.com URL via the site-aware SerpApi finder, then calls `hasData.getRedfinPropertyDetails(url)`. A null result degrades to a no-op merge. The Redfin merge is additive-only: `mergeRedfin()` never overwrites a non-null incumbent from HasData/Zillow or ATTOM.
+
+When `listing_screenshot_enabled` is on for the lender, a subject-only Redfin listing screenshot
+is captured here via `ListingScreenshotService.captureIfMissing` and stored on the
+`subjectRedfinScreenshot` state channel. Zillow and Redfin screenshots are captured independently
+because these two nodes run as parallel siblings in the same super-step.
 </Step>
 
 <Step title="consolidate">
@@ -87,6 +100,34 @@ official records (ownership, mortgages, title, liens, sales/assessment history, 
 Logs the instrumentation summary and returns `{ completed: true }`.
 </Step>
 </Steps>
+
+## Listing screenshots
+
+`ListingScreenshotService` (PR #4313) captures and stores a subject-property listing screenshot
+as audit and compliance evidence. It is **not** a data source — it records what the Zillow or
+Redfin listing showed at audit time, separate from the structured property data `HasDataService`
+scrapes.
+
+**Enablement.** The feature is opt-in per lender via the `listing_screenshot_enabled` feature flag
+(`lender_feature_flags.feature_key`). An absent row defaults off. Enable a lender with an
+`enabled = true` row from the Octy admin Flags tab. Flag-off is a strict no-op: zero HasData
+`/scrape/web` calls for either source.
+
+**One per (loanId, source), reused across audit runs.** The S3 key is deterministic:
+`property-data/{loanId}/subject-{source}-listing` (no file extension; `ContentType` at PutObject
+time is the authoritative format). `captureIfMissing` does a `HeadObject` check first. A cache
+hit returns `{ s3Key, sourceUrl, capturedAt, reused: true }` with no new HasData call. The flag
+is resolved once in `langgraph.service` and injected as a boolean into the graph — the graph
+itself carries no lender context.
+
+**Two channels.** `subjectZillowScreenshot` and `subjectRedfinScreenshot` are disjoint graph-state
+channels for the same reason `redfinSubject` is a separate channel from `property`: the Zillow
+and Redfin fetches are parallel siblings, so a shared channel would cause a reducer conflict.
+Only the subject property gets a screenshot; borrower and REO addresses do not.
+
+**Failure handling.** Any failure (missing bucket config, `HeadObject` error, HasData capture
+failure, `PutObject` failure) resolves to `null` — a missing screenshot never blocks the
+primary property fetch.
 
 ## Borrower-fetch gate
 
@@ -249,7 +290,14 @@ The subject row is `"subject"` (`source_order: 0`); REO rows are `"investment"`.
 - `null` — the field was never measured (a row written before the feature shipped).
 - `"Unknown"` — the classifier ran but could not resolve the property's identifiers to a census tract.
 
-The two states are deliberately distinguishable, matching the existing pattern established by `floodZone`.
+The two states are deliberately distinguishable. `null` is permanent for any row whose consolidated blob was absent when the producer wrote it, not purely a legacy state — every property type writes this from its own blob.
+
+<Note>
+The `floodZone` field that previously appeared alongside `locationType` on `PropertyDataResponse`
+was removed from `shared-types` in PR #157 (loanlight-shared). The HasData field it mapped to was
+never populated in practice, so the UI stat cell rendered only an em dash. The underlying
+db column and upstream extraction are not affected by this UI-layer removal.
+</Note>
 
 ## Related
 

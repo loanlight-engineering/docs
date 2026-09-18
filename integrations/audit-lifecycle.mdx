@@ -153,6 +153,43 @@ The split materializer gains the same semantics via migration `028`: `state`, `c
 </Tab>
 </Tabs>
 
+## EPC document download — terminal failure on final delivery (LOA-1709)
+
+Before LOA-1709, a persistent EPC document download failure (for example an HTTP 500 from
+`GET /request/resources`) was treated as recoverable on every SQS delivery. The message was
+retried until the queue's `maxReceiveCount` (3) was hit, then silently dead-lettered. Every
+attempt published a `TRANSACTION_PROCESSING_FAILED` event, so the audit remained at `Processing`
+indefinitely and the lender received no signal.
+
+As of PR #575, **an EPC document fetch failure on the final delivery (receive count ≥ 3) terminates
+the audit** with the message `"Unable to download documents from EPC. Please contact LoanLight Support"`.
+
+**What counts as an EPC fetch failure.** `EpcDocumentFetchError` (`webhooks/errors/epc-document-fetch.error.ts`) wraps:
+- a resource-list call that fails
+- a resource list that returns without the MISMO resource
+- a failed MISMO download, eFolder document download, or pass-through XML download
+
+S3 and database failures are **not** wrapped and remain recoverable on every delivery.
+
+**Final-delivery detection.** `QueueConsumerService.handleTransactionEvent` reads the SQS
+`ApproximateReceiveCount` attribute. Receive count ≥ `TRANSACTION_EVENT_MAX_RECEIVE_COUNT` (3)
+is final. A missing count is treated as not final. `WorkerStack` builds the queue’s
+`maxReceiveCount` from the same constant.
+
+**On a terminal fetch failure:**
+1. `WebhooksService.processTransaction` publishes `EPC_DOCUMENT_FETCH_FAILED` (rather than
+   `TRANSACTION_PROCESSING_FAILED`) and returns `false`, acking the message.
+2. `QueueConsumerService.handleAusUpdate` maps that code to `AuditState.Failed`.
+3. `AusUpdateService.handleAusUpdate` PATCHes EPC `failed` with the support message in `errors[]`
+   and sets `transaction_state` to `failed`. Failed rows are excluded by
+   `EpcTransactionStateRepository.getTransactionRecordByEncompassLoanIdOrThrow`, so a
+   lender’s next attempt is not cancelled as a duplicate.
+
+**Trade-off.** Earlier deliveries still publish `TRANSACTION_PROCESSING_FAILED` and rethrow,
+so a short EPC outage (one or two deliveries) resolves on the next retry without failing the
+audit. The lender waits through two SQS visibility timeouts (≈ 900 s each, roughly 30 minutes)
+before seeing a terminal failure.
+
 ## Failure handling
 
 - On any failure after `transactionStateId` is set, `processTransaction` publishes a `workflow:error` EventBridge event (Source `loanlight.aus`, errorCode `TRANSACTION_PROCESSING_FAILED`, errorStep `transaction_processing`) so `audit_details` and the UI reflect the failure. These errors are treated as **recoverable** — the user can retry.

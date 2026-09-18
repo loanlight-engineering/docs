@@ -136,6 +136,41 @@ The EPC audit force-completes synchronously (Encompass spinner clears); the appr
 
 The audit-scoped results endpoint is `GET /api/v1/audit_runs/:id/appraisal` (returns `PortalAppraisalPayload` or `{ data: null }`, never 404). See [Reading audit results](/pipeline/results).
 
+## Package-shape gate — appraisal-only orders (LOA-2754)
+
+The `afterPhase(0)` hook evaluates whether the classified document package contains **only
+appraisal-family documents**. When it does, Phase 2 and Phase 3 loan-level agents are skipped
+entirely, saving unnecessary third-party API spend (primarily ATTOM calls from `propertyData`)
+and eliminating noise on orders that were never full loan submissions.
+
+**What counts as appraisal-only.** `AuditAgentsExecutor.isAppraisalOnlyPackage(loanId,
+snapshotDocIds)` calls `evaluatePackageShapeGate(rows)` (pure function in
+`integration-events/constants/appraisal-classifications.ts`). The predicate returns `true` when:
+1. At least one document is classified into the appraisal family.
+2. Every other document is either appraisal-family or unclassified (`classification_failed`,
+   `unknown`, `other`, `UNKNOWN` split, `OTHER` split). An unclassified page (a blank page or bad
+   scan) does not defeat the gate.
+
+The **appraisal family** covers:
+- `appraisal_standard`, `desk_review` (the primary appraisal reports)
+- `fnma_ssr`, `fhlmc_ssr` (agency SSR forms)
+- `appraisal_1007`, `air_cert`, `appraisal_update`, `appraisal_acknowledgement`, `rov_disclosure`
+  (supplementary appraisal documents)
+- Any document with `split_type = "APPRAISAL"`
+
+**What is skipped.** When the gate holds, `ctx.appraisalOnlySkip = true` is set and the
+following agents are immediately sealed as `skipped` on the ledger with
+`skipReason: "Package-shape gate: all documents in audit classified into appraisal family — skipping loan-level audit agents"`:
+`piiValidation`, `propertyData`, `creditEvaluation`, `documentHealth`, `redFlags`.
+
+**What still runs.** Phase 0 agents (`preAuditClassification`, `urlaExtraction`) always run.
+`appraisalEvaluation` is a standalone queue worker triggered after `WORKFLOW.COMPLETE` and is
+not affected by this gate.
+
+The gate follows the same bounded-retry pattern as `computeCreditGateWithRetry`: it retries on
+transient DB errors and rethrows on exhaustion, so a DB outage fails loud rather than silently
+skipping loan-level agents on a partial package.
+
 ## Phase 2/3 — audit agents
 
 Unless `SKIP_LANGGRAPH_AGENTS === "true"`, the orchestrator calls `routeEpcSelection(...)`
