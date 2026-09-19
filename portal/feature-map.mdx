@@ -45,6 +45,7 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/settings/document-routing` | `client_admin`; gated on `flags.documentRouting` (default-OFF, env `FEATURE_DOCUMENT_ROUTING`). Lets client admins customize the eFolder name and description for each routed document type. Backed by `GET /api/v1/portal/routing-config/catalog` (doc-type categories + field labels) and the portal routing-config CRUD endpoints (LOA-1602). |
     | `/settings/appraiser-deny-list` | all roles; hidden from a global super admin unless impersonating |
     | `/settings/global-appraiser-deny-list` | `super_admin` + `requireInternal` |
+    | `/settings/company` | `client_admin`, impersonating `super_admin`; visible only when the `clear_capital_customer_id_self_service` per-lender flag is on. Renders a **Company** tab that lets the tenant manage their Clear Capital Customer ID (off and shadow mode only — writes are blocked once the lender is live). Backed by `GET/PUT /api/v1/portal/collateral-review/company-config` via the BFF at `GET/PUT /api/settings/company/clear-capital` |
   </Tab>
   <Tab title="admin">
     Internal global admin. Every route is `super_admin` + `requireInternal`.

@@ -177,9 +177,35 @@ Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-
 - `credit_category_label` text — human-readable label. Bounded CHECK `(1–256) NOT VALID`.
 - `credit_signature_hash` text — hash of the counterparty signature group the label was derived from, for traceability back to the resolver result. Bounded CHECK `(1–64) NOT VALID`.
 
+**Identity-exclusion flag (migration `0089`, LOA-1898):** `identity_excluded` boolean NOT NULL DEFAULT false. Set to `true` on transactions that an identity reviewer explicitly excluded from qualifying income during a bank statement identity review. The flag survives statement reprocessing so a reviewer's disposition is preserved across re-extractions.
+
 <Note>
 Migration `0236` dropped `borrower_files.ntropy_account_holder_id` — the column was used by the now-removed Ntropy integration and is no longer written.
 </Note>
+
+### bank_statement_identity_reviews
+
+`bank-statement-identity-reviews.ts` (migration `0089`, LOA-1898). Immutable decision ledger for bank-statement identity reviews. Each row records a resolved decision: which reviewer resolved a group, what events they mapped, and what hash proves the payload has not changed.
+
+PK `id`, `borrower_file_id` → `borrower_files` (cascade).
+
+| Column | Type | Notes |
+|---|---|---|
+| `group_id` | `text NOT NULL` | Stable identity of the transaction group being reviewed |
+| `revision` | `text NOT NULL` | The extraction revision this decision applies to |
+| `decision_hash` | `text NOT NULL` | SHA-256 of the canonical decision payload; verifies integrity on replay |
+| `events` | `jsonb NOT NULL` | The financial events the reviewer mapped transactions to |
+| `reason` | `text NOT NULL` | Canonical reason code for the resolution |
+| `resolved_by` | `text NOT NULL` | Identity of the resolver (user ID or system ref) |
+| `resolved_at` | `timestamptz NOT NULL` | When the decision was recorded |
+
+Unique index on `(borrower_file_id, group_id, revision)` — one immutable decision per group per revision. A corrected review appends a new revision rather than overwriting.
+
+Portal BFF routes (LOA-1898):
+- `GET /api/bank-statements/:borrowerFileId/identity-review` — list review groups for a statement set.
+- `PUT /api/bank-statements/:borrowerFileId/identity-review/:groupId/draft` — save a draft decision.
+- `POST /api/bank-statements/:borrowerFileId/identity-review/:groupId/resolve` — resolve a group.
+- Parallel v2 routes under `GET /api/v2/audits/:auditRunId/bank-statement-income/identity-review/…` for audit-scoped access.
 
 ### findings
 

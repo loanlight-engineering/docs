@@ -56,7 +56,7 @@ Returns `Promise<RedFlagResultDto[]>`. Reads `red_flag_results` by `audit_run_id
 
 `mapToPropertyDataResponse(dbRow, consolidated, zillowUrl)` follows one precedence rule throughout: **the consolidated (ATTOM/HasData) value wins; the dbRow column is the fallback.** The fallback covers old runs and investment rows (always passed `consolidated = null`).
 
-Top-level response keys: `role`, `label`, `propertyIdentity`, `property`, `ownership`, `transactions`, `taxes`, `photos`, `priceHistory`, `zestimate`, `coordinates`, `listing`, `pricePerSqft`, `distanceFromSubject` (rounded 2dp), `avmValue/avmLow/avmHigh/avmConfidence/avmFsd/avmDate`, `floodZone`, `zillowUrl`.
+Top-level response keys: `role`, `label`, `propertyIdentity`, `property`, `ownership`, `transactions`, `taxes`, `photos`, `priceHistory`, `zestimate`, `coordinates`, `listing`, `pricePerSqft`, `distanceFromSubject` (rounded 2dp), `avmValue/avmLow/avmHigh/avmConfidence/avmFsd/avmDate`, `zillowUrl`. (`floodZone` was removed from `PropertyDataResponse` in `shared-types@2.0.0` and `flood_zone` was dropped from `property_data_results` in migration `0086` — see the [Property-Data agent](/agents/property-data).)
 
 <Warning>
 Numeric coercion trap door (`property-data/CLAUDE.md`): Drizzle returns Postgres `numeric()` columns as `string | null` at runtime. Every dbRow-fallback numeric MUST be wrapped in `toNumberOrNull()` — `mortgage_amount`, `assessed_value`, `hoa_fee`, `monthly_rent`, `zestimate`, `avm_value`, `price_per_sqft`, `distance_from_subject`, `tax_amount`, `latitude`, `longitude`. `integer()` columns (`bedrooms`, `square_footage`, `lot_size`, `year_built`, `tax_year`, `attom_endpoints_called`, `*_coverage_percent`) return `number` natively and are NOT wrapped.

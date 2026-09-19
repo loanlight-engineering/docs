@@ -272,7 +272,7 @@ carry `naturalHazard` as a discriminated union that is never omitted (`{coverage
 
 <ResponseField name="property_data_results" type="table">
 One row per property, with a `property_type` CHECK of `subject | current_home | investment`. Carries
-the consolidated facts (address, coordinates, beds/baths, AVM, flood zone, last sale, owner,
+the consolidated facts (address, coordinates, beds/baths, AVM, last sale, owner,
 photos), coverage metrics (`subject_coverage_percent`, `borrower_coverage_percent`,
 `*_missing_buckets`), and `county_fips` as TEXT (leading-zero-safe).
 </ResponseField>
@@ -293,10 +293,11 @@ The subject row is `"subject"` (`source_order: 0`); REO rows are `"investment"`.
 The two states are deliberately distinguishable. `null` is permanent for any row whose consolidated blob was absent when the producer wrote it, not purely a legacy state — every property type writes this from its own blob.
 
 <Note>
-The `floodZone` field that previously appeared alongside `locationType` on `PropertyDataResponse`
-was removed from `shared-types` in PR #157 (loanlight-shared). The HasData field it mapped to was
-never populated in practice, so the UI stat cell rendered only an em dash. The underlying
-db column and upstream extraction are not affected by this UI-layer removal.
+The `flood_zone` column was removed end-to-end (migration `0086`, PR #4319 / LOA-2175): the
+`property_data_results.flood_zone` column was dropped, the `FemaFloodZone` extractor type and
+`floodZoneFromHazard` helper were deleted from three write sites, and `PropertyDataResponse.floodZone`
+was removed from `shared-types@2.0.0`. The underlying ATTOM natural-hazard payload (`naturalHazard`
+jsonb in `property_data_raw`) is unaffected; only the denormalized column and its DTO projection are gone.
 </Note>
 
 ## Related

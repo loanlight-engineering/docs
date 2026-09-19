@@ -249,7 +249,49 @@ The portal admin UI for this lives at `/admin/staged-eligibility-rules`. The BFF
 | `GET /api/admin/staged-eligibility-rule-bundles` | list bundles |
 | `POST /api/admin/staged-eligibility-rules/apply` | apply with `{ lenderId, bundleId, dryRun }` |
 
-## RuleOps: automatic bundle application and rule exports
+## RuleOps: reconcile engine, automatic bundle application, and rule exports
+
+RuleOps is the automated rule management system built on top of the three rule services (credit, appraisal, income). It has two layers: the **reconcile engine** (LOA-2175) that all three services use as their write path, and **Trigger 1** that automates post-deploy appraisal bundle reconciliation.
+
+### Reconcile engine (LOA-2175)
+
+`src/ruleops/ruleops-reconcile-engine.ts` is the single durable write path for all rule state changes — edits, adoptions, deactivations, compositions, restores, and program operations. It is not called directly by HTTP clients; every rule-authoring service operation that mutates state goes through it.
+
+**What it does:**
+- Acquires a **per-lender advisory lock** (`ruleops-lender-lock.ts`) so concurrent mutations cannot interleave.
+- Resolves the **evaluator metadata** once before opening any transaction (a resolution failure fails only captures that need it).
+- Runs the service-specific **planner** to compute the desired rule-set state, then drives the DB toward it atomically.
+- Writes an **attributed genesis history** row: every mutation records who did it (`RuleOpsActor` — `portal_user` with `userId`, or `system` with `systemRef`) and which manifest operation it belongs to (`ManifestOperationId`).
+- Captures a **versioned snapshot** of the lender's rule state and ships it to S3 inside a SAVEPOINT (so a snapshot failure never prevents the underlying mutation from committing).
+- Enforces **no-import no-op handling**: if the desired state already matches the live state, no rule, version, or history row is written for an ineffective operation.
+- Refuses **dry-run** calls (`RuleopsDryRunUnsupportedError`) unless the caller explicitly requests preview via the `?dryRun=true` path.
+
+**Operation kinds** (`DesiredKind`):
+
+| Kind | Description |
+|---|---|
+| `edit` | Direct portal rule edit (field value, severity, thresholds) |
+| `adopt` | Adopt a rule set from templates |
+| `deactivate` | Deactivate a rule set and its rules |
+| `composition` | Staged-bundle composition apply across programs |
+| `restore` | Restore a previously deactivated rule set |
+| `program` | Loan-program creation, rename, or delete |
+
+**Actor types** (`RuleOpsActor`):
+- `{ kind: "portal_user", userId }` — a portal `client_admin` making an intentional change.
+- `{ kind: "system", systemRef }` — an automated system (bundle apply, default adopt, rerun).
+
+**Error types:**
+- `RuleopsInvariantViolationError` (409) — a caller-resolvable conflict (version race, new target collision, manual contribution, inherited withdrawal).
+- `RuleopsIntegrityFaultError` (500) — an invariant the caller cannot resolve (unreachable state).
+- `RuleopsDryRunUnsupportedError` (422) — the requested operation cannot be previewed without committing.
+- `RuleopsSubmittedContentPolicyError` (400) — the bundle definition, composition summary, or desired-change scan contained NPI-shaped content.
+
+**Snapshot-aware writers.** Each service adapter (`adapters/`) extends the engine’s base with a service-specific snapshot capture. A retried composition preview scans only the winning attempt’s planned documents; a retried engine attempt never inherits a rolled-back attempt’s program-delete log or snapshot export-loss page.
+
+**Stable identities.** `ruleops-stable-identities.ts` initializes a stable key for each program on first encounter. A program create refuses a name whose stable key collides with an existing program’s effective key (whitespace/NFKC variants, reuse of a renamed program’s frozen name) — the collision check runs before any write.
+
+### RuleOps Trigger 1: automatic bundle application and rule exports
 
 **RuleOps Trigger 1** (commit `c2f8b1d`, PRD `packages/api/docs/ruleops-trigger1-export-build-prd.md`) automates post-deploy appraisal bundle reconciliation so engineers no longer need to re-apply staged bundles by hand in a narrow window after each production deploy.
 

@@ -1,10 +1,14 @@
 ---
 title: CDA eFolder delivery
-description: The loanlight-api producer that publishes completed CDA PDFs to Encompass eFolders via EventBridge.
+description: The end-to-end system that delivers completed CDA PDFs from loanlight-api into Encompass eFolders via EventBridge and loanlight-integrations.
 icon: send
 ---
 
-The CDA eFolder delivery system delivers completed collateral data audit (CDA) PDFs from `loanlight-api` into Encompass eFolders. It is split across two services: `loanlight-api` owns the **producer** (PDF identity, lender eligibility, publication outbox, and EventBridge emission), and `loanlight-integrations` owns the **consumer** (eFolder credentials, destination selection, provider delivery, and the consumer ledger). This page covers the producer side only.
+The CDA eFolder delivery system delivers completed collateral data audit (CDA) PDFs from `loanlight-api` into Encompass eFolders. It is split across two services: `loanlight-api` owns the **producer** (PDF identity, lender eligibility, publication outbox, and EventBridge emission), and `loanlight-integrations` owns the **consumer** (eFolder credentials, destination selection, provider delivery, and the consumer ledger).
+
+<Warning>
+**No lender is currently enabled and no provider adapter is deployed.** The integrations consumer is bound to the fail-closed `UnconfiguredCdaProviderAdapter`. No `cda_efolder_delivery_config` row is seeded. Do not enable a lender on either side until an approved provider adapter passes the provider contract suite and the per-lender preflight below is complete.
+</Warning>
 
 ## How it works
 
@@ -88,6 +92,115 @@ Before enabling a lender, verify:
 - The integrations consumer deployment.
 
 The following are owned by `loanlight-integrations` and are not configurable here: target-DLQ re-PutEvents, consumer-DLQ redrive, archive replay, consumer ledger, manual-review, eFolder credentials, destination selection, and provider reconciliation.
+
+## Consumer side (loanlight-integrations)
+
+The integrations consumer is in `packages/encompass/src/cda-efolder-delivery/` (LOA-2847). It subscribes to `loanlight.cda.efolder.delivery.requested.v1` events from the default EventBridge bus and drives each CDA order through a durable, fenced state machine to attach the PDF to the Encompass eFolder exactly once.
+
+### Infrastructure
+
+| Resource | Purpose | Retention |
+|---|---|---|
+| Main queue `cda-efolder-delivery` | SQS worker input (300 s visibility, 5 receives) | — |
+| Target-delivery DLQ `cda-efolder-delivery-target-dlq` | EventBridge failed before consumer receipt | 14 days — manual receive + exact PutEvents |
+| Processing DLQ `cda-efolder-delivery-processing-dlq` | Consumer exhausted SQS receive budget | 14 days — native SQS redrive |
+| Archive `cda-efolder-delivery-v1` | Durable copy of all matching source events | No expiry — replay only through a dedicated rule |
+| Rule `CdaEfolderDeliveryRule*` (CDK logical ID prefix) | Exact-match EventBridge rule routing to the main queue | — |
+| Ledger `cda_efolder_delivery` | Durable state, evidence, leases, generation fencing | Must outlive every replay source |
+| Config `cda_efolder_delivery_config` | Per-lender destination selector and credentials | One active row per lender |
+
+### State machine
+
+Every `cda_efolder_delivery` row advances through a forward-only state machine keyed on `order_id`. States are ranked; a row never moves backward.
+
+| State | Rank | Notes |
+|---|---|---|
+| `RECEIVED` | 0 | Event ingested, context not yet frozen |
+| `SNAPSHOTTED` | 10 | Artifact verified, destination selected, context frozen |
+| `ALLOCATION_INTENT` | 20 | eFolder allocation in progress |
+| `MANUAL_REVIEW` | 25 | Blocked on operator action (ambiguous allocation or attribution) |
+| `ATTACHMENT_READY` | 30 | Allocation confirmed, ready to upload |
+| `UPLOAD_INTENT` | 40 | Upload in progress |
+| `UPLOAD_RECONCILE_PENDING` | 50 | Upload response uncertain; reconciliation needed |
+| `UPLOADED` | 60 | Bytes delivered to provider |
+| `ASSIGNMENT_INTENT` | 70 | eFolder assignment in progress |
+| `VERIFICATION_PENDING` | 80 | Assignment response uncertain; verification needed |
+| `ASSIGNMENT_RECONCILE_PENDING` | 90 | Reconciliation after uncertain assignment |
+| `DELIVERED` | 100 | Terminal — PDF successfully filed in the eFolder |
+| `PAYLOAD_CONFLICT` | 100 | Terminal — inbound event fingerprint conflicts with a prior delivery |
+| `BLOCKED` | 100 | Terminal — permanent error with no recovery path |
+| `CONFLICT` | 100 | Terminal — provider state irreconcilably conflicts with ledger |
+
+`MANUAL_REVIEW` is the only non-terminal non-runnable state — the sweep skips it until an operator closes it.
+
+### Consumer error classes
+
+| Class | Meaning | Recovery |
+|---|---|---|
+| `provider_unconfigured` | `UnconfiguredCdaProviderAdapter` active — no real adapter deployed | Deploy and configure a provider adapter |
+| `configuration_missing` / `configuration_disabled` | No active `cda_efolder_delivery_config` row | Seed/enable the config row |
+| `configuration_duplicate` | More than one active config row for the lender | Fix the partial unique index violation |
+| `credential_reference_missing` | Secret ARN present but secret not found | Provision the secret |
+| `tenant_mismatch` / `loan_mismatch` | API lender or loan does not match config | Investigate the event payload |
+| `destination_zero_matches` / `destination_multiple_matches` | Destination selector matched 0 or 2+ eFolders | Verify the configured destination selector |
+| `destination_inaccessible` / `destination_deleted` | eFolder no longer accessible | Do not create a replacement — escalate |
+| `artifact_missing` | Source S3 object absent (bounded retry budget) | Investigate S3 lifecycle; escalate if persistent |
+| `artifact_hash_mismatch` | S3 object bytes don’t match the committed SHA-256 | Terminal — escalate |
+| `artifact_access_denied` / `artifact_wrong_bucket` / `artifact_wrong_prefix` | Misconfigured S3 access | Fix IAM / config |
+| `artifact_unavailable` | Transient S3 error | Automatic durable backoff |
+| `provider_rate_limited` / `provider_unavailable` / `provider_timeout` / `provider_transport` | Transient provider errors | Automatic durable backoff |
+| `provider_conflict` | Provider reports a duplicate the ledger cannot explain | Terminal — escalate |
+| `inconclusive_evidence` | Provider response lost after a side effect; evidence required | Operator must supply attribution evidence |
+| `internal_error` | Unexpected engine error | Inspect logs; report |
+
+### Manual review reasons
+
+| Reason | When triggered |
+|---|---|
+| `allocation_ambiguous_without_id` | Destination matched 0 or 2+ eFolders and operator must choose one |
+| `operator_attribution_unproven` | A prior attempt may have reached the provider but evidence is missing |
+| `operator_closed_non_delivered` | Operator closed a non-delivered row manually |
+
+### Consumer ledger table (`cda_efolder_delivery`)
+
+Migration `034` (LOA-2847) in the integrations service. Key columns:
+
+| Column group | Notable columns |
+|---|---|
+| **Identity** | `order_id` PK (stable idempotency key from producer), `event_bridge_event_id`, `api_loan_id`, `api_lender_id`, `encompass_loan_id`, `pdf_s3_key`, `pdf_sha256`, `filename`, `event_fingerprint` |
+| **State** | `state` (forward-only, CHECK-constrained), `next_attempt_at`, `delivered_at` |
+| **Frozen context** (set once, then immutable) | `resolved_lender_id`, `encompass_instance_id`, `environment`, `credential_secret_reference`, `artifact_bucket/exact_key/sha256/observed_size_bytes/etag`, `destination_selector_version`, `rendered_destination_selector`, `provider_document_id` |
+| **Intent hashes** | `allocation_intent_hash`, `upload_intent_hash`, `assignment_intent_hash` — set before each provider call so a crashed attempt cannot repeat the effect |
+| **Correlation IDs** | `allocation/upload/assignment_provider_correlation_id` |
+| **Lease** | `lease_owner`, `lease_expires_at`, `generation` (generation-fenced — stale operators cannot overwrite newer evidence) |
+| **Error** | `last_error_class`, `manual_review_reason`, `conflict_reason`, `attempts`, `artifact_missing_attempts` |
+
+### Consumer config table (`cda_efolder_delivery_config`)
+
+One row per lender. Partial unique index enforces at most one `active = true` row per `lender_id`.
+
+| Column | Notes |
+|---|---|
+| `lender_id` | FK → `lender` |
+| `active` | Must be `true` for the consumer to run against this lender |
+| `encompass_instance_id` | The Encompass instance this config targets |
+| `encompass_environment` | `production` or `uat` |
+| `credential_secret_reference` | ARN of the Secrets Manager secret holding Encompass credentials |
+| `destination_selector_version` | Schema version of the selector JSON (CHECK ≥ 1) |
+| `destination_selector` | JSONB selector the consumer uses to locate the right eFolder |
+
+### Consumer Datadog monitors
+
+Seven monitors ship in `packages/encompass/observability/datadog/cda-efolder-delivery-*.json`:
+
+| Monitor | Threshold |
+|---|---|
+| `cda-efolder-delivery-manual-review` | Alerts when a row enters `MANUAL_REVIEW` |
+| `cda-efolder-delivery-oldest-unfinished-age` | Warns / alerts on stale non-terminal rows |
+| `cda-efolder-delivery-payload-conflict` | Alerts on `PAYLOAD_CONFLICT` terminal state |
+| `cda-efolder-delivery-processing-dlq-depth` | Alerts on processing-DLQ depth |
+| `cda-efolder-delivery-sweep-heartbeat-missing` | Alerts when the sweep heartbeat is absent |
+| `cda-efolder-delivery-target-dlq-depth` | Alerts on target-DLQ depth |
 
 ## Datadog monitors
 

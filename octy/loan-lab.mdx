@@ -27,9 +27,22 @@ A run started from **prod** Octy creates its loan in **int**, so result links ar
 
 ## Isolation model
 
-`audit_runs` has no `is_test` column. The only thing separating synthetic data from real data is the **name** of the lender it belongs to — `OCTY_TEST_LENDER_NAME`, shared with the EPC Simulator — and only a handful of call sites filter on it (`src/lib/billing.ts`, `classify-split-config/actions/staged-targets.ts`, the epc-sim modules).
+`audit_runs` has no `is_test` column. The only thing separating synthetic data from real data is the **name** of the lender it belongs to, and only a handful of call sites filter on it (`src/lib/billing.ts`, `classify-split-config/actions/staged-targets.ts`, the epc-sim modules).
 
-Before creating anything, `loanlight/preflight.ts` calls the partner API's `GET /api/v1/partner/whoami` endpoint to confirm which lender the configured key belongs to, and **refuses the run** if it is not the test lender. It fails closed: an unreachable identity endpoint is treated the same as a key pointed somewhere unexpected.
+Two environment variables control which lender names are used (LOA-2837):
+
+| CDK context key | Env var | Used by | int | prod |
+|---|---|---|---|---|
+| `testLenderName` | `OCTY_TEST_LENDER_NAME` | billing, Findings Explorer, dry-run staged targets, EPC Simulator | `Demo Account - CSO #6` | `LoanLight` |
+| `loanLabDestinationLenderName` | `LOAN_LAB_DESTINATION_LENDER_NAME` | Loan Lab preflight only | `Demo Account - CSO #6` | `Demo Account - CSO #6` |
+
+The two variables answer different questions. Loan Lab creates loans in **int** from every environment (`config/destinations.ts`), so prod Octy's partner key resolves to an int lender — checking it against prod's own `OCTY_TEST_LENDER_NAME` (`LoanLight`) would refuse every run. `LOAN_LAB_DESTINATION_LENDER_NAME` lets the preflight check the destination environment's lender instead. Both variables fall back to `"Octy Test Lender"` when unset, preserving previous behaviour on undeployed instances.
+
+<Warning>
+`epc-sim/seed.ts::seedTestLender` refuses to run when `OCTY_TEST_LENDER_NAME` is set to anything other than the default `"Octy Test Lender"`. The seed upserts by name and would take over the configured real lender row if allowed to run.
+</Warning>
+
+Before creating anything, `loanlight/preflight.ts` calls the partner API's `GET /api/v1/partner/whoami` endpoint to confirm which lender the configured key belongs to, and **refuses the run** if it is not the `LOAN_LAB_DESTINATION_LENDER_NAME` lender. It fails closed: an unreachable identity endpoint is treated the same as a key pointed somewhere unexpected.
 
 <Note>
 Int is shared. Synthetic loans are visible in int dashboards, aggregate counts, the alert feed, and Datadog monitors alongside real runs. Scenarios designed to fail look like real incidents there. Int alert noise is expected to rise; check the lender before treating an alert as a regression.
@@ -96,7 +109,7 @@ aws secretsmanager create-secret --name Octy/LoanLab/EncompassUatPassword --secr
 Where the partner key comes from: see [Cross-repo prerequisites](#cross-repo-prerequisites).
 </Step>
 <Step title="Fill non-secret identifiers in the CDK context">
-Add `encompassUatClientId`, `encompassUatUsername`, and `encompassUatInstanceId` to the environment's `cdk.context.*.json` file.
+The Concept UAT Encompass non-secret identifiers (`encompassUatClientId = fwmfyaj`, `encompassUatUsername = admin`, `encompassUatInstanceId = TEBE11392330`) and test lender names (`testLenderName`, `loanLabDestinationLenderName`) are already committed to both `cdk.context.int.json` and `cdk.context.prod.json` (LOA-2837). You do not need to add them unless they have been removed.
 </Step>
 <Step title="Set the flag and deploy">
 Set `loanLabEnabled` to `"true"` in the context file and run the CDK deploy.

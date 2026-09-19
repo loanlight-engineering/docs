@@ -111,6 +111,25 @@ Uploads use Fastify `req.parts()` multipart parsing (the API runs on the Fastify
 
 Loan programs link to these documents through the program-document endpoints on `portal-lenders` and `portal-loan-programs`; see [lenders, users, and programs](/portal/api-lenders-users-programs).
 
+## portal-collateral-review-company-config
+
+Controller: `collateral-review/collateral-review-company-config.controller.ts` at `api/v1/portal/collateral-review/company-config`. Class-level `@UseGuards(PortalAuthGuard)`, `@Roles("client_admin", "super_admin")`. The in-handler guard `assertCompanyAdminContext` further requires that a `super_admin` caller is **impersonating** — global super-admins without an active impersonation are refused.
+
+This endpoint lets a tenant's client admin (or an impersonating super-admin) read and update the lender's Clear Capital Customer ID. It is gated by the `clear_capital_customer_id_self_service` per-lender feature flag; the flag is default-OFF and must be set explicitly.
+
+**Constraints:**
+- Cannot create a new `collateral_review_configs` row — the row must be seeded by a super-admin first.
+- Cannot change the lender's mode (`off`, `shadow`, `live`) or any secret field.
+- Refuses writes when the lender's config is in `live` mode.
+- Records a redacted audit event (portal audit log) in the same transaction as the write.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/v1/portal/collateral-review/company-config` | Return `{ clearCapitalCustomerId }` for the effective tenant. |
+| `PUT /api/v1/portal/collateral-review/company-config` | Update `clearCapitalCustomerId` (`UpdateClearCapitalCustomerIdDto { clearCapitalCustomerId: string }`). Validates non-blank, passes through unbounded length to match the admin/storage contract. |
+
+BFF proxies at `GET/PUT /api/settings/company/clear-capital` in `packages/app`. The portal route is `/settings/company` (visible when the flag is on). See [feature map — settings](/portal/feature-map#settings).
+
 ## portal-routing-config
 
 Controller: `portal-routing-config/portal-routing-config.controller.ts` at `api/v1/portal/routing-config`. Class-level `@UseGuards(PortalAuthGuard, PortalThrottlerGuard)`, throttle 100/min. This module is unusual: the loanlight-api acts as an api-as-BFF, proxying **outward** to the integrations service's routing-config admin API rather than serving the portal app. See [routing-config admin API](/integrations/routing-config-admin) for the integrations side.
