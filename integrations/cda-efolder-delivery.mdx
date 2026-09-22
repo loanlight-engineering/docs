@@ -22,6 +22,10 @@ The integrations consumer subscribes to that event type and handles eFolder cred
 
 Keep every lender absent/off until the cross-service preflight below is complete. Set it to `true` to resume; the flag write releases only eligible rows that are unleased, already due, or carry a retry error.
 
+<Warning>
+**The only supported activation path is the authenticated internal-super-admin portal/API feature-flag route:** `PUT /api/v1/portal/lenders/:id/feature-flags`. Direct SQL (`enabled = true`) is not sufficient. The sweep checks the flag with `cdaEfolderDeliveryEnabledSql`, which validates that the flag row was written by an active internal super-admin actor on behalf of an active, non-internal lender. A row written outside this path does not satisfy those conditions and is treated as absent.
+</Warning>
+
 ## Producer outbox columns on `collateral_review_orders`
 
 Migrations `0073`–`0076` (LOA-2703) add these columns to `collateral_review_orders`:
@@ -50,6 +54,7 @@ The advisory-locked sweep runs every five minutes. It picks up eligible, unlease
 - `loanlight.cda_efolder.eventbridge_accepted`
 - `loanlight.cda_efolder.publication_retry`
 - `loanlight.cda_efolder.expired_claim`
+- `loanlight.cda_efolder.retrying_unpublished_count` — per-reason gauge of enabled, eligible, succeeded rows that are actively retrying (inside backoff or with a retry error code). Tagged by `reason` (the error code vocabulary). Emitted at the heartbeat cadence (every five minutes), not per-event.
 - `loanlight.cda_efolder.sweep_heartbeat` — emitted twice per tick (once on advisory-lock acquisition, once after the batch). A tick can run for tens of minutes at the batch cap; the leading emit is what keeps the absence monitor alive.
 
 `oldest_eligible_unpublished_age_seconds` measures time since a row became **due** (`COALESCE(next_attempt_at, eligible_at)`), not since it became eligible. A row inside its lease or backoff reads 0.
@@ -204,13 +209,16 @@ Seven monitors ship in `packages/encompass/observability/datadog/cda-efolder-del
 
 ## Datadog monitors
 
-Three monitors cover the CDA eFolder producer path (`packages/api/observability/datadog/`):
+Six monitors cover the CDA eFolder producer path (`packages/api/observability/datadog/`):
 
 | Monitor | Threshold |
 |---|---|
 | `cda-efolder-backlog-aged` | Warns at 2 h, alerts at 6 h of oldest unpublished age. |
 | `cda-efolder-publication-stuck` | Alerts when a publication claim is in-flight past a deadline. |
 | `cda-efolder-sweep-missing` | Alerts after 15 minutes without a sweep heartbeat. |
+| `cda-efolder-expired-claim` | Warns at ≥1, alerts at ≥3 expired leases in the last 30 minutes. An expired claim means a lease was acquired but did not finish — a flag enable or operator repair alone is not an expired claim. |
+| `cda-efolder-metrics-observation-failed` | Log alert: fires when a backlog observation cycle fails (`cda_efolder.metrics_observation_failed`). While this alert is active, backlog and retry gauges may not be trustworthy — investigate database/query health before relying on them. |
+| `cda-efolder-retry-backlog-stuck` | Alerts when any per-reason `retrying_unpublished_count` gauge holds ≥1 for a full 15-minute window. `published_at` means producer acceptance by EventBridge only, not completed eFolder delivery. Use the runbook SQL to find the affected order(s). |
 
 ## Querying the producer outbox
 

@@ -502,7 +502,9 @@ Returns a `CreditLoanView` assembled by `CreditLoanProjectionService`. Proxied f
 - `CRED_L01` — qualifying FICO vs. the lender's configured minimum (`≥` is a pass). Computed by the projection, not stored as a `credit_rules` row.
 - `CRED_L02` — combined DTI vs. the lender's configured maximum (`≤` is a pass). Suppressed entirely when `dtiShown` is false. `dtiShown` is false only when `loan_type` is exactly `DSCR`.
 
-**Loan narrative:** `generateLoanNarrative` produces a loan-level narrative plus one paragraph per person, stored in `audit_runs.credit_loan_narrative` (jsonb, nullable). Status is `ready | pending | failed`; a retry endpoint is available. Registered as `creditEvaluation.loanNarrative` in `creditEvaluation/llm-steps.ts` (group must equal `creditEvaluation` for the router's config freeze to resolve it).
+**Loan narrative:** `generateLoanNarrative` produces a loan-level narrative plus one paragraph per person, stored in `audit_runs.credit_loan_narrative` (jsonb, nullable). Status is `ready | pending | failed`. A manual retry is available via `POST /api/v1/portal/audits/:auditRunId/credit/loan/narrative/retry` (proxied from the portal BFF at `/api/v2/audits/[auditRunId]/credit/loan/narrative/retry`). Registered as `creditEvaluation.loanNarrative` in `creditEvaluation/llm-steps.ts` (group must equal `creditEvaluation` for the router's config freeze to resolve it).
+
+The generation call is capped at `LOAN_NARRATIVE_MAX_TOKENS = 4096` output tokens — sized for one loan paragraph plus one per person. When the model hits this ceiling (`finish_reason === "length"`), the JSON is truncated mid-write and fails to parse. The automatic retry is **skipped** in this case: a second attempt against the same roster and the same ceiling produces the same outcome. The retry runs only for transient failures (vendor errors, malformed JSON that is not due to truncation). A truncated run writes `status: "failed"` and should be investigated via the manual retry endpoint.
 
 **Lender setting:** `credit_qualifying_fico_method` in `lender_feature_flags` — `lowest_middle` (default) or `primary_wage_earner`. Configurable via the credit rules admin select.
 

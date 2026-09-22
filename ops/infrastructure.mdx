@@ -97,6 +97,10 @@ conventions.
     and `reconcile.ts` (ledger reconciliation for post-squash deploys — inserts baseline
     hashes without running schema DDL).
 
+    **Database bastion (ASG-managed).** `DatabaseAccessStack` deploys a single-instance Auto Scaling Group rather than a fixed EC2 host. The group replaces its instance every 30 days (`maxInstanceLifetime`). If the tunnel script reports `"Auto Scaling Group ... has no InService instance"`, the bastion is mid-recycle — retry in a couple of minutes. Run `pnpm db:connect:int:read` (or `:write`, `:prod:read`) from `packages/api`; the scripts resolve the live instance through the ASG export automatically.
+
+    IAM policies for `DatabaseAccessStack` must grant `ssm:TerminateSession` on `arn:aws:ssm:*:*:session/${aws:username}-*` (a `session` resource), **not** the instance ARN. Scoping `ssm:TerminateSession` to the instance ARN opens the tunnel but then denies teardown. `autoscaling:DescribeAutoScalingGroups` is also required — a policy written for the old fixed-instance flow that omits this permission fails at bastion resolution.
+
     **Aurora cluster topology (LOA-1712).** The `LLApiDatabaseStack` Aurora cluster now runs **two instances**: the Serverless v2 writer and a Serverless v2 reader (`ClusterInstance.serverlessV2("reader", { scaleWithWriter: true, … })`). `scaleWithWriter: true` maps to promotion tier 1, so the reader’s ACU tracks the writer’s — it is a warm failover target, not an idle one. Aurora promotes the reader automatically on a writer or AZ failure; the app connects via `cluster.clusterEndpoint` (the writer endpoint) which is moved by failover with no code change. Performance Insights and the CMK are mirrored on both instances. The `AuroraAcuCeilingAlarm` threshold was sized against one writer; post-deploy CloudWatch will show whether the 29-ACU ceiling still fits a two-instance cluster.
 
     **Disaster recovery:** `packages/api/infra/DR_RUNBOOK_AURORA_RESTORE.md` is the
