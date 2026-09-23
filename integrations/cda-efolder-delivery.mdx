@@ -7,7 +7,7 @@ icon: send
 The CDA eFolder delivery system delivers completed collateral data audit (CDA) PDFs from `loanlight-api` into Encompass eFolders. It is split across two services: `loanlight-api` owns the **producer** (PDF identity, lender eligibility, publication outbox, and EventBridge emission), and `loanlight-integrations` owns the **consumer** (eFolder credentials, destination selection, provider delivery, and the consumer ledger).
 
 <Warning>
-**No lender is currently enabled and no provider adapter is deployed.** The integrations consumer is bound to the fail-closed `UnconfiguredCdaProviderAdapter`. No `cda_efolder_delivery_config` row is seeded. Do not enable a lender on either side until an approved provider adapter passes the provider contract suite and the per-lender preflight below is complete.
+**No lender is currently enabled.** No `cda_efolder_delivery_config` row is seeded. Do not enable a lender on either side until an approved provider adapter passes the provider contract suite and the per-lender preflight below is complete.
 </Warning>
 
 ## How it works
@@ -101,6 +101,21 @@ The following are owned by `loanlight-integrations` and are not configurable her
 ## Consumer side (loanlight-integrations)
 
 The integrations consumer is in `packages/encompass/src/cda-efolder-delivery/` (LOA-2847). It subscribes to `loanlight.cda.efolder.delivery.requested.v1` events from the default EventBridge bus and drives each CDA order through a durable, fenced state machine to attach the PDF to the Encompass eFolder exactly once.
+
+### Provider modes (LOA-2921)
+
+`CdaRuntimeConfigService` reads the deployment environment at startup and resolves a `CdaProviderMode`:
+
+| Mode | Description |
+|---|---|
+| `unconfigured` | Default fail-closed adapter. No real delivery is performed; every operation rejects. |
+| `developer-connect` | Encompass Developer Connect adapter. Active only on `int` and only within the demo canary scope (see below). |
+
+The mode is determined by the `CDA_PROVIDER_MODE` environment variable. An unknown value, a missing value, or `"developer-connect"` set outside the `int` environment all cause `CdaDeploymentConfigError` at startup.
+
+**Demo scope guard.** When `provider_mode = "developer-connect"`, four additional environment variables define the canary scope that the adapter will accept (`CDA_INT_CANARY_API_LENDER_ID`, `CDA_INT_CANARY_API_LOAN_ID`, `CDA_INT_CANARY_ENCOMPASS_LOAN_ID`, `CDA_INT_CANARY_ORDER_ID`). All four are required when in Developer Connect mode. The `CdaDemoScopeGuard` rejects any incoming CDA event whose payload does not exactly match these values — nothing outside the named canary loan can flow through the Developer Connect path in int.
+
+The deployment config is frozen before any provider read and validated by `CdaDeploymentConfigError`-throwing checks in `CdaRuntimeConfigService`. A `contract_evidence_required` error is the only rejection reason that surfaces after startup; the others (`developer_connect_outside_int`, `demo_scope_required`, `demo_scope_partial`, `demo_scope_invalid`) fail the service before it can accept events.
 
 ### Infrastructure
 

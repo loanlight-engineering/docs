@@ -8,9 +8,9 @@ Loan Lab (`/loan-lab`) generates synthetic mortgage loans — borrower data plus
 
 Source: `octy/src/lib/loan-lab/` (core library), `octy/src/app/(app)/loan-lab/` (UI), `octy/src/app/api/loan-lab/` (Next.js API routes). Internal spec: `octy/docs/loan-lab.md`.
 
-<Warning>
-**Loan Lab is off by default.** `loanLabEnabled` is `"false"` in both `infra/cdk.context.*.json`. The flag gates both the `LOAN_LAB_ENABLED` env var and the CDK references to three required secrets — they are gated together because `createSecret` emits a reference and ECS refuses to start a task whose referenced secret does not exist. See [Enabling Loan Lab](#enabling-loan-lab) for how to turn it on.
-</Warning>
+<Note>
+**Loan Lab is always-on as of LOA-2953.** The `loanLabEnabled` CDK context gate was removed. The `/loan-lab` route and nav item are always present; a signed-out request gets a 401. The three required secrets (`PartnerApiKey`, `EncompassUatClientSecret`, `EncompassUatPassword`) must still be provisioned for the credentials to be available — see [Prerequisites](#prerequisites).
+</Note>
 
 ## Where loans go
 
@@ -95,12 +95,12 @@ Loan Lab's scenario library and run history are stored in two tables in loanligh
 
 Octy tolerates the absence of these tables: `src/lib/loan-lab/scenario/store.ts` falls back to the in-code preset specs when the tables are unavailable, so scenario generation still works before the migration lands. Saving and run history are unavailable without the tables.
 
-## Enabling Loan Lab
+## Prerequisites
 
-Loan Lab ships **off** in all environments. To turn it on:
+Loan Lab is always available to signed-in users, but it degrades gracefully when credentials are absent. Two things must be provisioned for Loan Lab to function:
 
 <Steps>
-<Step title="Create the three secrets">
+<Step title="Provision the three secrets">
 ```bash
 aws secretsmanager create-secret --name Octy/LoanLab/PartnerApiKey --secret-string '<key>'
 aws secretsmanager create-secret --name Octy/LoanLab/EncompassUatClientSecret --secret-string '<secret>'
@@ -108,23 +108,20 @@ aws secretsmanager create-secret --name Octy/LoanLab/EncompassUatPassword --secr
 ```
 Where the partner key comes from: see [Cross-repo prerequisites](#cross-repo-prerequisites).
 </Step>
-<Step title="Fill non-secret identifiers in the CDK context">
-The Concept UAT Encompass non-secret identifiers (`encompassUatClientId = fwmfyaj`, `encompassUatUsername = admin`, `encompassUatInstanceId = TEBE11392330`) and test lender names (`testLenderName`, `loanLabDestinationLenderName`) are already committed to both `cdk.context.int.json` and `cdk.context.prod.json` (LOA-2837). You do not need to add them unless they have been removed.
-</Step>
-<Step title="Set the flag and deploy">
-Set `loanLabEnabled` to `"true"` in the context file and run the CDK deploy.
+<Step title="Verify non-secret identifiers in CDK context">
+The Concept UAT Encompass non-secret identifiers (`encompassUatClientId = fwmfyaj`, `encompassUatUsername = admin`, `encompassUatInstanceId = TEBE11392330`) and test lender names (`testLenderName`, `loanLabDestinationLenderName`) are already committed to both `cdk.context.int.json` and `cdk.context.prod.json` (LOA-2837). Verify they are present.
 </Step>
 </Steps>
 
-With the flag on but a credential missing, the feature degrades rather than crashing: `isPartnerApiConfigured()` and `isEncompassConfigured()` check the env vars, the config route reports `configured: false`, and the UI disables **Run** against that destination.
+With a credential missing, the feature degrades rather than crashing: `isPartnerApiConfigured()` and `isEncompassConfigured()` check the env vars, the config route reports `configured: false`, and the UI disables **Run** against that destination.
 
 ## Running locally
 
 ```bash
-LOAN_LAB_ENABLED=true pnpm dev
+pnpm dev
 ```
 
-Set `LOANLIGHT_API_URL` to point at a local API instance to avoid touching int. See `octy/.env.example` for the credential variables.
+Set `LOANLIGHT_API_URL` to point at a local API instance to avoid touching int. See `octy/.env.example` for the credential variables (`LOAN_LAB_DESTINATION_LENDER_NAME` and the three secret vars).
 
 ## Cross-repo prerequisites
 

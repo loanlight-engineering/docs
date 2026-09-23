@@ -177,6 +177,11 @@ Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-
 - `credit_category_label` text — human-readable label. Bounded CHECK `(1–256) NOT VALID`.
 - `credit_signature_hash` text — hash of the counterparty signature group the label was derived from, for traceability back to the resolver result. Bounded CHECK `(1–64) NOT VALID`.
 
+**Credit category qualifier columns (migration `0102`, LOA-2789):** three nullable columns that record the per-row qualifier used to gate the persisted label. They are written by the categorization ladder, and the read gate checks them to determine whether a row already holds a verdict.
+- `credit_category_qualifier` text — the qualifier string used when the label was written. No CHECK constraint (bounding it would clip names and change entity identity). **Do not select un-categorized rows by testing this being `NULL`** — `applyLadderFallback` in `ladder.ts` writes `NULL` here on a real fallback answer, so a NULL-based sweep re-runs rows that already have one. Select on `credit_category_source` instead.
+- `credit_category_entity_type` text — entity type for the qualifier. CHECK `IN ('business', 'individual', 'mechanism', 'unknown')` when non-null.
+- `credit_category_qualifier_digest` text — `qualifierDigest` of the row's own `(category, label)` — the read side recomputes it; writing a digest over anything else withholds every `NAME_TESTED` row that carries a qualifier.
+
 **Identity-exclusion flag (migration `0089`, LOA-1898):** `identity_excluded` boolean NOT NULL DEFAULT false. Set to `true` on transactions that an identity reviewer explicitly excluded from qualifying income during a bank statement identity review. The flag survives statement reprocessing so a reviewer's disposition is preserved across re-extractions.
 
 <Note>

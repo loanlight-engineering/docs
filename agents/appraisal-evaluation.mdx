@@ -442,12 +442,85 @@ Both the portal (in-process) and Octy (via `POST /internal/iris/fact-sweep`) rea
 
 The portal **Photos** tab is gated to `super_admin` only via `canSeeIrisPhotos` — not yet visible to lenders. It has four views, selected via a tab strip: **Findings** (default), **Facts** (taxonomy-driven fact groups from the sweep), **Property features** (non-flagged element inventory), and **Gallery** (honeycomb). The processing view shows the scanning comb on top; completed photos settle into their scenes below it. Octy's audit-run modal is the primary viewing surface for IRIS data: the shared `IrisAnalysisPanel` provides the same four-view layout. See [Loan lookup and audit-run modal](/octy/loan-lookup).
 
-Octy also provides a dedicated `/appraisals-iris` admin page with five tabs:
+Octy also provides a dedicated `/appraisals-iris` admin page with six tabs:
 - **Appraisal Runs** — a paginated table of all IRIS-analyzed appraisal runs across lenders, with faceted filters and prev/next row navigation in the detail panel.
 - **IRIS Taxonomy** — browse and edit the seeded taxonomy rows. LOA-2638 replaced the separate "Flagging" and "Expected scenes" cards with one **"Where it raises a finding"** card (`FlaggingCard`) offering three modes: everywhere, only outside specified scenes, or never. The card writes the three flag-zone columns (`default_severity`, `applicable_scenes`, `out_of_scene_severity`) that the runtime reads. Other columns available to edit include fact-group, photo-band, and `places`.
 - **Relevance Rules** — view, author, and measure `appraisal_iris_relevance_rules` rows. Four rule archetypes are available (different property, no single home in frame, wrong place, and custom/catch-all). Each rule's conditions can be measured against real historical runs before saving: the preview panel shows how many observations would have been suppressed per run, and a diff view identifies which photo findings would disappear. See [Relevance gate](#relevance-gate-appraisal_iris_relevance_rules-loa-23422344-2346) below.
-- **How It Works** — an explanatory schematic of the IRIS perception and scoring pipeline, built from static content in `tabs/how-it-works/content.ts`.
+- **Reconcile** — the concept editor for the IRIS report reconciliation system (LOA-2333). Operators edit concept rows and preview alert outcomes against live runs before saving. See [IRIS report reconciliation](#iris-report-reconciliation-loa-2333--loa-2365--loa-2366) below.
+- **How It Works** — an explanatory schematic of the IRIS perception and scoring pipeline, built from static content in `tabs/how-it-works/content.ts`. The schematic now also includes a reconciliation walk that traces how a concept reading and photo evidence combine into an alert.
 - **Dry Run** — internal multi-model compare harness; send a source PDF through multiple vision models side by side (`POST /api/appraisals-iris/dry-run`, SSE endpoint). The dry-run tab now starts all selected documents in parallel and shows each target's stored result alongside the live run result.
+
+### IRIS report reconciliation (LOA-2333 / LOA-2365 / LOA-2366)
+
+IRIS Extended is the third deterministic step after extraction and photo analysis: it reads both outputs and compares them per concept, without either reader ever seeing the other's input. Source: `packages/api/src/langgraph/agents/iris/reconcile/` (API) and `packages/app/src/components/appraisal/iris/` (portal).
+
+#### What it detects
+
+Four alert flavours, evaluated per concept:
+
+| Flavour | Question |
+|---|---|
+| `worse_than_rated` | Do the photos show more damage than the C1–C6 condition rating admits? |
+| `attestation_item` | Does the physical-deficiency attestation disclose something no photo documents? |
+| `denied_but_pictured` | Does a photo show something the report says no to? |
+| `mentioned_not_pictured` | Did the appraiser disclose something a complete photo set never shows? |
+
+A softer fifth flavour (`pictured_not_mentioned`) flags when photos show something the report neither answered nor mentioned.
+
+**Shadow by default.** Alerts are computed for every entitled run, shown to internal viewers in Octy and the portal, and never counted in any lender-facing total or finding until a concept's `visibility` is flipped.
+
+#### Nothing is stored
+
+The only persistence footprint is `iris_facts.reconcile` — a small status object and the narrative mapper's LLM output (keyed by a digest of its inputs so a correction that doesn't touch the description never re-bills it). Alerts, outcomes, and configuration snapshots are **not** stored. Every read evaluates live from the stored photo rows, the stored `extracted_data`, and the operator configuration in force at that moment. Editing a rung, a tag, or a concept row re-grades every run, old and new, on its next open.
+
+#### The IRIS agent's `reconcile` node
+
+The IRIS graph gains a terminal `reconcile` node after `persist` (revision 4 of the design). When the IRIS analysis finishes:
+
+- If `extracted_data` is already present on `appraisal_runs`, the node runs the narrative mapper (one bounded LLM call over the physical-deficiency description) and writes `iris_facts.reconcile = { status: "ready", narrative, photosCandidates }` via `IrisReconcileService.mergeReconcile`.
+- If extraction has not landed yet, the node writes `{ status: "waiting_for_extraction" }` and returns. The extraction processor calls `IrisReconcileService.finishIfWaiting` after its step-5 persist, which runs the same node body.
+
+The write uses `irisSettledWriteFence` (not `irisClaimFence`) — see `reconcile/CLAUDE.md` for why this matters and the trap doors to avoid.
+
+#### Concept reader (`appraisal_iris_reconcile_concepts`)
+
+A concept row pairs a named feature ("pool", "basement", "garage") with:
+
+- **Signal paths** — the `extracted_data` paths that express yes/no about this concept (`improvements.pool`, `basement.basement_finish_percent`, …). A path the report does not carry contributes a silent signal and is skipped; this makes one reader work across legacy 2.6 and UAD 3.6 forms without any form-family gate.
+- **Mention terms** — narrative synonyms that constitute a soft "mentioned" reading when no structured signal matches.
+- **Reconcile tags** — the set of `appraisal_iris_taxonomy` items that count as photo evidence for this concept (stored on the taxonomy row as `reconcile_tags`; separate from `fact_tags` so the lender-visible Facts surface is untouched).
+- **Knobs** — per-concept configuration: `strength_floor`, `min_kinds`, `min_rooms`, `gap` (rungs above the rating that trigger `worse_than_rated`), and `photo_expected` (whether absence of photos grounds a `mentioned_not_pictured` alert).
+
+The reading derived from the signals is one of: `yes`, `no`, `mentioned`, `unknown`, or `conflict`. Only `yes` and `no` ground contradiction and omission alerts; `unknown` can only ground the softer `pictured_not_mentioned` flavour.
+
+Migrations `0097`–`0101` (LOA-2333) add:
+
+- `0097` — `reconcile_annotations` jsonb column on `appraisal_iris_taxonomy` (operator-set `expectedAtRating`, `safetyClass`, `repairClass`, `reconcileTags`).
+- `0099` — `appraisal_iris_reconcile_concepts` table (concept rows + knobs).
+- `0101` — read-path indexes.
+
+#### Internal API
+
+Mounted at `/internal/iris/reconcile/*` (`IrisReconcileController` in the dry-run module), gated by `InternalApiKeyGuard`:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `runs/:appraisalRunId` | Evaluate reconciliation for a run; returns all concept outcomes |
+| POST | `preview` | Preview outcomes for a candidate concept-row set (before saving) |
+| POST | `evaluate` | Evaluate a single concept against supplied photo and report inputs |
+| POST | `runs/:appraisalRunId/refresh-narrative` | Re-run the narrative mapper for a run (operator lever; requires `extracted_data` present) |
+| GET | `counts` | Paginated alert-count summary over a date window (max 90 days) |
+| GET | `fields` | Return the field catalogue (canonical `extracted_data` paths) |
+| GET | `concepts` | List all concept rows |
+| PUT | `concepts/:id` | Update a concept row |
+
+A 404 means "no such run" — nothing else. A run that exists but has no IRIS analysis or no extraction returns 200 with the core's own state (`iris_missing`, `waiting_for_extraction`, …).
+
+#### Portal and Octy surfaces
+
+The portal Photos tab gains a **Report Alerts** view alongside Findings, Facts, Features, and Gallery (`IrisAlertsTab`, `GET /api/appraisal/[runId]/iris/alerts`). The same payload renders in Octy's `IrisAlertsTab` component. The view shows "waiting for the report" until both photo analysis and extraction are complete.
+
+The Octy `/appraisals-iris` admin page gains a **Reconcile** tab (`IrisReconcileTab`): operators browse concept rows, edit their signal paths and knobs, and preview alert outcomes against historical runs before saving.
 
 ### agenticRefine, detectScanned, and ocr have been deleted
 
@@ -756,7 +829,7 @@ migration `0293_appraisal_runs_market_comps`, nullable — null when `ENABLE_ZIL
 or the subject is ineligible), and `cross_doc_validation` jsonb (source values from the
 cross-document validation step, migration `0264_appraisal_runs_cross_doc_validation`), and
 `iris_facts` jsonb (IRIS aggregated analysis results, migration `0297`, nullable — null until
-the `appraisalIris` entitlement runs).
+the `appraisalIris` entitlement runs). The jsonb includes a `reconcile` subkey written by `IrisReconcileService.mergeReconcile` (LOA-2333): `{ status: "waiting_for_extraction" | "ready" | "error", narrative?: IrisReconcileNarrative, photosCandidates?: number }`. Alerts themselves are never stored here; they are derived at read time from `appraisal_photos`, `extracted_data`, and the operator configuration.
 <Note>
 `photo_manifest` (the legacy 8-value photo category column) is scheduled for removal after the
 `appraisal_photos` migration fully propagates. Do not write new code that reads it.
@@ -764,7 +837,19 @@ the `appraisalIris` entitlement runs).
 </ResponseField>
 
 <ResponseField name="appraisal_iris_taxonomy" type="table">
-The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (no `lender_id`), drift-guarded by two specs. Migrations `0308`/`0309` (LOA-1901) added fact-group columns (`fact_tags`, `fact_min_strength`, `fact_scenes`, `instance_flag_over`, `instance_flag_severity`) and the report-band column (`photo_group` on scene rows). Migration `0336` (LOA-2342/2344/2346) added `places` (jsonb, nullable) — the set of spatial locations where this element or condition is worth counting. Migration `0059` (LOA-2638) replaced the `flaggable` boolean with the three-column flag-zones model (`default_severity`, `applicable_scenes`, `out_of_scene_severity`) and dropped the now-redundant `flaggable` column; see [IRIS above](#iris--image-risk-interpretation-system-loa-1901).
+The IRIS taxonomy vocabulary: `scene`, `element`, and `condition` rows. Global (no `lender_id`), drift-guarded by two specs. Migrations `0308`/`0309` (LOA-1901) added fact-group columns (`fact_tags`, `fact_min_strength`, `fact_scenes`, `instance_flag_over`, `instance_flag_severity`) and the report-band column (`photo_group` on scene rows). Migration `0336` (LOA-2342/2344/2346) added `places` (jsonb, nullable) — the set of spatial locations where this element or condition is worth counting. Migration `0059` (LOA-2638) replaced the `flaggable` boolean with the three-column flag-zones model (`default_severity`, `applicable_scenes`, `out_of_scene_severity`) and dropped the now-redundant `flaggable` column; see [IRIS above](#iris--image-risk-interpretation-system-loa-1901). Migration `0097` (LOA-2333) added `reconcile_annotations` jsonb — operator-set reconciliation metadata including `expectedAtRating`, `safetyClass`, `repairClass`, and `reconcileTags` (the set of taxonomy items that count as photo evidence for a concept in the report reconciliation system).
+</ResponseField>
+
+<ResponseField name="appraisal_iris_reconcile_concepts" type="table">
+Concept rows for the IRIS report reconciliation system (migrations `0099`/`0100`, LOA-2333). One row per named concept ("pool", "basement", "garage", …). Global (no `lender_id`), seeded by migration `0100`. Key columns:
+
+- `kind` — `'rating' | 'attestation' | 'settings' | 'feature'` (the first three are reserved system concepts; feature rows are operator-editable).
+- `concept` — stable identifier string.
+- `signal_paths` jsonb — ordered array of `extracted_data` paths the concept reader tries, together with the `fieldKind` used to interpret each (`checkbox | count | enum | number | tri_state | section`).
+- `mention_terms` text[] — narrative synonyms that yield a `"mentioned"` reading when no structured signal produces a value.
+- `knobs` jsonb — per-concept configuration for the alert evaluators: `strengthFloor`, `minKinds`, `minRooms`, `gap` (rungs above rating that trigger `worse_than_rated`), `photoExpected` (whether absence grounds a `mentioned_not_pictured` alert), and `visibility` (`"shadow" | "internal" | "lender"`).
+
+The reconcile concepts table is the only table a concept reader writes to; concept rows are operator-editable in Octy's Reconcile tab.
 </ResponseField>
 
 <ResponseField name="appraisal_photos" type="table">
