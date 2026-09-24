@@ -100,7 +100,7 @@ The following are owned by `loanlight-integrations` and are not configurable her
 
 ## Consumer side (loanlight-integrations)
 
-The integrations consumer is in `packages/encompass/src/cda-efolder-delivery/` (LOA-2847). It subscribes to `loanlight.cda.efolder.delivery.requested.v1` events from the default EventBridge bus and drives each CDA order through a durable, fenced state machine to attach the PDF to the Encompass eFolder exactly once.
+The integrations consumer is in `packages/encompass/src/cda-efolder-delivery/` (LOA-2847). It subscribes to `loanlight.cda.efolder.delivery.requested.v1` and `loanlight.avm.efolder.delivery.requested.v1` events from the default EventBridge bus and drives each order through a durable, fenced state machine to attach the PDF to the Encompass eFolder exactly once. The `report_kind` column (`'cda'` or `'clear_capital_avm'`) distinguishes the two delivery kinds within the shared ledger.
 
 ### Provider modes (LOA-2921)
 
@@ -115,7 +115,20 @@ The mode is determined by the `CDA_PROVIDER_MODE` environment variable. An unkno
 
 **Demo scope guard.** When `provider_mode = "developer-connect"`, four additional environment variables define the canary scope that the adapter will accept (`CDA_INT_CANARY_API_LENDER_ID`, `CDA_INT_CANARY_API_LOAN_ID`, `CDA_INT_CANARY_ENCOMPASS_LOAN_ID`, `CDA_INT_CANARY_ORDER_ID`). All four are required when in Developer Connect mode. The `CdaDemoScopeGuard` rejects any incoming CDA event whose payload does not exactly match these values — nothing outside the named canary loan can flow through the Developer Connect path in int.
 
+**ICE API origin.** The `DeveloperConnectProtocolTransport` takes an `apiOrigin` restricted to `DEVELOPER_CONNECT_API_ORIGINS`: ICE's standard origin (`https://api.elliemae.com`) and concept origin (`https://concept.api.elliemae.com`). The INT test instance `TEBE11391332` authenticates only on the concept origin, so the INT module selects it. The standard origin is the default; anything else throws `invalid_developer_connect_origin` at construction.
+
 The deployment config is frozen before any provider read and validated by `CdaDeploymentConfigError`-throwing checks in `CdaRuntimeConfigService`. A `contract_evidence_required` error is the only rejection reason that surfaces after startup; the others (`developer_connect_outside_int`, `demo_scope_required`, `demo_scope_partial`, `demo_scope_invalid`) fail the service before it can accept events.
+
+### Report kinds (LOA-2921)
+
+The ledger now supports two `report_kind` values (migration `038`):
+
+| Kind | EventBridge detail-type | Payload contract |
+|---|---|---|
+| `cda` | `loanlight.cda.efolder.delivery.requested.v1` | `CdaEfolderDeliveryRequestedEvent` (shared-types `cda-efolder-delivery-events`) |
+| `clear_capital_avm` | `loanlight.avm.efolder.delivery.requested.v1` | `AvmEfolderDeliveryRequestedEvent` (shared-types `avm-efolder-delivery-events`) |
+
+The composite primary key on `cda_efolder_delivery` is `(report_kind, order_id)`. Existing rows were backfilled to `report_kind = 'cda'`. The AVM kind delivers the producer-staged PDF key/hash/filename; the adapter does not call Clear Capital — the report is already produced by the loanlight-api collateral review module.
 
 ### Infrastructure
 
@@ -183,17 +196,19 @@ Every `cda_efolder_delivery` row advances through a forward-only state machine k
 
 ### Consumer ledger table (`cda_efolder_delivery`)
 
-Migration `034` (LOA-2847) in the integrations service. Key columns:
+Migration `034` (LOA-2847) established the table. Migrations `035`–`038` (LOA-2921) added columns through the Developer Connect and AVM adapter slices. Key columns:
 
 | Column group | Notable columns |
 |---|---|
-| **Identity** | `order_id` PK (stable idempotency key from producer), `event_bridge_event_id`, `api_loan_id`, `api_lender_id`, `encompass_loan_id`, `pdf_s3_key`, `pdf_sha256`, `filename`, `event_fingerprint` |
+| **Identity** | `(report_kind, order_id)` composite PK — `report_kind` is `'cda'` or `'clear_capital_avm'` (CHECK-constrained; NOT NULL; backfilled to `'cda'` on existing rows). `event_bridge_event_id`, `api_loan_id`, `api_lender_id`, `encompass_loan_id`, `pdf_s3_key`, `pdf_sha256`, `filename`, `event_fingerprint` |
 | **State** | `state` (forward-only, CHECK-constrained), `next_attempt_at`, `delivered_at` |
-| **Frozen context** (set once, then immutable) | `resolved_lender_id`, `encompass_instance_id`, `environment`, `credential_secret_reference`, `artifact_bucket/exact_key/sha256/observed_size_bytes/etag`, `destination_selector_version`, `rendered_destination_selector`, `provider_document_id` |
+| **Frozen context** (set once, then immutable) | `resolved_lender_id`, `encompass_instance_id`, `environment`, `credential_secret_reference`, `credential_secret_version_id` (pinned at claim time), `artifact_bucket/exact_key/sha256/observed_size_bytes/etag`, `destination_selector_version`, `rendered_destination_selector`, `provider_document_id` |
 | **Intent hashes** | `allocation_intent_hash`, `upload_intent_hash`, `assignment_intent_hash` — set before each provider call so a crashed attempt cannot repeat the effect |
 | **Correlation IDs** | `allocation/upload/assignment_provider_correlation_id` |
+| **Upload session** | `upload_session_checkpoint` (JSONB, resumable upload state), `upload_session_disposition` — `'committed'`, `'aborted'`, or `'uncertain'` |
+| **Attachment provenance** | `provider_attachment_id_provenance` — how the `provider_document_id` was established: `'allocation_response'` (from the eFolder allocation reply) or `'operator_supplied'` (entered during manual review) |
 | **Lease** | `lease_owner`, `lease_expires_at`, `generation` (generation-fenced — stale operators cannot overwrite newer evidence) |
-| **Error** | `last_error_class`, `manual_review_reason`, `conflict_reason`, `attempts`, `artifact_missing_attempts` |
+| **Error** | `last_error_class`, `manual_review_reason`, `conflict_reason`, `attempts`, `artifact_missing_attempts`, `provider_failure_attempts` (incremented on each provider-side failure; separate from `attempts`) |
 
 ### Consumer config table (`cda_efolder_delivery_config`)
 
@@ -211,7 +226,7 @@ One row per lender. Partial unique index enforces at most one `active = true` ro
 
 ### Consumer Datadog monitors
 
-Seven monitors ship in `packages/encompass/observability/datadog/cda-efolder-delivery-*.json`:
+Eight monitors ship in `packages/encompass/observability/datadog/cda-efolder-delivery-*.json`:
 
 | Monitor | Threshold |
 |---|---|
@@ -219,6 +234,7 @@ Seven monitors ship in `packages/encompass/observability/datadog/cda-efolder-del
 | `cda-efolder-delivery-oldest-unfinished-age` | Warns / alerts on stale non-terminal rows |
 | `cda-efolder-delivery-payload-conflict` | Alerts on `PAYLOAD_CONFLICT` terminal state |
 | `cda-efolder-delivery-processing-dlq-depth` | Alerts on processing-DLQ depth |
+| `cda-efolder-delivery-provider-retry` | Alerts on elevated `provider_failure_attempts` (sustained provider-side retries, added LOA-2921) |
 | `cda-efolder-delivery-sweep-heartbeat-missing` | Alerts when the sweep heartbeat is absent |
 | `cda-efolder-delivery-target-dlq-depth` | Alerts on target-DLQ depth |
 

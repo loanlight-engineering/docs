@@ -12,7 +12,7 @@ TypeScript contracts, reusable CDK constructs, and LocalStack dev tooling.
 
 <Note>
 The repo now tracks **eight packages** at their current versions:
-`shared-types@1.23.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
+`shared-types@2.2.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
 `shared-auth@0.3.0`, `shared-api-auth@0.3.0`, `shared-ui@0.8.0`,
 `shared-lambda-auth@0.2.0`, and `aus-db` (LOA-1961 — see below). (Older snapshots of this doc warned that only three
 packages existed on disk and that types like `RelatedTrace` were published-only;
@@ -28,7 +28,7 @@ looks missing.
 
 | Package | Role | Version (repo HEAD) |
 |---|---|---|
-| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, roles) | 1.23.0 |
+| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, evidence contracts, AVM eFolder delivery events, roles) | 2.2.0 |
 | `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 1.18.0 |
 | `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | 0.1.0 |
 | `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.3.0 |
@@ -116,12 +116,13 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
 `DocumentHealthResponse`, `PropertyDataResult` / `RedFlagResult`,
 `UrlaRulesEngineResult`, and more; the portals render them into tables.
 
-`shared-types@1.24.0` exports these modules (all re-exported from `src/index.ts`):
+`shared-types@2.2.0` exports these modules (all re-exported from `src/index.ts`):
 `field-value.types`, `table.types`, `audit-response.types`, `credit.types`,
 `common.types`, `api-response.types`, `property-data.types`,
 `urla-completeness.types`, `octy.types`, `portal-audits.types`, `role.types`,
 `access-policy.types`, `epc-document-events.types`, `brand.types`,
-`workos-config`, and `cda-efolder-delivery-events`. The contract-bearing ones:
+`workos-config`, `cda-efolder-delivery-events`, `avm-efolder-delivery-events`,
+`evidence.types`, `evidence-contract`, and `evidence-contract-*` modules. The contract-bearing ones:
 
 <AccordionGroup>
   <Accordion title="credit.types — the credit-evaluation contract (LOA-1461)">
@@ -184,13 +185,40 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
     identifiers and similar opaque ids across the codebase.
   </Accordion>
   <Accordion title="cda-efolder-delivery-events — CDA eFolder delivery contract (LOA-2703)">
-    Producer: loanlight-api (collateral review module). Consumer: loanlight-integrations (future eFolder delivery path for the CDA appraisal PDF).
+    Producer: loanlight-api (collateral review module). Consumer: loanlight-integrations.
 
     - `CDA_EFOLDER_DELIVERY_REQUESTED_DETAIL_TYPE` = `"loanlight.cda.efolder.delivery.requested.v1"` — the EventBridge detail-type.
     - `CdaEfolderDeliveryRequestedEvent` interface: `{ orderId, loanId, lenderId, encompassLoanId, pdfS3Key, pdfSha256, filename }`. `pdfS3Key` is canonically `collateral-review/{loanId}/cda-{orderId}.pdf`; `filename` is `cda-{orderId}.pdf`.
     - `parseCdaEfolderDeliveryRequestedEvent(input)` — validates the envelope with strict UUID/GUID/SHA-256 patterns. Loanlight-internal IDs must be lowercase canonical UUIDs; Encompass GUIDs are case-tolerant.
     - `canonicalizeCdaEfolderDeliveryRequestedEvent(input)` — returns deterministic JSON for digest computation.
     - `fingerprintCdaEfolderDeliveryRequestedEvent(input)` — returns a SHA-256 fingerprint for idempotency keys.
+  </Accordion>
+  <Accordion title="avm-efolder-delivery-events — AVM eFolder delivery contract (LOA-2921)">
+    Producer: loanlight-api (collateral review module, AVM orders). Consumer: loanlight-integrations (`clear_capital_avm` report kind).
+
+    - `AVM_EFOLDER_DELIVERY_REQUESTED_DETAIL_TYPE` = `"loanlight.avm.efolder.delivery.requested.v1"` — the EventBridge detail-type.
+    - `AvmEfolderDeliveryRequestedEvent` interface: `{ orderId, loanId, lenderId, encompassLoanId, pdfS3Key, pdfSha256, filename }` — exactly seven fields. Unrecognised top-level keys are tolerated and dropped, matching the CDA v1 contract.
+    - `parseAvmEfolderDeliveryRequestedEvent(input)` — validates the seven-field payload with strict UUID/GUID/SHA-256/S3-key patterns.
+    - `canonicalizeAvmEfolderDeliveryRequestedEvent(input)` and `fingerprintAvmEfolderDeliveryRequestedEvent(input)` — deterministic JSON and SHA-256 fingerprint for idempotency.
+
+    Published as `shared-types@2.2.0`. The AVM kind does not call Clear Capital; the integrations consumer receives only the producer-staged PDF key/hash/filename.
+  </Accordion>
+  <Accordion title="evidence contracts — URLA evidence contract layer (LOA-2926, EDU-01)">
+    Registry-driven parse/write validation for structured evidence attached to URLA declarations and other AUS data.
+
+    Key exports: `evidence.types` (vocabulary and DTOs), `evidence-contract` (the public contract), and ten sub-modules:
+    - `evidence-contract-validate` — strict parse and write validation.
+    - `evidence-contract-coverage` — registry-driven coverage checking.
+    - `evidence-contract-locator` — source-manifest / locator parsing (including PDF-page locators).
+    - `evidence-contract-assertion` — assertion helpers.
+    - `evidence-contract-manifest` — source manifests.
+    - `evidence-contract-envelopes` — envelope DTOs.
+    - `evidence-contract-parse` — parser utilities.
+    - `evidence-contract-legacy` — adapter for legacy intake records without provenance.
+    - `evidence-contract-fingerprint` — canonical SHA-256 fingerprinting.
+    - `evidence-contract-reader` — public snapshot reader.
+
+    Ships a frozen `URLA_DECLARATIONS_V1_REGISTRY` with 7 attribute definitions (codes, schemas, subjects, cardinalities, units, sensitivity, producer identity) and a fixture suite of 10 vectors (7 MISMO XML variants, golden JSON, PDF-page locator, legacy intake). Unknown top-level keys are rejected (strict mode, unlike the CDA/AVM delivery contracts). Published as `shared-types@2.1.0`.
   </Accordion>
   <Accordion title="workos-config — WorkOS base-URL seam (LOA-2599)">
     Exports `getWorkosBaseUrl()`, which returns the WorkOS API base URL for the

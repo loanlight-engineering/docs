@@ -518,7 +518,7 @@ A 404 means "no such run" — nothing else. A run that exists but has no IRIS an
 
 #### Portal and Octy surfaces
 
-The portal Photos tab gains a **Report Alerts** view alongside Findings, Facts, Features, and Gallery (`IrisAlertsTab`, `GET /api/appraisal/[runId]/iris/alerts`). The same payload renders in Octy's `IrisAlertsTab` component. The view shows "waiting for the report" until both photo analysis and extraction are complete.
+The portal Photos tab gains a **Report Alerts** view alongside Findings, Facts, Features, and Gallery (`IrisAlertsTab`, `GET /api/appraisal/[runId]/iris/alerts`). The same payload renders in Octy's `IrisAlertsTab` component. The view shows "waiting for the report" until both photo analysis and extraction are complete. Every alert row is now clickable and opens the corresponding photo highlighted in the photo lightbox (LOA-2333, #4434, #152).
 
 The Octy `/appraisals-iris` admin page gains a **Reconcile** tab (`IrisReconcileTab`): operators browse concept rows, edit their signal paths and knobs, and preview alert outcomes against historical runs before saving.
 

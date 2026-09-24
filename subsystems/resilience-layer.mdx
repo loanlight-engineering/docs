@@ -8,22 +8,24 @@ LOA-1078 introduced a **unified external-service resilience layer** (`src/common
 
 ## What it protects
 
-Two LoanLight domains call Reducto for document extraction:
+Six named **consumer lanes** call Reducto for document extraction: `appraisal_extract`, `appraisal_parse`, `appraisal_figures`, `bank_statement`, `credit`, and `ssr`. Each lane has its own circuit so a broken lane can stop itself without gating the healthy ones. A shared **vendor circuit** is the overall kill-switch: it opens only when cross-lane evidence confirms a fleet-wide Reducto outage rather than a single-lane problem.
 
-- **Appraisal extraction** (`portal-appraisal` module) — the primary adopter; previously had a flag-gated, single-domain circuit.
-- **Bank-statement structuring** (`bank-statement-pipeline` module) — added in LOA-1078; previously had no circuit protection.
-
-Both share **one** Reducto circuit (the same Redis key `resilience:reducto:state`), so a Reducto outage parks work from both domains simultaneously and a single recovery event drains both.
+- **Appraisal extraction** (`portal-appraisal` module) — uses lanes `appraisal_extract`, `appraisal_parse`, and `appraisal_figures`.
+- **Bank-statement structuring** (`bank-statement-pipeline` module) — uses lane `bank_statement`.
+- **Credit** and **SSR** — use lanes `credit` and `ssr` respectively.
 
 ## Architecture
 
 ```text
 src/common/resilience/
-  circuit-store.ts             — generic keyed CircuitStore (Lua CAS, Redis-backed)
-  reducto-circuit-store.ts     — ReductoCircuitStore extends CircuitStore + recordTerminalFailure
-  call-class.ts                — CallClass type + REDUCTO_CIRCUIT definition (breaker config)
-  reducto-runtime.ts           — shared executor: executeWithReductoResilience, assertReductoCallAllowed, classifyReductoError, etc.
-  reducto-terminal-policy.ts   — fleet-wide terminal-failure threshold (3 distinct PDFs / 5 min)
+  circuit-store.ts             — generic keyed CircuitStore (Lua CAS, Redis-backed); readPair for atomic two-circuit reads
+  reducto-circuit-store.ts     — ReductoCircuitStore extends CircuitStore; per-scope recordTerminalFailure;
+                                  REDUCTO_CLASS_CIRCUIT_STATE_KEYS (the 6 lane Redis keys)
+  reducto-consumer.ts          — REDUCTO_CONSUMERS, ReductoConsumer type (the 6 named lanes)
+  reducto-runtime.ts           — shared executor: executeWithReductoResilience, assertReductoCallAllowed,
+                                  classifyReductoError, etc.
+  reducto-terminal-policy.ts   — vendor-circuit and lane-circuit thresholds
+  resilience-redis-keys.ts     — reductoCircuitKey / reductoTrialReleaseFenceKey derivation
 
 src/common/reducto/
   lifecycle.ts                 — getReductoJobLifecycle / withReductoJobLifecycle hooks
@@ -33,27 +35,53 @@ src/common/resilience/queue-and-recover/
   disposition.ts               — resolveCircuitDisposition / shouldHold / canProbe (unified truth table)
   port.ts                      — QueueAndRecoverAdapter interface
   registry.ts                  — QueueAndRecoverRegistry (adapters self-register on onModuleInit)
-  orchestrator.ts              — QueueAndRecoverOrchestrator (one probe→drain-all timer, fleet rollup, break-glass)
+  orchestrator.ts              — QueueAndRecoverOrchestrator; per-lane circuit array; laneAdmitsRelease
+  trial-release-fence.ts       — per-circuit trial-release fence (prevents concurrent probes per lane)
+  resilience-redis.ts          — RedisClientLike shim for the resilience layer
   ResilienceModule             — NestJS module; imported by PortalAppraisalModule + BankStatementModule
 ```
 
+## Lane isolation model (LOA-2777)
+
+Every terminal failure is tagged with the caller's `ReductoConsumer` class. Two circuits are maintained in parallel:
+
+| Circuit | Redis key | Opens when |
+|---|---|---|
+| **Vendor circuit** | `resilience:reducto:state` | 3 distinct PDFs fail **and** failures span ≥ 2 distinct consumer classes within 5 min. One lane cannot open this circuit alone. |
+| **Lane circuits** (one per consumer) | `resilience:reducto:<lane>:state` | 3 distinct PDFs fail from **that lane alone** within 5 min. |
+
+A lane-only failure parks only that lane's work. A vendor-circuit open parks all lanes simultaneously. Recovery probes against each circuit independently; the trial-release fence (`resilience:reducto:<scope>:trial-release`) prevents concurrent probes on the same circuit.
+
+Thresholds (`reducto-terminal-policy.ts`):
+
+| Constant | Value | Applies to |
+|---|---|---|
+| `REDUCTO_TERMINAL_FAILURE_THRESHOLD` | 3 | Both vendor and lane circuits |
+| `REDUCTO_TERMINAL_FAILURE_WINDOW_MS` | 300 000 ms (5 min) | Both |
+| `REDUCTO_TERMINAL_FAILURE_CLASS_SPREAD` | 2 | Vendor circuit — minimum distinct classes required |
+| `REDUCTO_LANE_TERMINAL_FAILURE_CLASS_SPREAD` | 1 | Lane circuits — only the lane's own class counts |
+
 ## Circuit breaker
 
-The Reducto circuit uses the **cockatiel** library with a `consecutive` policy:
+Each circuit uses the **cockatiel** library with a `consecutive` policy:
 
 | Config | Value |
-||---|---|
-|| `failureThreshold` | 2 consecutive vendor failures to open |
-|| `halfOpenAfterMs` | 60 000 ms (1 minute) before probing |
-|| `retryable` | based on `classifyReductoError` — transient vendor errors open the breaker; local errors (parse failures) do not |
+|---|---|
+| `failureThreshold` | 2 consecutive vendor failures to open |
+| `halfOpenAfterMs` | 60 000 ms (1 minute) before probing |
+| `retryable` | based on `classifyReductoError` — transient vendor errors open the breaker; local errors (parse failures) do not |
 
-Circuit state is persisted in Redis at `resilience:reducto:state`. A single `QueueAndRecoverOrchestrator` owns the recovery-driver timer (one per process; `.unref()`'d) so there is no race between the two domains.
+Circuit state is persisted in Redis. The vendor circuit key is `resilience:reducto:state`; each lane's key is `resilience:reducto:<lane>:state` (e.g. `resilience:reducto:bank_statement:state`). A single `QueueAndRecoverOrchestrator` owns the recovery-driver timer (one per process; `.unref()`'d).
 
-### Terminal-failure outage policy (LOA-c4cdb7bd)
+### Terminal-failure outage policy
 
-The circuit breaker now has a second opening mechanism independent of the consecutive policy: a **fleet-wide terminal-failure threshold**. `ReductoCircuitStore.recordTerminalFailure(documentFingerprint)` is called by the shared executor each time a distinct original PDF receives a `Failed` response from Reducto. When 3 distinct documents fail within a 5-minute sliding window, the circuit opens immediately — without waiting for the cockatiel consecutive count to accumulate. This catches fleet-wide outages faster than the 2-consecutive policy, which requires two failures in the same call chain.
+The circuit breaker has a second opening mechanism independent of the consecutive policy: a **terminal-failure threshold**. `ReductoCircuitStore.recordTerminalFailure(documentHash, callClass?)` is called by the shared executor each time a distinct original PDF receives a `Failed` response from Reducto.
 
-The `reducto-terminal-policy.ts` module owns the sliding-window accounting. `lifecycle.ts` exports `getReductoJobLifecycle` and `withReductoJobLifecycle` hooks used by test harnesses and the break-glass probe to override lifecycle behavior. The shared executor now exposes `assertReductoCallAllowed()`, which callers invoke before submission to check either the lifecycle hooks or the circuit store.
+For the **vendor circuit**: when 3 distinct documents fail within the 5-minute window **and** the failures span at least 2 distinct `ReductoConsumer` classes, the vendor circuit opens immediately. A single lane failing 3 PDFs alone does not open the vendor circuit.
+
+For a **lane circuit**: when 3 distinct documents tagged with that lane's class fail within the window, that lane's circuit opens. Evidence from other lanes does not count.
+
+The `reducto-terminal-policy.ts` module owns the sliding-window accounting. `lifecycle.ts` exports `getReductoJobLifecycle` and `withReductoJobLifecycle` hooks used by test harnesses and the break-glass probe to override lifecycle behavior. The shared executor exposes `assertReductoCallAllowed()`, which callers invoke before submission to check either the lifecycle hooks or the relevant circuit store.
 
 ### Redis read outcomes and indeterminate state (LOA-2361)
 

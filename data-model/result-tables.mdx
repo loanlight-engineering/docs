@@ -43,7 +43,7 @@ The [Document-Health agent](/agents/document-health) writes three result familie
 <ParamField path="issue_kind" type="text NOT NULL">CHECK: `expired | expiring_soon | date_missing | date_invalid | valid | missing_document`.</ParamField>
 <ParamField path="is_required" type="boolean (nullable)">Resolved from lender YAML `required_documents`. **`NULL` means "absent", not `false`.**</ParamField>
 
-Other columns: `extracted_date`, `expiration_date`, `days_until_expiration`, `is_expired`, `is_expiring_soon`, `message`, `source_location`, `page_reference`, `llama_cloud_file_id`, `special_conditions` text[], `lang_smith_trace_url`, `document_date`, `additional_details`, `expiration_details`, `has_expiration_rules`, `estimated_closing_date`, `account_number`, `created_at`.
+Other columns: `extracted_date`, `expiration_date`, `days_until_expiration`, `is_expired`, `is_expiring_soon`, `message`, `source_location`, `page_reference`, `llama_cloud_file_id`, `special_conditions` text[], `lang_smith_trace_url`, `document_date`, `additional_details`, `expiration_details`, `has_expiration_rules`, `estimated_closing_date`, `account_number`, `requirement_reason` text (nullable — plain-English statement of why the document was requested; set for program-required and declaration-driven results; absent on expiration-only rows and rows predating LOA-2952; migration `0103`), `created_at`.
 
 **`doc_expiration_evidence`**: PK `id`, `result_id` → `doc_expiration_results` (cascade), `evidence_type` (CHECK `date_extraction | document_classification | expiration_calculation | dedupe_decision`), `file_id`, `file_name`, `page_number`, `snippet_text`, `confidence_score` numeric(3,2), `metadata` jsonb.
 </Tab>

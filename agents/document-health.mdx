@@ -214,7 +214,8 @@ Each check in the registry declares one or more outputs, each with a `family`:
 |---|---|
 | `document_requirement` | Presence-checked against the eFolder. Present → `issueKind: "valid"` (silent pass). Absent and classifier-backed → `issueKind: "missing_document"`. Absent but no classifier can confirm the type → `issueKind: "conditional_document_unknown"` (non-blocking review note). |
 | `request_note` | A soft "request copy of…" note. Suppressed when the document is already on file. Never blocks. |
-| `flag_only` | An unconditional manual-review prompt that fires on the URLA value alone; does not look in the eFolder. Emits `issueKind: "conditional_document_unknown"`. |
+
+Every output is document-backed: it carries a `documentType` that is resolved against the eFolder. There is no family that fires on the URLA value alone — a row with no document to satisfy it has no place in Document Health (LOA-2914). The `flag_only` family was removed in LOA-2914.
 
 One check can emit more than one output from a single trigger. `family` is the hard/soft lever: only `document_requirement` can produce a blocking `missing_document` finding, and only when the document type is classifier-backed.
 
@@ -235,6 +236,12 @@ The `decl.status.self_employed` check carries this flag. Its two possible output
 Independent declaration checks (those without `requiresProgramConfiguration`) and the program-required-document pass run unchanged. Only self-employment output types are gated this way today.
 </Note>
 
+### Removed checks (LOA-2914)
+
+LOA-2914 removed checks that had no classifier-backed document type and therefore could never be cleared. The removed IDs are: `decl.flag.occupancy`, `decl.flag.seller_rel`, `decl.flag.concurrent_apps`, `decl.flag.borrower_funds`, `decl.pace`, `decl.section5.bankruptcy`, `decl.section5.foreclosure`, `decl.section5.judgment`, `decl.section5.lawsuit`, `decl.section5.federal_debt`, `decl.section5.cosigner`, `decl.housing.free`. The letter-of-explanation backstop (`decl.section5.loe_backstop`) keeps its ID because it is a lender opt-out key. Cluster 4 is intentionally absent.
+
+The `reason` field on each surviving check is a cause clause (no lead verb, no trailing period). The evaluator prefixes `"Requested because "` to it when building the `requirement_reason` value.
+
 ### Kill-switch and opt-out
 
 - **`ENABLE_BORROWER_DECLARATION_CHECKS`** env var — set to `"false"` to disable all declaration
@@ -251,7 +258,7 @@ Independent declaration checks (those without `requiresProgramConfiguration`) an
 
 Document types only a declaration check requires are added to the classifier allow-list so they are
 recognised as their real type (for example `gift_letter`, `divorce_decree`) rather than labelled
-`"other"`.
+`"other"`. LOA-2917 added `permanent_resident_card` (USCIS Form I-551 / green card) to the `IDENTITY` split category with a seeded classify rule (migration `0104`), making `classifierBacked: true` for the permanent-resident declaration check so the absence of a green card produces a blocking `missing_document` rather than a soft note.
 
 ## Required-document conditions
 
@@ -360,6 +367,8 @@ One row per document expiration / required-document result, written transactiona
 `is_required` is set from `requiredDocumentTypes`; `account_number` is masked to `****<last4>`.
 Evidence types: `date_extraction`, `document_classification`, `expiration_calculation`,
 `dedupe_decision`.
+
+**`requirement_reason` (LOA-2952, migration `0103`):** a plain-English statement of why the document was requested. Set by `verify-required-documents` via the `requirementReasonByType` map, which combines program-required reasons and borrower-declaration reasons. Absent on results that nobody asked for (expiration-only rows) and on rows predating LOA-2952. Format: `"Requested because <cause clause>"` for declaration-driven rows; program-driven rows receive the program condition text.
 
 <Warning>
 `doc_expiration_results.is_required` is **nullable**. `NULL` means *unknown* (the required set
