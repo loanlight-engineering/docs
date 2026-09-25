@@ -48,6 +48,8 @@ Reviewers can annotate findings directly inside the audit-run modal or IRIS anal
 
 IRIS photo annotations identify the agent as **IRIS photo analysis** and capture the actual appraisal revision and photo IDs — not the generic `appraisalEvaluation` agent type.
 
+**IRIS as a first-class bug-report agent (b301167).** IRIS (`appraisalIris`) is now a fully supported affected-area option in bug reports, alongside the other agent types. When an audit run has an associated appraisal run, IRIS traces appear in the issue detail panel alongside audit-run traces. IRIS traces carry an `appraisalRunId` field (in addition to `auditRunId`) that identifies which appraisal revision the trace belongs to. The `traceMetadata` forwarded to the Oz prompt includes this `appraisalRunId` so the agent can look up IRIS-specific data tools scoped to the correct revision.
+
 **Components:** `SpotCheckProvider` (app boundary, independent of `OctyAgentProvider`), `SpotCheckSurface` (record identity), `SpotCheckScope` (curated context per agent area), `SpotCheckRegion` (navigation ancestry for count badges), `SpotCheckTarget` (captures one meaningful detail). All components live in `src/components/common/spot-check/`.
 
 **Draft lifecycle:** notes are saved in `sessionStorage` scoped to the account/origin/tab and survive navigation and reload. Text autosaves while typing. An unfiled-note badge appears globally. Closing an audit or changing the expanded appraisal row prompts to review or keep the draft. Browser exit warns while notes remain unfiled. Storage failures retain in-memory notes and offer JSON export.
@@ -91,6 +93,8 @@ LangSmith CLI access and the LangChain Docs MCP are shown as read-only checked. 
 The **Affected Area** dropdown is populated by `GET /api/v1/audit_runs/:id/bug-reports/agent-options` (LOA-1669). Options are derived per audit run as the union of the run's expected plan (`audit_runs.agent_config`) and the observed `agent_runs` for that audit. Adding a new area is a backend change; the area must be present in `BUG_REPORT_AGENT_TYPES` in `shared-types`.
 
 `income-analysis` was added to the `BUG_REPORT_AGENT_TYPES` closed union in `shared-types@1.22.0` (LOA-2316), making income traces valid in LangSmith for bug reports. The UI mapping (surfacing it as a selectable option in the dropdown) is a follow-on step.
+
+`appraisalIris` is available as an affected area for any audit run that has an associated appraisal run with IRIS enabled. Oz investigations on IRIS issues have access to dedicated [IRIS data tools](/octy/oz-tool-api) that read both stored observations and the live read-time view from loanlight-api.
 </Step>
 <Step title="Pick a tentacle (skill)">
 A radio over `OZ_SKILLS`: Root Cause Analysis, RCA Fix & PR, or Ad Hoc. See [Oz skills](/octy/oz-skills) for what each does.

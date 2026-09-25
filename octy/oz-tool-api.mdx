@@ -151,6 +151,24 @@ The registry groups tools into categories. The dataset id is the `[dataset]` pat
     | `appraisal-rule-overrides` | `appraisal_rule_overrides` | via parent `run_id`; manual rule-outcome overrides (the trail behind `compliance_results.overridden`) |
     | `appraisal-ssr-documents` | `appraisal_ssr_documents` | via parent `run_id`; agency SSR sub-documents (Fannie/Freddie Submission Summary Reports) |
   </Accordion>
+  <Accordion title="IRIS (Appraisal Photo Analysis)">
+    IRIS tools are split into two kinds — **stored** (what the `appraisalIris` agent wrote to the DB) and **read-time** (what a viewer sees, proxied to loanlight-api). A bug in IRIS is almost always a disagreement between these two layers, so the tools are shaped to be diffed: same photo IDs, same run selection.
+
+    All IRIS tools are audit-run-scoped. The `?appraisal_run_id=<uuid>` parameter selects a specific revision; omit it to use the latest revision (what the audit modal shows). An explicit ID that does not belong to the audit returns `404 APPRAISAL_RUN_NOT_IN_SCOPE`.
+
+    Upstream failures are **never** served as empty results. An unreachable or rate-limiting API returns 502 `IRIS_API_UNAVAILABLE` or 503 `IRIS_API_RATE_LIMITED`. A missing DB schema (unapplied loanlight-api migration) returns an explicit `unavailable` message rather than a 500 or an empty `data: []`.
+
+    | dataset | kind | `table` / notes |
+    |---|---|---|
+    | `iris-runs` | stored | `appraisal_runs.iris_facts` — lifecycle of every appraisal revision's IRIS run: `iris_analysis_status`, `iris_photos_total/analyzed/candidates`, `iris_reconcile_status`, LangSmith trace name, photo row counts. Start here. |
+    | `iris-photo-observations` | stored | `appraisal_photos` — the vision model's raw per-photo output: `scene`, `attribution`, `quality`, `elements`, `conditions`. Paginated by `IRIS_PAGE_SIZE=100`; `?offset=` to page, `?photo_id=` or `?page_number=` to filter. |
+    | `iris-photo-views` | read-time | Synthetic `iris_photo_views` — the API's resolved view with relevance gate and severity banding applied. Supports `?flagged_only=true`, `?not_counted_only=true`, `?photo_id=`. Includes a `summary` block with `flagged_detections_by_severity` and `not_counted_detections`. |
+    | `iris-fact-groups` | read-time | Synthetic `iris_fact_groups` — the fact-sweep engine's grouped facts (manufactured home, ADU, pool, etc.) computed from stored observations at read time. |
+    | `iris-report-alerts` | read-time | Synthetic `iris_report_alerts` — the IRIS report reconciliation: alert list plus reconcile `status`, `phase`, and `warnings`. |
+    | `iris-taxonomy` | stored | `appraisal_iris_taxonomy` — the taxonomy of scenes, elements, and conditions. `?kind=scene\|element\|condition`, `?code=`, `?include_inactive=true`. |
+    | `iris-relevance-rules` | stored | `appraisal_iris_relevance_rules` — active relevance rules; `?include_inactive=true` for all. |
+    | `iris-reconcile-concepts` | read-time | Synthetic `appraisal_iris_reconcile_concepts` — IRIS reconcile concepts as defined by loanlight-api. |
+  </Accordion>
   <Accordion title="Lender Configuration & Loan Documents / S3">
     | dataset | `table` | scope / params |
     |---|---|---|

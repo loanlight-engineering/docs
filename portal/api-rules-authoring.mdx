@@ -340,6 +340,24 @@ Each bundle apply captures a versioned snapshot of the lender's rule state and s
 | `s3_version_id` | text | S3 object version |
 | `content_sha256` | text | SHA-256 of the exported content |
 | `created_at` | timestamp | When the export was taken |
+| `service` | `text` GENERATED ALWAYS | `'credit'`, `'income'`, or `'appraisal'`, derived from the first path segment of `s3_key`. Added by migration `0105` (LOA-2180). Legacy keys without a service prefix retain `'appraisal'` identity. |
+
+Migration `0105` also adds a service-qualified unique index (`rule_set_exports_lender_service_set_version_unique`) on `(lender_id, service, rule_set_id, rule_set_version)`. The prior three-column unique index is retained during rollout for rollback compatibility; removing it belongs in a later release once the old image is outside the rollback window.
+
+### Export coverage tracking (migration `0106`)
+
+`ruleops_export_coverage` (migration `0106`, LOA-2180) tracks which `(service, lender_id, rule_set_id)` combinations have been exported at least once. It records the `first_export_version` (CHECK `> 0`) and uses a composite primary key on `(service, lender_id, rule_set_id)`. The table is FK-constrained to `lenders` with `ON DELETE RESTRICT`.
+
+Coverage obligations are registered after engine-version and history persistence and exported after commit. A capture that fails inside a SAVEPOINT preserves the mutation and records the coverage obligation; S3 delivery failures emit loss telemetry and preserve successful mutation responses.
+
+**Service-aware export workers (LOA-2180).** Four export workers share a deadline: three prefer appraisal exports; one rotates between credit and income. Workers take other pending work when their preferred queue empties. A telemetry attempt receives at most half the remaining time when the other telemetry service is waiting. Appraisal capture has priority within the shared retained-byte budget without changing database lock order.
+
+### Canonical export, diff, and development import (LOA-2180)
+
+LOA-2180 builds a portable rule-state representation:
+
+- **Canonical encoding and diff.** Each service produces a canonical byte representation of a lender's active rule set that is stable across database replicas and time. A canonical diff (`RuleChangeRecord[]`) between two snapshots shows exactly which rules, severities, and thresholds changed. This is the same `RuleChangeRecord` shape used by apply preview; the canonical diff is a library without a production consumer until a later ticket wires it.
+- **Dev-only import.** An authenticated HTTP endpoint accepts a serialized export envelope and atomically replaces the destination service's active rule sets. Import admission runs before body parsing and validates envelope shape, content, destination lender/program identity, byte limits, and row counts. For appraisal, the import is refused over an existing current-version export gap. **Production startup rejects an enabled import flag** — imports are a development/test-only capability and cannot run in a live environment.
 
 ### Datadog monitors
 

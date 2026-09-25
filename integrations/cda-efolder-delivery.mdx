@@ -26,7 +26,36 @@ Keep every lender absent/off until the cross-service preflight below is complete
 **The only supported activation path is the authenticated internal-super-admin portal/API feature-flag route:** `PUT /api/v1/portal/lenders/:id/feature-flags`. Direct SQL (`enabled = true`) is not sufficient. The sweep checks the flag with `cdaEfolderDeliveryEnabledSql`, which validates that the flag row was written by an active internal super-admin actor on behalf of an active, non-internal lender. A row written outside this path does not satisfy those conditions and is treated as absent.
 </Warning>
 
-## Producer outbox columns on `collateral_review_orders`
+## AVM report acquisition columns on `collateral_review_orders`
+
+Migration `0107` (LOA-2921) adds AVM-specific producer columns to `collateral_review_orders`. AVM delivery is a two-phase flow: first the AVM PDF is fetched from the vendor, then it is published to EventBridge for eFolder delivery. The columns mirror the CDA pattern but carry the `avm_` prefix.
+
+**AVM report acquisition phase** (fetch the PDF from Clear Capital):
+
+| Column | Type | Notes |
+|---|---|---|
+| `avm_report_acquisition_eligible_at` | `timestamptz` | Set when the AVM order is eligible for PDF fetch. NULL when ineligible. Only valid on `order_type = 'avm'` + `status = 'succeeded'`. |
+| `avm_report_fetch_attempt_count` | `integer NOT NULL default 0` | Monotonic fetch attempt counter. CHECK `>= 0`. |
+| `avm_report_next_attempt_at` | `timestamptz` | When the next fetch attempt is due. NULL after the PDF is acquired. |
+| `avm_report_last_error_code` | `text` | Most recent fetch error. Recognized codes: `missing_vendor_order_id`, `missing_vendor_tenant_id`, `deliverable_not_ready`, `deliverable_ambiguous`, `document_listing_unavailable`, `document_not_found`, `vendor_request_failed`, `empty_pdf`, `invalid_pdf_content_type`, `invalid_pdf_magic`, `pdf_too_large`, `artifact_storage_unavailable`, `artifact_conflict`. |
+
+AVM PDFs are stored in `pdf_s3_key` under the key `collateral-review/{loan_id}/avm-{id}.pdf`. A successful fetch sets `avm_efolder_eligible_at` and `avm_efolder_pdf_sha256`, which triggers the eFolder publication phase.
+
+**AVM eFolder publication phase** (EventBridge outbox, parallel to CDA):
+
+| Column | Type | Notes |
+|---|---|---|
+| `avm_efolder_eligible_at` | `timestamptz` | Set when the AVM PDF is ready for delivery. Requires `avm_report_acquisition_eligible_at` and a non-null `pdf_s3_key` and `avm_efolder_pdf_sha256`. |
+| `avm_efolder_pdf_sha256` | `text` | Lowercase 64-character SHA-256 of the AVM PDF. CHECK `^[0-9a-f]{64}$` when non-null. |
+| `avm_efolder_encompass_loan_id` | `text` | Encompass loan GUID. Non-blank when non-null. |
+| `avm_efolder_event_attempt_count` | `integer NOT NULL default 0` | Publication attempt counter. CHECK `>= 0`. |
+| `avm_efolder_event_next_attempt_at` | `timestamptz` | Next publication attempt due. NULL after successful EventBridge acknowledgement. |
+| `avm_efolder_event_published_at` | `timestamptz` | Set when EventBridge acknowledges. Does not mean eFolder delivery completed. |
+| `avm_efolder_event_last_error_code` | `text` | Most recent publication error. Same codes as the CDA path (`missing_encompass_loan_id`, `loan_lender_mismatch`, `invalid_encompass_loan_id`, `invalid_pdf_s3_key`, `invalid_pdf_sha256`, `eventbridge_rejected`, `eventbridge_transport_error`). |
+
+Two partial indexes on `collateral_review_orders` back the AVM publication sweep: `collateral_review_orders_avm_acquisition_due_idx` (pending acquisitions) and `collateral_review_orders_avm_efolder_due_idx` (pending publications).
+
+## Producer outbox columns on `collateral_review_orders` (CDA)
 
 Migrations `0073`–`0076` (LOA-2703) add these columns to `collateral_review_orders`:
 
@@ -226,10 +255,11 @@ One row per lender. Partial unique index enforces at most one `active = true` ro
 
 ### Consumer Datadog monitors
 
-Eight monitors ship in `packages/encompass/observability/datadog/cda-efolder-delivery-*.json`:
+Nine monitors ship in `packages/encompass/observability/datadog/cda-efolder-delivery-*.json`:
 
 | Monitor | Threshold |
 |---|---|
+| `cda-efolder-delivery-consumer-error` (int + prod) | Alerts on unhandled consumer errors logged to the SQS consumer error handler (LOA-2921). Two variants: `int` monitors the integration environment; `prod` monitors production. |
 | `cda-efolder-delivery-manual-review` | Alerts when a row enters `MANUAL_REVIEW` |
 | `cda-efolder-delivery-oldest-unfinished-age` | Warns / alerts on stale non-terminal rows |
 | `cda-efolder-delivery-payload-conflict` | Alerts on `PAYLOAD_CONFLICT` terminal state |
