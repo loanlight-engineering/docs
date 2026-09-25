@@ -1,0 +1,66 @@
+---
+title: Octy TV
+description: Narrated explainers for LoanLight and every agent it runs, played live in Octy.
+icon: tv
+---
+
+Octy TV (`/octy-tv`) is a library of narrated explainers — one overview of the full LoanLight system and one per agent. They are not pre-rendered videos. Each explainer is a story (JSON data) plus small narration clips; the player draws the picture live on a canvas at the current theme and plays audio in sync.
+
+The library and player live in `src/components/explainers/`. Stories live in `explainers/stories/`. The built manifests and catalog are in `src/lib/explainers/generated/`.
+
+## Explainer kinds
+
+Every explainer has a `kind`:
+
+| Kind | What it covers |
+|---|---|
+| `product` | The LoanLight system as a whole (`loanlight-overview`). Featured prominently in the library view. |
+| `agent` | A single audit-pipeline agent. One per agent type; identified by `agentType`. |
+
+The library renders the product explainer as a featured card, then the agent explainers in a responsive grid. You can filter by kind and search by title, tagline, agent type, or chapter name.
+
+## How it works
+
+A story is a sequence of named chapters, each containing narration **cues** and a **visual layout** (cards, flow, record, checks, etc.). The renderer (`src/lib/explainers/renderer.ts`) takes a compiled manifest, a timestamp, and the active Octy theme palette, and draws the correct frame. Switching Octy between themes repaints the explainer mid-playback.
+
+Narration is synthesised with OpenAI TTS (`gpt-4o-mini-tts`) and stored as content-addressed 48 kbps AAC clips in `public/explainers/voice/<hash>.m4a`. A clip's file name is a hash of its text and every voice setting, so unchanged lines are never re-synthesised.
+
+The player (`ExplainerPlayer`) assembles the clip sequence from the manifest and schedules them against the canvas animation. It exposes:
+
+- A **chapter scrubber** segmented by chapter, with jump-to-chapter buttons.
+- A **clickable transcript** that seeks to any cue on click.
+- **Captions** toggled with the `CC` button.
+- **Speed control** (0.75×, 1×, 1.25×, 1.5×).
+- **Fullscreen** and `?t=<seconds>`/ `?scene=<slug>` deep links.
+
+## The catalog
+
+`CATALOG` in `src/lib/explainers/generated/index.ts` is the built list of explainer entries. Each entry carries `slug`, `title`, `tagline`, `kind`, `agentType?`, `chapters`, and `duration`. The `ExplainersLibrary` component reads it client-side; no API call is needed.
+
+Current catalog covers: `loanlight-overview`, `pre-audit-classification`, `document-health`, `pii-validation`, `urla-extraction`, `property-data`, `red-flags`, `credit-evaluation`, `appraisal-evaluation`, `bank-statement-income`, and `iris`.
+
+## Authoring and refresh
+
+Stories and narration clips are committed to the repo. Everyday commands from the repo root:
+
+```bash
+pnpm -s explainers:build                  # dry run: validate, show cost of missing clips
+pnpm -s explainers:build <slug> --yes     # voice missing clips, write manifests + catalog
+pnpm -s explainers:stale                  # list explainers whose source paths changed since authoring
+pnpm exec vitest run src/lib/explainers   # validate stories, manifests, and clip presence
+```
+
+`explainers:stale` reads each story's `sources[]` list (repo, commit, paths) and runs `git diff` to find staleness. Only changed explainers need re-authoring. `--yes` refuses to synthesise more than `--budget` (default $2) of audio at once.
+
+See `explainers/AUTHORING.md` for the shape of a story file and the layout vocabulary.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="Bug Reports console" href="/octy/bug-reports-console" icon="bug">
+Launch Oz investigations and review run summaries.
+</Card>
+<Card title="Octy overview" href="/octy/overview" icon="octagon">
+The Octy platform and what Oz is.
+</Card>
+</Columns>
