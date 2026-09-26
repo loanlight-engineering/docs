@@ -59,7 +59,7 @@ The validate-field and aggregate nodes do **not** write `pii_validation_results`
 
 1. **Scoping** — `computeScoping(state)` (see below). If it returns `noEligibleDocs: true` (Scenario B), the field is skipped with no retrieval and no LLM (`hasIssue: false`).
 2. **Retrieval** — `retrieveDocumentSnippets` against LlamaCloud. Zero snippets returns `createNoDocumentsResult` (`hasIssue: false`, logged as `pii.zero_retrieval`). Zero-retrieval is deliberately **not** a user-facing issue.
-3. **Enrichment** — `enrichSnippetsWithClassification` stamps each snippet's `metadata.classification_type` by matching `file_id` + page range against the classification map (so prompts can see e.g. `bank_statement_business`).
+3. **Enrichment** — `enrichSnippetsWithClassification` stamps each snippet's `metadata.classification_type` by matching `file_id` + page range against the classification map, and stamps `bank_account_kind` (`'business'` | `'personal'` | `'unknown'`) when the covering segment resolves to a bank-statement label via `resolveBankAccountKind` in `bank-account-kind.ts`. A snippet on a bank-statement file whose kind cannot be pinned (no covering segment, or a kindless label) receives `'unknown'`; fields that fail closed on unknown kind log a `pii.bank_statement_kind_unknown` WARN.
 4. **Per-document validation** — `validateSingleDocument` per snippet. Per-snippet failure becomes `createErrorDocumentValidation` (`hasIssue: true`, `issueKind: "missing"`).
 5. **Aggregation** — `aggregateDocumentValidations` collapses to a single `PiiValidationResult`.
 
@@ -161,7 +161,15 @@ The EIN comparison is **not live on its own**: the classifier only emits a `clas
 
 ## Single-document validation and safety nets
 
-`validateSingleDocument` builds a user prompt (`buildValidationUserPrompt`) that assembles context blocks: all-borrowers context, EMPLOYMENT CONTEXT (only `EmployerName`/`EmployerAddress`), FORMER ADDRESSES (only `MailingAddress`), the TARGET role ("Borrower"/"Co-Borrower"), DOCUMENT_CLASSIFICATION (only `FullName` when classification is `bank_statement_business`), and the document content. The LLM (`PII_MODELS.fieldValidation`, `gpt-4.1`) returns `LlmValidationResponseSchema { docValue, pageRef, hasIssue, issueKind, message }`.
+`validateSingleDocument` builds a user prompt (`buildValidationUserPrompt`) that assembles context blocks: all-borrowers context, EMPLOYMENT CONTEXT (only `EmployerName`/`EmployerAddress`), FORMER ADDRESSES (only `MailingAddress`), the TARGET role ("Borrower"/"Co-Borrower"), DOCUMENT_CLASSIFICATION (for `FullName` and `EmployerName` on any bank statement, keyed on `bank_account_kind`; the prompt receives the canonical label, e.g. `DOCUMENT_CLASSIFICATION: bank_statement_business`, so the model can apply account-kind-specific logic), and the document content.
+
+**Business bank statement identity checks (LOA-2792).** The blanket early return that previously skipped `FullName` validation on business bank statements is removed. Validation is now evidence-based:
+
+- A person found in the account title or account-holder block is compared against the borrower name. An entity-only title (one that ends in a recognized legal-entity suffix and joins no human names) reads as `missing` — the statement names a business, not a person, so the borrower name is simply absent.
+- An unrelated person produces `identity_mismatch`. A matching business entity in the title never excuses a wrong person.
+- The `isEntityOnlyName` discriminator in `name-designations.ts` applies the entity-suffix vocabulary (`ENTITY_ONLY_DESIGNATIONS`). Joined names ("ROBERT SMITH AND DOE CONSULTING LLC", "SMITH & JONES LLC") are left to the model; text alone cannot distinguish a person joined to a business from a business named after people. `CO` and `PA` are deliberately excluded from the suffix list (also common surnames).
+
+Migration `0112` (`LOA-2792`) seeds three new `pii_field_doc_type_rules` rows that sanction business bank statements as a source for `EmployerName`: `classification_type = 'bank_statement_business'`, `'bank_statement_business_asset'`, and `'bank_statement_business_income'` (all loan-purpose-agnostic). Personal and kindless bank-statement labels are deliberately not added — their account title names a person, not an employer.
 
 The core prompt's `issueKind` taxonomy:
 
@@ -184,7 +192,7 @@ The `unverifiable` kind is emitted only by `VestingEntityName` on a whole-index 
 
 ### Aggregation rules
 
-- `filterPreviousEmployerNoise` (EmployerName/EmployerAddress only) — when a document has at least one valid match plus inconsistent results from the same document, drop the inconsistent ones (likely previous-employer pages in a multi-record WVOE).
+- `filterPreviousEmployerNoise` (EmployerName/EmployerAddress only) — when a document has at least one valid match plus inconsistent results from the same document, drop the inconsistent ones (likely previous-employer pages in a multi-record WVOE). **Exception (LOA-2792):** business bank statement mismatches are never dropped — a business statement represents a single account, not an employment history, so its `EmployerName` mismatches are always surfaced.
 - `deduplicateDateFindings` — collapse same-document findings with the same normalized doc value, preferring `hasIssue=true`.
 - digitsOnly — distinguish a genuine valid match from OCR-overridden chunks; if every chunk is an OCR artifact, surface as `missing`.
 

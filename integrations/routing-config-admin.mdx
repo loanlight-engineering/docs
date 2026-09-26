@@ -113,7 +113,9 @@ The resolver emits a new routing outcome `bucket_fallback` (a success outcome) w
 
 **Preemption advisory.** When a lender has a per-lender override on the `"unknown"` classification type _and_ at least one bucket rule is seeded globally, `GET /integrations/routing-config/lenders/:orgId?resolve=true` includes an advisory warning naming the configured buckets. This does not change how documents route; it signals that the bucket tier takes precedence over the `unknown` override for any classify-failed document whose split bucket is covered. The warning is silent when `bucketRules` is empty (current shipped state), when no `unknown` override is configured, or when `unknown` has no active global rule (and the dead-key warning already fires).
 
-**Shipped inert.** No `bucketRules` are seeded. Every document falls through to today's behaviour until LOA-2464 seeds the first bucket rules.
+**Shipped inert.** No `bucketRules` are seeded. Every document falls through to today’s behaviour until LOA-2464 seeds the first bucket rules.
+
+**Category taxonomy validation (LOA-2961).** When saving a new global version that contains `bucketRules`, the integrations service validates each bucket key against the loanlight-api routing taxonomy endpoint (`GET /internal/v1/routing-taxonomy` on the loanlight-api internal NLB). That endpoint returns `{ categories: { [categoryCode]: { displayName, types } } }` for active split categories and their active classify types. A `503 { error: "taxonomy_unavailable" }` response means no classify-split config is active; the save is rejected. Category codes and borrowed classify types that are absent from the current taxonomy are silently skipped in the portal's fallback display (LOA-2970 tracks the drift-detection gap). The loanlight-api endpoint is keyless and sits under `internal/`; it is not proxied by the public API Gateway.
 
 ### Per-property and per-account eFolder routing (LOA-2839)
 

@@ -52,7 +52,7 @@ SECTION_8_DEMOGRAPHICS
 
 ## Rule IDs
 
-`RuleId` (`types/rule-ids.enum.ts`) has 32 values, grouped by URLA section:
+`RuleId` (`types/rule-ids.enum.ts`) has 33 values, grouped by URLA section:
 
 <AccordionGroup>
 <Accordion title="Section 1A — personal info & address">
@@ -65,7 +65,7 @@ SECTION_8_DEMOGRAPHICS
 `OTHER_INCOME_SOURCES`, `ASSETS_ACCOUNT_DETAILS`, `OTHER_ASSETS_DETAILS`, `LIABILITIES_DETAILS`, `OTHER_LIABILITIES_DETAILS`
 </Accordion>
 <Accordion title="Section 3 — real estate owned (REO)">
-`REO_REFINANCE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH` (deprecated), `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`
+`REO_REFINANCE_SUBJECT_PROPERTY`, `REO_PURCHASE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH` (deprecated), `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`
 </Accordion>
 <Accordion title="Sections 4, 5, 7, 8 and cross-section">
 `SECTION_4_LOAN_AND_PROPERTY_DETAILS`, `SECTION_4_PROPERTY_VALUE_REQUIRED`, `SECTION_4D_GIFT_FUNDS_PRESENT`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS`, `SECTION_8_FACE_TO_FACE_VISUAL_OBSERVATION`, `DTI_EXCEEDS_50_PERCENT` (cross-section)
@@ -91,6 +91,7 @@ Representative behaviors:
 - **`SECTION_4D_GIFT_FUNDS_PRESENT`** — advisory `INFO` rule (default enabled, fires once per borrower) when `section2FinancialInfo.giftsOrGrants` holds a row whose `assetType` is a gift type (`GIFT_OF_CASH` / `GIFT_OF_PROPERTY_EQUITY` / `GRANT`). The gift detail (count, asset types, sources, values) is interpolated into the `message` because the portal renders only `message`; structured `metadata` is also persisted. It does not affect the pass/fail result and co-exists with the `SECTION_4_LOAN_AND_PROPERTY_DETAILS` FAIL loop that catches *incomplete* gifts (a typeless row is caught there, not here).
 - **`DTI_EXCEEDS_50_PERCENT`** — reads `context.bottomRatioPercent` (no value → no finding); threshold is `ruleOptions.threshold` else `DEFAULT_DTI_THRESHOLD = 50`; FAIL when DTI exceeds the threshold.
 - **`REO_REFINANCE_SUBJECT_PROPERTY`** (`scope: "loan"`) — for REFINANCE, the Section-4 subject property must appear in some borrower's Section-3 owned properties (uses `allBorrowersData`).
+- **`REO_PURCHASE_SUBJECT_PROPERTY`** (`scope: "loan"`, LOA-2742) — for PURCHASE, flags when the Section-4 subject property address appears in any borrower's Section-3 owned properties list. A purchase subject listed in REO usually means the subject was auto-populated into Section 3, a row carries the wrong address and may hide a real owned property, or the transaction is mis-structured (e.g. a family buyout with a gift of equity). Only fires when the subject street normalizes to a non-blank string; runs once per loan (primary borrower only). Seeded in migration `0113`.
 
 ## Missing-data observability
 

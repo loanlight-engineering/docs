@@ -182,6 +182,10 @@ Other columns: `date` (NOT NULL), `description` (NOT NULL), `amount` (CHECK non-
 - `credit_category_entity_type` text — entity type for the qualifier. CHECK `IN ('business', 'individual', 'mechanism', 'unknown')` when non-null.
 - `credit_category_qualifier_digest` text — `qualifierDigest` of the row's own `(category, label)` — the read side recomputes it; writing a digest over anything else withholds every `NAME_TESTED` row that carries a qualifier.
 
+**Credit category provenance columns (migrations `0110`/`0111`, LOA-2776):** two nullable columns added alongside the qualifier columns to record which payer and rule were responsible for the categorization verdict.
+- `credit_category_payer` text — the payer descriptor as written by the categorization pipeline. No length CHECK: a CHECK would reject an over-length payer string outright rather than truncating, which would lose real payer identity. `NULL` means no payer was written for the row.
+- `credit_category_rule_id` text — the rule ID that matched this row (e.g. a structural rule from `rules.ts::tryTenderRule`). CHECK `length BETWEEN 1 AND 64` when non-null (NOT VALID). `NULL` means no rule id has been persisted — Stage 2 (LOA-2776) adds the writer, so rows matched by existing structural rules before the deploy also carry `NULL` here. No CHECK enumerates valid rule IDs because the rule set changes independently of the migration.
+
 **Identity-exclusion flag (migration `0089`, LOA-1898):** `identity_excluded` boolean NOT NULL DEFAULT false. Set to `true` on transactions that an identity reviewer explicitly excluded from qualifying income during a bank statement identity review. The flag survives statement reprocessing so a reviewer's disposition is preserved across re-extractions.
 
 <Note>

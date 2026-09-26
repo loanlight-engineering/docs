@@ -368,7 +368,11 @@ One row per document expiration / required-document result, written transactiona
 Evidence types: `date_extraction`, `document_classification`, `expiration_calculation`,
 `dedupe_decision`.
 
-**`requirement_reason` (LOA-2952, migration `0103`):** a plain-English statement of why the document was requested. Set by `verify-required-documents` via the `requirementReasonByType` map, which combines program-required reasons and borrower-declaration reasons. Absent on results that nobody asked for (expiration-only rows) and on rows predating LOA-2952. Format: `"Requested because <cause clause>"` for declaration-driven rows; program-driven rows receive the program condition text.
+**`requirement_reason` (LOA-2952 / LOA-2990, migration `0103`):** a plain-English statement of why the document was requested. Set by `verify-required-documents` via the `requirementReasonByType` map, which combines program-required reasons and borrower-declaration reasons. Absent on results that nobody asked for (expiration-only rows) and on rows predating LOA-2952.
+
+Format differs by origin (LOA-2990 standardized program-driven reasons to short, code-authored one-sentence rules):
+- **Program-driven** — a short rule sentence from `PROGRAM_CONDITION_REASONS` in `requirement-reason.ts`, one per condition (e.g. `"Required on purchase transactions"`, `"Required when borrower is self-employed"`, `"Required for {program name}"`). Multiple conditions on a single row are joined by `"; "`. Falls back to `"Required by program submission guidelines"` when no condition resolves and when a program name is required but unavailable.
+- **Declaration-driven** — `"Requested because <cause clause>"`, where the cause clause comes from the built-in check's `reason` field.
 
 **Requirement column in the Document Health table (LOA-2990).** The shared-ui `DocumentHealthTable` component (`loanlight-shared`) shows a **Requirement** column when at least one row in the table has a non-empty `requirement_reason`. The column layout is computed by `getRequirementColumnLayout()` in `_helpers/requirementColumn.ts`; when no row has a reason the column is hidden entirely so tables without requirement data remain clean. Bank-statement account groups surface a group-level requirement via `getGroupRequirement()` — the first non-empty reason from the group's rows.
 
