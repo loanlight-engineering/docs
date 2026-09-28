@@ -10,8 +10,8 @@ MISMO XML, fetches property data from external providers, and consolidates it in
 `langgraph/agents/propertyData/`, built by `buildGraph(options)` with
 `{ progressEvents, zillowUrlFinder, hasData, attom, llama }`.
 
-The agent is invoked from `langgraph.service.ts` via `buildPropertyGraph(...)`. The graph itself
-only returns state and instrumentation; **the service writes all DB rows**, not the graph.
+The agent is invoked from `property-data-graph-runner.ts` via `createPropertyDataGraphWithSharedAuditRun(...)`. The graph itself
+only returns state and instrumentation; **the runner writes all DB rows**, not the graph.
 
 The `ConsolidatedProperty` objects this agent produces are the primary input to the
 [Property-Red-Flags agent](/agents/property-red-flags).
@@ -117,7 +117,7 @@ scrapes.
 `property-data/{loanId}/subject-{source}-listing` (no file extension; `ContentType` at PutObject
 time is the authoritative format). `captureIfMissing` does a `HeadObject` check first. A cache
 hit returns `{ s3Key, sourceUrl, capturedAt, reused: true }` with no new HasData call. The flag
-is resolved once in `langgraph.service` and injected as a boolean into the graph — the graph
+is resolved once in `property-data-graph-runner.ts` and injected as a boolean into the graph — the graph
 itself carries no lender context.
 
 **Two channels.** `subjectZillowScreenshot` and `subjectRedfinScreenshot` are disjoint graph-state
@@ -256,7 +256,7 @@ address variations differ only in suffix abbreviation.
 
 ## Persistence
 
-The service (`langgraph.service.ts`), not the graph, writes these tables in
+The runner (`property-data-graph-runner.ts`), not the graph, writes these tables in
 `src/database/schema/property-data.ts`:
 
 <ResponseField name="property_data_runs" type="table">

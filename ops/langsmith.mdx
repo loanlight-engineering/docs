@@ -39,10 +39,11 @@ reads both `LANGSMITH_*` and `LANGCHAIN_*` names as fallbacks
 
 ## How runs are named
 
-Run configuration is built in
-`packages/api/src/langgraph/langgraph.service.ts` by `createAgentConfig(agentType,
-loanId, documentId, auditRunId, additionalMetadata)`. This produces the
-`RunnableConfig` used on every `app.invoke(...)`.
+Run configuration is built by `LangGraphAgentRunner.createAgentConfig(agentType,
+loanId, documentId, auditRunId, additionalMetadata)` in
+`packages/api/src/langgraph/langgraph-agent-runner.base.ts`. Every per-graph
+runner inherits this method. This produces the `RunnableConfig` used on every
+`app.invoke(...)`.
 
 <ParamField path="runName" type="string">
   `` `${agentType}-Loan-${loanId}` `` normally. For Credit-Evaluation with a real

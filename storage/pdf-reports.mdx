@@ -59,7 +59,7 @@ PDFs are generated in-process and uploaded to the LOS (Encompass) as attachments
 
 ### Property data PDF
 
-Generated in `langgraph/langgraph.service.ts` after property data is persisted. It lazily resolves `PdfTemplateService` via `moduleRef`, builds `PdfTemplateData` (`reportType: "Property Data"`), and calls `generateAgentDetailReportPdf(templateData, "propertyData", { format: "A4", orientation: "portrait" })`.
+Generated in `langgraph/property-data-graph-runner.ts` after property data is persisted. It lazily resolves `PdfTemplateService` via `moduleRef`, builds `PdfTemplateData` (`reportType: "Property Data"`), and calls `generateAgentDetailReportPdf(templateData, "propertyData", { format: "A4", orientation: "portrait" })`.
 
 - In `NODE_ENV=development` it writes `./pdf-output/property-data-{loanId}-{auditRunId}.pdf`.
 - When a loan-processing context with a token exists, it uploads to the LOS via `DevConnectDocumentService.ensureDocumentWithTitle(originalLoanId, "LLUE - Property Data", …)` then `uploadPdfAttachment(originalLoanId, docId, "property-data-report-{auditRunId8}.pdf", pdfBuffer, …)`.

@@ -170,7 +170,7 @@ Every leaf is nullable, and the literal string `"null"` is sanitized to `null` (
 
 ## Tables written
 
-Persisted by `langgraph.service.ts` (`persistUrlaExtractionResults` / `persistUrlaRulesFindings`). See [URLA data model](/data-model/urla-data-model).
+Persisted by `urla-extraction-graph-runner.ts` (`persistUrlaExtractionResults` / `persistUrlaRulesFindings`). See [URLA data model](/data-model/urla-data-model).
 
 - **`urla_extraction_results`** — `audit_run_id` (unique, FK → `audit_runs` cascade), `loan_id`, `urla_extraction_result` (jsonb, GIN-indexed). One row per audit run.
 - **`urla_rules_engine_results`** — one row per borrower (`borrower_label`, default `BORROWER_1`); unique `(audit_run_id, borrower_label)`. Written by the embedded rules engine.

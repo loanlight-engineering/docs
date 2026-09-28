@@ -50,7 +50,7 @@ Computes `{ issuesFound, totalDocumentsAnalyzed, fieldsWithMultipleDocuments }`.
 </Steps>
 
 <Warning>
-The validate-field and aggregate nodes do **not** write `pii_validation_results` / `pii_document_validations`. The orchestrator (`langgraph.service.ts` `persistMultiDocumentValidationResults`) writes those, attaching severity. The aggregate node only writes `audit_errors`.
+The validate-field and aggregate nodes do **not** write `pii_validation_results` / `pii_document_validations`. The runner (`pii-validation-graph-runner.ts` `persistMultiDocumentValidationResults`) writes those, attaching severity. The aggregate node only writes `audit_errors`.
 </Warning>
 
 ## The validate-field pipeline

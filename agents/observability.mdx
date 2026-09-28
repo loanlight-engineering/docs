@@ -63,7 +63,7 @@ The event goes through a pluggable `terminalFailureEmitter` (default logs via `l
 
 ## LangSmith trace naming
 
-`LangGraphService.createAgentConfig(agentType, loanId, documentId, auditRunId, additionalMetadata?)` (`langgraph.service.ts`, ~line 1972) builds the LangSmith `RunnableConfig` used on every `app.invoke(...)`. `agentType` is the **canonical catalog key** (e.g. `piiValidation`, `creditEvaluation`), in sync with the `agents` catalog. The human-readable run name is derived from the `AGENT_TRACE_LABEL` map (`langgraph/agents/agent-trace.ts`):
+`LangGraphAgentRunner.createAgentConfig(agentType, loanId, documentId, auditRunId, additionalMetadata?)` (`langgraph-agent-runner.base.ts`) builds the LangSmith `RunnableConfig` used on every `app.invoke(...)`. Every per-graph runner inherits this method from `LangGraphAgentRunner`. `agentType` is the **canonical catalog key** (e.g. `piiValidation`, `creditEvaluation`), in sync with the `agents` catalog. The human-readable run name is derived from the `AGENT_TRACE_LABEL` map (`langgraph/agents/agent-trace.ts`):
 
 - `label = AGENT_TRACE_LABEL[agentType]` — e.g. `piiValidation` → `PII-Validation`, `creditEvaluation` → `Credit-Evaluation`, `redFlags` → `Property-Red-Flags`.
 - `runName`: `` `${label}-Loan-${loanId}` `` normally; for `creditEvaluation` with a real `documentId` it is `` `${label}-Loan-${loanId}-Doc-${documentId}` ``.
@@ -79,7 +79,7 @@ The label is presentation only; the canonical key is the identity. `agent-trace.
 
 ## LangSmith PII anonymizer
 
-`langgraph/utils/langsmith-anonymizer.ts` exports `createLangSmithAnonymizer()`, which returns a function usable as both `(text) => text` and `(payload) => payload`. It is wired into `createAgentConfig` as `hide_inputs` and `hide_outputs` for every LangSmith trace. The scrubbing is layered.
+`langgraph/utils/langsmith-anonymizer.ts` exports `createLangSmithAnonymizer()`, which returns a function usable as both `(text) => text` and `(payload) => payload`. It is wired into `LangGraphAgentRunner.createAgentConfig` as `hide_inputs` and `hide_outputs` for every LangSmith trace. The scrubbing is layered.
 
 <Steps>
   <Step title="Key-aware redaction first">

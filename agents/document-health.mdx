@@ -9,8 +9,8 @@ classification, page completeness, expiration, required-document presence, and s
 a LangGraph compiled graph under `langgraph/agents/documentHealth/`, built by `buildGraph()`
 (exported as `buildDocumentHealthGraph`, legacy alias `buildDocumentExpirationGraph`).
 
-The agent is constructed and invoked by `LangGraphService.createDocumentHealthGraph(...)` in
-`langgraph/langgraph.service.ts`, which generates the `auditRunId`, a thread id of
+The agent is constructed and invoked by `LangGraphService.createDocumentHealthGraph(...)`, which delegates to `DocumentHealthGraphRunner.createDocumentHealthGraph` in
+`langgraph/document-health-graph-runner.ts`. The runner generates the `auditRunId`, a thread id of
 `${loanId}-document-health-${auditRunId}`, creates the `audit_runs` row, emits
 `EVENTS.AGENT.DOCUMENT_HEALTH.START`, then invokes the graph with
 `{ pipelineId, loanId, documentId, auditRunId, lenderCode, productType, estimatedClosingDate }`.
