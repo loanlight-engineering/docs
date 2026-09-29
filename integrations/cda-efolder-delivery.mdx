@@ -287,6 +287,31 @@ Six monitors cover the CDA eFolder producer path (`packages/api/observability/da
 | `cda-efolder-metrics-observation-failed` | Log alert: fires when a backlog observation cycle fails (`cda_efolder.metrics_observation_failed`). While this alert is active, backlog and retry gauges may not be trustworthy — investigate database/query health before relying on them. |
 | `cda-efolder-retry-backlog-stuck` | Alerts when any per-reason `retrying_unpublished_count` gauge holds ≥1 for a full 15-minute window. `published_at` means producer acceptance by EventBridge only, not completed eFolder delivery. Use the runbook SQL to find the affected order(s). |
 
+## AVM eFolder Datadog monitors
+
+Nine monitors cover the AVM producer path (`packages/api/observability/datadog/avm-*.json`, added LOA-2921.7). The acquisition phase (fetching the report PDF from Clear Capital) and the publication phase (publishing to EventBridge) each have their own monitor set.
+
+**Acquisition monitors:**
+
+| Monitor | Threshold / Trigger |
+|---|---|
+| `avm-report-acquisition-stuck` | `loanlight.avm_report.oldest_eligible_unstaged_age_seconds` warns at 2 h, alerts at 6 h. Counts from `avm_report_acquisition_eligible_at`. Rows in backoff and parked terminal rows keep it lit. Run the acquisition-due query; classify each row as lease, backoff, or parked. A parked terminal row re-notifies every 30 min until resolved; mute the whole monitor with an expiry and a named note, then re-run the query — a second stuck row cannot page while muted. |
+| `avm-report-terminal` | Fires on any `avm_report.acquisition_terminal` log, whatever the reason. Only terminal codes emit this event. Follow the terminal acquisition runbook for the logged reason. |
+| `avm-report-sweep-missing` | No acquisition heartbeat for 15 minutes. The sweep is the only recovery for a missed webhook or a deliverable not yet ready, so unstaged reports accumulate. Check scheduler and task health, then the acquisition advisory lock holder, before touching any row. |
+
+**Publication monitors:**
+
+| Monitor | Threshold / Trigger |
+|---|---|
+| `avm-efolder-backlog-aged` | `loanlight.avm_efolder.oldest_eligible_unpublished_age_seconds` warns at 2 h, alerts at 6 h. Counts from `COALESCE(avm_efolder_event_next_attempt_at, avm_efolder_eligible_at)` for validly enabled lenders only. Leased and backed-off rows read 0. Run the publication query. |
+| `avm-efolder-retry-backlog-stuck` | `loanlight.avm_efolder.retrying_unpublished_count`, grouped by bounded `reason`, stays ≥ 1 for a full 15-minute window. A missing or invalid Encompass loan ID follows the same repair path as CDA (see Encompass loan ID repair above). |
+| `avm-efolder-expired-claim` | `loanlight.avm_efolder.expired_claim` warns at 1, alerts at 3 in 30 minutes. Counts leases that ran out with no retry code written. This is the duplicate-risk path — the producer cannot tell whether an expired claim published; event-level duplicate suppression is the integrations consumer’s `(report_kind, order_id)` ledger identity. |
+| `avm-efolder-metrics-observation-failed` | Fires on `avm_efolder.metrics_observation_failed` with `reason: metrics_query_failed`. The backlog query failed; `oldest_eligible_unpublished_age_seconds`, `retrying_unpublished_count`, and `expired_claim` stop emitting (`on_missing_data: default` — those monitors go quiet). The sweep heartbeat is still emitted, so `avm-efolder-sweep-missing` stays green. Investigate database and query health; read durable state from the publication query instead of gauges. |
+| `avm-efolder-publication-stuck` | Fires on `avm_efolder.publication_stuck` with `reason: eventbridge_rejected`. EventBridge returned a failed or ambiguous entry. Check the producer account, region, default bus, `PutEvents` permission, and that the consumer accepts `loanlight.avm.efolder.delivery.requested.v1`. The row retries on its own once the cause is fixed. |
+| `avm-efolder-sweep-missing` | No publication heartbeat for 15 minutes. Staged reports for enabled lenders stop publishing. Check scheduler and task health, then the publication advisory lock holder. |
+
+The acquisition and publication sweeps run every five minutes under their own Postgres advisory locks (`6203841597264833` and `6203841597264834` respectively). For operational details and read-only runbook SQL, see `packages/api/docs/avm-efolder-delivery-runbook.md` on `loanlight-api` `main`.
+
 ## Querying the producer outbox
 
 ```sql

@@ -151,6 +151,17 @@ Detects the appraisal form type from the parsed document text produced by `parse
 `parsedText` is null (parse degraded), `classify` falls back to no-evidence detection — the
 same path image-only UAD 3.6 appraisals used before LOA-2190, which caused misrouting to the
 legacy 1004 form type.
+
+**Unsupported form detection (LOA-2425).** `classify` also detects forms the pipeline does not model. Evidence ranks from strongest to weakest across both text layers: a supported form code, official title, or trusted UAD 3.6 XML metadata overrides an unsupported detection; an unsupported printed code beats a loose supported phrase. Reference mentions (e.g. "the prior appraisal was prepared on FHLMC Form 71B") and absent-document references (e.g. "No property condition report was ordered") are filtered before detection runs.
+
+| Detected form | Code | Kind |
+|---|---|---|
+| Freddie Mac Form 71A | `71A` | `appraisal` |
+| Freddie Mac Form 71B | `71B` | `appraisal` |
+| Freddie Mac Form 1050 | `1050` | `appraisal` |
+| Property Condition Report | `PCR` | `non-appraisal` |
+
+When a run is marked unsupported: `unsupported_form_code` and `unsupported_form_kind` are written to `appraisal_runs`; `form_type_normalized` is set to `"unrecognized"`; `coverage_percent` is `NULL`; `coverage_result` retains the raw computation with an `unsupported_form: { code, kind }` marker.
 </Accordion>
 <Accordion title="reductoExtract">
 Reducto deep extraction — the standard extractor since the legacy pdfjs path was removed (PR #2463).
@@ -190,10 +201,9 @@ Syncs `formType` to the normalized `extractedData.form_type` before the coverage
 gates — recovers `1025`/`1073`/`1075`/`2055`.
 </Accordion>
 <Accordion title="computeCoverage">
-Coverage percent plus the missing mandatory fields. Coverage is scored per form type: the
-redesigned UAD 3.6 contract (`REDESIGNED_FIELD_EXCLUSIONS`) removes FEMA site fields from the
-denominator that the 2.6 form does not carry, so a correctly-routed 3.6 run is not penalised for
-unfillable fields (LOA-2190 F1, fixed 2026-08-04).
+Coverage percent plus the missing mandatory fields. Coverage is scored per form type.
+
+**UAD 3.6 denominator (LOA-2919).** For redesigned 3.6 runs, the coverage denominator is now derived from resolved **contract membership** rather than a static field-exclusion list. The FEMA triplet, comparable design style, and gross adjustment percent are removed from all five generated 3.6 contracts. The seller-ownership input (`CONT_004`) is declared conditional, preserving refinance `SKIPPED` behavior while excluding it from redesigned coverage. Pipeline-computed fields (e.g. `gross_adjustment_percent` per comparable) remain counted. For a 1004 with six comparables the structural denominator is 150. Legacy 2.6 runs are unchanged.
 
 Coverage thresholds (LOA-2190, also pinned in code and tests):
 - **Portal reviewer banner**: fires when `coveragePercent < 70%` (was 50% before LOA-2190).
@@ -826,8 +836,11 @@ revisions, partial unique `idx_one_child_per_parent`), `revisionNumber`, `status
 from the EPC audit path by LOA-1681), `rentalData` (Mashvisor STR/LTR enrichment, migration
 `0179_add_appraisal_runs_rental_data`), `marketComps` (Zillow + ATTOM market-comps enrichment,
 migration `0293_appraisal_runs_market_comps`, nullable — null when `ENABLE_ZILLOW_COMPS` is off
-or the subject is ineligible), and `cross_doc_validation` jsonb (source values from the
-cross-document validation step, migration `0264_appraisal_runs_cross_doc_validation`), and
+or the subject is ineligible), `cross_doc_validation` jsonb (source values from the
+cross-document validation step, migration `0264_appraisal_runs_cross_doc_validation`),
+`unsupported_form_code` text (nullable — `'71A'`, `'71B'`, `'1050'`, or `'PCR'`; migrations
+`0114`/`0115`, LOA-2425; null on normal runs), `unsupported_form_kind` text (nullable —
+`'appraisal'` or `'non-appraisal'`; both columns are null or both are non-null per pair CHECK), and
 `iris_facts` jsonb (IRIS aggregated analysis results, migration `0297`, nullable — null until
 the `appraisalIris` entitlement runs). The jsonb includes a `reconcile` subkey written by `IrisReconcileService.mergeReconcile` (LOA-2333): `{ status: "waiting_for_extraction" | "ready" | "error", narrative?: IrisReconcileNarrative, photosCandidates?: number }`. Alerts themselves are never stored here; they are derived at read time from `appraisal_photos`, `extracted_data`, and the operator configuration.
 <Note>

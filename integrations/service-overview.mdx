@@ -90,4 +90,8 @@ See [Integrations infrastructure](/integrations/infrastructure) and [Observabili
 
 `pnpm run local:start` runs the backend (`docker:dev`) and frontend (`dev`) together via `concurrently`. Pre/post hooks set up Docker networks, a Caddy proxy, a tunnel (ngrok/cloudflare/tailscale) for inbound Encompass webhooks, LocalStack, and Postgres.
 
-Local endpoints: backend API `http://localhost:3001`, frontend `http://localhost:8000`, LocalStack `http://localhost:4566`, Postgres `localhost:5433`. Key `.env.local` flags: `USE_LOCALSTACK`, `USE_LOCAL_AUTH` (bypass bearer auth and enable the local token endpoint), `PUBLISH_EVENTS_LOCALLY`, `JWT_SECRET`, `SIGNING_KEY` (webhook HMAC), `EPC_API_CLIENT_SECRET`, `TUNNEL_DOMAIN`.
+Local endpoints: backend API `http://localhost:3001`, frontend `http://localhost:8000`, LocalStack `http://localhost:4566`, Postgres `localhost:5433`. Key `.env.local` flags: `USE_LOCALSTACK`, `PUBLISH_EVENTS_LOCALLY`, `JWT_SECRET`, `SIGNING_KEY` (webhook HMAC), `EPC_API_CLIENT_SECRET`, `TUNNEL_DOMAIN`.
+
+<Note>
+`USE_LOCAL_AUTH` was removed in LOA-2602. Outside production, every protected request's bearer token is now verified in-process by `auth/workos-token-verifier.ts::createWorkOsTokenVerifier` using the same RS256 + `WORKOS_ISSUER` / `WORKOS_AUDIENCE` checks the deployed API Gateway authorizer applies. The former `ConditionalJwtAuthGuard` and `jwt.strategy.ts` (HS256 local-secret path) are deleted; local and CI environments now run the real token type.
+</Note>

@@ -75,7 +75,23 @@ Before the terminal PATCH, `AusUpdateService.deliverFindings(...)` evaluates and
 
 **LL-Property-01 (LOA-2828).** `PROPERTY_FINDING_DEFINITION` fires when the property section state is `"ran"` and the `propertiesCheck.findings` array contains at least one finding whose severity is `classifyPropertyFlags`-recognized. Unrecognized severities are logged as `findings.property.unknown_severity`; findings that were classified but dropped for lack of a delivery rule are logged as `findings.property.dropped_without_rule`. `registeredName` is `"Property Red Flags Identified — Review Required"`, `family` is `"property"`, `cardinality` is `"run"`.
 
-The full nine-code planned catalog (all families and registration status per environment) is in `packages/encompass/docs/findings-registration.md`. As of 2026-09-23, `LL-Appraisal-01`, `LL-Credit-01`, and `LL-Property-01` are registered in `int`; production registration is not yet requested for any code.
+**LL-Docs-01 through LL-Docs-05 — Document Health findings (LOA-2826).** Five run-level `documents` family findings (`documentsDefinition` in `documents.definition.ts`, content built by `documents-content.ts`). Each fires when `ctx.sectionState("documents") === "ran"` and the relevant condition applies across the audit's document rows. At most one finding is delivered per code per run; each lists affected documents as individual lines in its description (up to 25 lines then "…and N more"). Nothing is delivered until a lender's `findings_documents` flag is `auto`.
+
+| Code | Registered name | Fires when | Voice |
+|---|---|---|---|
+| `LL-Docs-01` | Required Document Missing | `correctDoc === "Missing"` | borrower |
+| `LL-Docs-02` | Borrower Document Expired or Expiring Before Closing | `isExpired` on a borrower-supplied type | borrower |
+| `LL-Docs-03` | Document Incomplete — Pages Missing | `completeDoc` is `"Missing N pages"` or `"Incomplete"`, on a non-lender-ordered type | borrower |
+| `LL-Docs-04` | Document Missing Required Signatures | `signatureStatus` is `unsigned` or `partially_signed`, on a non-lender-ordered type | borrower |
+| `LL-Docs-05` | Lender-Ordered Document Expired or Expiring Before Closing | `isExpired` on a lender-ordered or untyped document | internal |
+
+`LL-Docs-01` through `LL-Docs-04` are borrower-facing; `LL-Docs-05` is internal (map it to an internal condition template in service setup, not a borrower-facing one). Each line in the description names a document by type label, bank statement month/account, report date, or file name as appropriate. When multiple rows describe the same document and file name, lines carry a parenthetical disambiguator (e.g. `"USPS Verification.pdf (2 of 3)"`). Line content is built by `documents-content.ts::describeDocument` using the 121 type labels from `document-type-labels.ts::DOCUMENT_TYPE_LABELS`.
+
+<Note>
+`scope.type` on a delivered finding accepts only `"application"`, and Encompass rejects a repeated code within one payload (not yet confirmed in UAT — LOA-2822), so each code is delivered once per run with all affected documents listed in its description — not one finding per document.
+</Note>
+
+The full ten-code planned catalog (all families and registration status per environment) is in `packages/encompass/docs/findings-registration.md`. As of 2026-09-25, `LL-Appraisal-01`, `LL-Credit-01`, `LL-Property-01`, and `LL-Docs-01` through `LL-Docs-05` are registered in `int`; `LL-1003-01` and `LL-Data-01` are planned. Production registration is not yet requested for any code.
 
 **Best-effort.** A findings delivery failure is logged and alerted (Datadog monitor `findings-delivery-failed`) but never blocks the terminal PATCH. Completion always reaches Encompass.
 </Step>
