@@ -70,6 +70,9 @@ Beyond the Oz loop, Octy gives engineers a set of read-and-configure surfaces ov
   <Card title="Doc Refreshes" href="/octy/doc-refreshes" icon="book-open-check">
     The ledger of nightly documentation-refresh runs reported by the Oz `octy-docs-refresh` skill.
   </Card>
+  <Card title="MCP server" href="/octy/mcp-server" icon="plug">
+    Work bug reports from a local coding agent (Claude Code, Codex) over the Model Context Protocol.
+  </Card>
 </Columns>
 
 There is also a Dashboard (issue and run aggregates), **Lookup** (`/lookup` — by loan or lender), **Audit Runs** (`/audit-runs` — a paginated ledger of every `audit_runs` row with finding count, agent status chips, and a **UAD 3.6 only** filter that narrows to runs where `appraisal_runs.uad_version = 'redesigned'`; see [`uad_version` in the agent platform schema](/data-model/agent-platform-schema)), and a **Lenders** config editor. The Lenders editor now carries per-lender **Agent Entitlements** (which catalog agents a lender runs), **Feature Flags**, and **YAML config** tabs; entitlements proxy to loanlight-api's agent-platform API (`/api/lenders/[id]/agent-entitlements`, backed by the `agents` and `lender_agent_entitlements` read-mirrors). See [environment variables](/octy/environment-variables) and [infrastructure](/octy/infrastructure) for how Octy is wired and deployed.

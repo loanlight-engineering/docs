@@ -143,5 +143,5 @@ The Postgres enums (`database/schema/enums.ts`): `finding_type` = `['PASS','FAIL
 `UrlaCompletenessService.getLastUrlaCompletenessByAuditRun(auditRunId)` loads the latest `urla_extraction_results` (404 if none), the `urla_rules_engine_results` ordered by `borrower_label ASC` LIMIT 1, and the findings ordered by `(rule_category, rule_id, id)`. It computes `UrlaRulesEngineSummary { total_rules, passed_count, failed_count, info_count }`.
 
 <Note>
-Despite per-borrower persistence, this read API surfaces **BORROWER_1 only** (the `LIMIT 1` after ordering by `borrower_label`). Co-borrower findings are stored but not returned by this single-borrower DTO — flagged in code as a known limitation.
+The `urla_completeness` API response includes both `rules_engine_result` (BORROWER_1 only, the `LIMIT 1` field) and `rules_engine_results` (all borrowers, plural). The EPC app and the audit PDF 1003 Check section now read `rules_engine_results` when present, so all borrowers' findings are shown (LOA-3020, LOA-2827). The shared-types `UrlaCompletenessData` type does not expose `rules_engine_results`; integrations consumers cast to `UrlaCompletenessWithBorrowers` (`packages/frontend/src/utils/urlaBorrowerResults.ts`) to access it.
 </Note>

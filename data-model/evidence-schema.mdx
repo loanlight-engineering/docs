@@ -1,0 +1,198 @@
+---
+title: Evidence capture schema
+description: Database tables that retain and index URLA assertion evidence collected during audit runs (LOA-2927).
+icon: shield-check
+---
+
+The evidence capture subsystem retains the URLA MISMO XML submitted with each loan and extracts structured "facts" from it — borrower declarations, asset references, and similar assertions. The tables listed here are the durable store for that evidence. The system is **in initial rollout**: as of late September 2026 it is active on `local` and `int` only, behind a per-lender allowlist and a feature flag.
+
+<Note>
+These tables are in the `loanlight-api` AUS database (the shared Aurora cluster), not the integrations database. They are introduced by migrations `0116`–`0121` (LOA-2927).
+</Note>
+
+## Eligibility and rollout
+
+Evidence capture is guarded by two conditions (`src/audits/evidence/evidence-eligibility.ts`):
+
+1. `DEPLOYED_ENVIRONMENT` must be `local` or `int`.
+2. The lender's UUID must appear in the `EVIDENCE_SYNTHETIC_LENDER_ALLOWLIST` environment variable (comma-separated UUIDs).
+3. The per-lender feature flag `evidence_urla_capture` must be `true`.
+
+All three must be satisfied. This is an explicit allowlist — no lender runs evidence capture in production yet.
+
+## Tables
+
+### evidence_sources
+
+One row per unique URLA XML blob received for a given loan and lender. Deduplication is by `(lender_id, loan_id, raw_sha256)`: the same bytes submitted twice produce one row.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `lender_id` | `uuid` NOT NULL | FK → `lenders` |
+| `loan_id` | `uuid` NOT NULL | FK → `loans` |
+| `retained_xml` | `bytea` NOT NULL | The raw MISMO XML bytes, stored verbatim |
+| `raw_sha256` | `text` NOT NULL | Lowercase hex SHA-256 of `retained_xml`. CHECK: must equal `encode(digest(retained_xml, 'sha256'), 'hex')` |
+| `byte_size` | `integer` NOT NULL | CHECK: equals `octet_length(retained_xml)` |
+| `media_type` | `text` NOT NULL | Default `application/xml` |
+| `source_profile` | `text` NOT NULL | e.g. `mismo-residential-2009-urla` |
+| `api_observed_origin` | `text` NOT NULL | The retrieval seam that produced the bytes (server-recorded, never client-supplied) |
+| `upstream_provenance_available` | `boolean` NOT NULL | `false` for this initial slice — the upstream key is mutable |
+| `retained_reference` | `text` NOT NULL | Opaque stable reference: `evidence://retained/{lender_id}/{loan_id}/{raw_sha256}` |
+| `observed_at` | `timestamptz` NOT NULL | Default `now()` |
+
+Key constraints: `evidence_sources_scope_bytes_unique (lender_id, loan_id, raw_sha256)` and `evidence_sources_scope_identity_unique (id, lender_id, loan_id)`.
+
+### evidence_audit_source_pins
+
+Records which source was pinned to which source slot for a given audit run. An audit run reads the URLA from exactly one source; that source is frozen ("pinned") here so the evidence for that run is always traceable to the retained bytes.
+
+| Column | Type | Notes |
+|---|---|---|
+| `audit_run_id` | `uuid` NOT NULL | Part of composite PK; FK → `audit_runs` |
+| `source_slot` | `text` NOT NULL | Part of composite PK. `urla_application` is the initial slot |
+| `source_id` | `uuid` NOT NULL | FK → `evidence_sources` |
+| `lender_id`, `loan_id` | `uuid` NOT NULL | Scope; FK via composite FK to `audit_runs` and `evidence_sources` |
+| `pinned_at` | `timestamptz` NOT NULL | |
+
+PK is `(audit_run_id, source_slot)`. The `delete: restrict` on both FKs means an `audit_runs` row or `evidence_sources` row cannot be deleted while a pin exists.
+
+### evidence_entities
+
+A named participant (borrower or account) extracted from a source. One row per `(lender_id, loan_id, source_id, alias_kind, source_alias)` tuple.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `lender_id`, `loan_id`, `source_id` | scope | FK chain → `evidence_sources` |
+| `source_alias` | `text` NOT NULL | The label as it appears in the source (e.g. a party role or asset reference) |
+| `alias_kind` | `text` NOT NULL | CHECK: `party` \| `role` \| `asset` |
+| `entity_kind` | `text` NOT NULL | CHECK: `borrower` \| `account` |
+| `binding_authority` | `text` NOT NULL | CHECK: `source_observed` \| `reused_authoritative_binding`. Default `source_observed` |
+| `bound_at` | `timestamptz` NOT NULL | |
+
+Coherence CHECK: `asset` alias kind always pairs with `account` entity kind; `party` or `role` always pair with `borrower`.
+
+### evidence_registry_definition_snapshots
+
+A frozen copy of the evidence definition (schema contract) in effect when a batch was committed, scoped per lender. Retains the registry id, version, definition code and version, a SHA-256 of the definition schema, and the full definition JSON.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `lender_id` | `uuid` NOT NULL | |
+| `registry_id` | `text` NOT NULL | e.g. `urla-declarations` |
+| `registry_version` | `text` NOT NULL | e.g. `v1` |
+| `definition_code` | `text` NOT NULL | The attribute code (e.g. a URLA declaration field) |
+| `definition_version` | `text` NOT NULL | |
+| `definition_schema_sha256` | `text` NOT NULL | CHECK: lowercase 64-char hex |
+| `owner_producer_id` | `text` NOT NULL | |
+| `definition` | `jsonb` NOT NULL | The full definition object |
+| `created_at` | `timestamptz` NOT NULL | |
+
+Unique on `(lender_id, registry_id, registry_version, definition_code, definition_version)`.
+
+### evidence_emission_batches
+
+One row per URLA evidence "emission" — the result of parsing and extracting facts from a pinned source in the context of one audit run. A batch is the append unit; once committed its fields are immutable.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `lender_id`, `loan_id` | scope | |
+| `audit_run_id` | `uuid` NOT NULL | FK (composite, with scope) → `audit_runs` |
+| `emission_id` | `uuid` NOT NULL | Deterministic: `uuidv5(auditRunId:sourceId, namespace)` — retries cannot fork the idempotency key |
+| `semantic_fingerprint` | `text` NOT NULL | CHECK: lowercase 64-char hex. Content hash over the extracted facts |
+| `contract_version` | `text` NOT NULL | |
+| `producer_id`, `producer_version` | `text` NOT NULL | Identity of the extractor that produced this batch |
+| `registry_id`, `registry_version` | `text` NOT NULL | The registry the batch was produced against |
+| `source_id` | `uuid` NOT NULL | FK → `evidence_sources` |
+| `evidence_revision` | `integer` NOT NULL | CHECK: `> 0`. Monotonically increasing per `(lender_id, loan_id)`; allocated inside the append transaction |
+| `status` | `text` NOT NULL | CHECK: `committed` (the only valid value) |
+| `coverage_manifest` | `jsonb` NOT NULL | Which attributes are covered and at what outcome |
+| `subject_coverage` | `jsonb` NOT NULL | Per-entity coverage summary |
+| `committed_at` | `timestamptz` NOT NULL | |
+
+Unique on: `(lender_id, loan_id, emission_id)`, `(lender_id, loan_id, evidence_revision)`, `(id, lender_id, loan_id)`, and `(id, source_id, lender_id, loan_id)`.
+
+### evidence_facts
+
+One row per extracted fact — a single attribute assertion about a single entity from one batch. This is the leaf table and the most append-heavy.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `lender_id`, `loan_id` | scope | |
+| `batch_id` | `uuid` NOT NULL | FK (composite) → `evidence_emission_batches` |
+| `source_id` | `uuid` NOT NULL | FK via batch → `evidence_sources` |
+| `entity_id` | `uuid` NOT NULL | FK (composite) → `evidence_entities` |
+| `definition_id` | `uuid` NOT NULL | FK (composite) → `evidence_registry_definition_snapshots` |
+| `attribute_code` | `text` NOT NULL | The definition code for this fact |
+| `claim_basis` | `text` NOT NULL | CHECK: `asserted` \| `observed` \| `derived` \| `determination`. Only `asserted` is accepted in the current gate |
+| `qualifier` | `jsonb` | Optional qualifier on the value |
+| `value` | `jsonb` NOT NULL | The fact value (omitted/empty/invalid amounts are coverage distinctions, never zero) |
+| `currency_state` | `text` NOT NULL | CHECK: `unknown` \| `known`. Only `unknown` is in scope today |
+| `currency_code` | `text` | NULL when `currency_state = 'unknown'` |
+| `source_locator` | `jsonb` NOT NULL | Namespace/name/position or opaque reference — never PII-bearing source labels |
+| `correction_of_id` | `uuid` | When non-null, this row supersedes the referenced fact (same entity, definition, source, scope) |
+| `correction_rationale` | `text` | Required when `correction_of_id` is set |
+| `recorded_at` | `timestamptz` NOT NULL | |
+
+A partial unique index on `correction_of_id WHERE correction_of_id IS NOT NULL` prevents a fact from being corrected more than once.
+
+### evidence_read_snapshot_members
+
+A receipt batch's "read snapshot" is the set of batches visible to a consumer of that receipt. `evidence_read_snapshot_members` links a batch to the other batches it includes (predecessor corrections, earlier emissions). A batch's own facts are accessed directly via `evidence_facts.batch_id`; this table exists only to pull in **other** batches. Self-membership is a CHECK violation.
+
+| Column | Type | Notes |
+|---|---|---|
+| `batch_id` | `uuid` NOT NULL | Part of composite PK; the "view" batch |
+| `member_batch_id` | `uuid` NOT NULL | Part of composite PK; a batch whose facts are included |
+| `lender_id`, `loan_id` | scope | |
+| `member_kind` | `text` NOT NULL | CHECK: `correction_predecessor` \| `emission` |
+| `included_at` | `timestamptz` NOT NULL | |
+
+### evidence_capture_status
+
+Per-audit, per-slot status row that tracks where capture stands for an audit run. Written when capture is attempted; advanced to a terminal state when it succeeds or fails.
+
+| Column | Type | Notes |
+|---|---|---|
+| `audit_run_id` | `uuid` NOT NULL | Part of composite PK; FK (composite) → `audit_runs` |
+| `source_slot` | `text` NOT NULL | Part of composite PK |
+| `lender_id`, `loan_id` | `uuid` NOT NULL | Scope |
+| `status` | `text` NOT NULL | CHECK: `pending` \| `incomplete` \| `unsupported_source` \| `failed` \| `committed` |
+| `failure_reason` | `text` | Non-null only when `status = 'failed'`. Controlled vocabulary: `source_unavailable`, `source_size_exceeded`, `pinned_source_conflict`, `capture_persist_failed`, `capture_eligibility_failed`, `source_unreadable`, `append_rejected`, `publication_unexpected_error` |
+| `last_transitioned_at` | `timestamptz` NOT NULL | |
+
+ON DELETE CASCADE from `audit_runs` — capture status rows are removed if the audit run is removed.
+
+## Append gates
+
+Before an emission is appended, `evidence-append-gates.ts` validates four policy gates (collecting all failures, not short-circuiting):
+
+| Gate | What it checks |
+|---|---|
+| `producer_identity` | The emission's producer id and version must exactly match the pinned `URLA_DECLARATIONS_V1_REGISTRY` definition |
+| `claim_basis` | Every assertion must carry `claimBasis = 'asserted'` |
+| `currency_state` | Amount-type values must carry `currency.state = 'unknown'` |
+| `coverage_enumeration` | The coverage manifest must enumerate exactly the registry-pinned codes — no missing, no extras |
+
+A gate failure causes a `recordPublicationRejection` on the capture status and surfaces `append_rejected` in the failure reason.
+
+## Concurrency and idempotency
+
+The append is inside a database transaction that first locks the `audit_runs` row. A second concurrent attempt for the same `(audit_run_id, source_slot)` hits the `evidence_audit_source_pins` primary-key unique constraint and is detected as a `ConcurrentCaptureWinnerError` — the earlier commit won and the second attempt is a no-op.
+
+The `emission_id` is deterministic (`uuidv5(auditRunId:sourceId, EVIDENCE_EMISSION_ID_NAMESPACE)`), so a crashed-and-retried append re-derives the same id and the `evidence_emission_batches_emission_identity_unique` constraint deduplicates it.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Core tables" href="/data-model/core-tables" icon="table">
+    The `audit_runs`, `loans`, and `lenders` tables that evidence rows reference.
+  </Card>
+  <Card title="Migration workflow" href="/data-model/migrations" icon="git-branch">
+    How to author and apply migrations in loanlight-api.
+  </Card>
+</Columns>

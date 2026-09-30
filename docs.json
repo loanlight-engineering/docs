@@ -119,6 +119,7 @@
               "data-model/result-tables",
               "data-model/urla-data-model",
               "data-model/agent-platform-schema",
+              "data-model/evidence-schema",
               "data-model/financial-data-model",
               "data-model/enums-reference",
               "data-model/migrations"
@@ -260,7 +261,8 @@
               "octy/oz-tool-api",
               "octy/completion-webhook",
               "octy/issues-runs-labels-api",
-              "octy/doc-refreshes"
+              "octy/doc-refreshes",
+              "octy/mcp-server"
             ]
           },
           {

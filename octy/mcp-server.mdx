@@ -1,0 +1,134 @@
+---
+title: Octy MCP server
+description: Work Octy bug reports from a local coding agent (Claude Code, Codex) over the Model Context Protocol.
+icon: plug
+---
+
+The Octy MCP server lets a coding agent running on an engineer's machine work an Octy bug report the same way a cloud Oz run does: it reads the same data tools, receives the same server-built instructions, and posts its results back into Octy, where they appear in the bug-reports UI next to cloud runs.
+
+Use it when you want to drive an investigation yourself or when the cloud runtime is unavailable.
+
+<Note>
+This is a **local-agent** interface. The MCP endpoint is not used by Octy's own cloud (Oz/Warp) runs — Oz uses a token-authenticated HTTP tool API instead. See [the Oz tool API](/octy/oz-tool-api).
+</Note>
+
+## How it works
+
+```
+teammate files a bug report ──► Octy /bug-reports ──► copy Report ID
+                                                          │
+engineer: /ll:octy-rca <id>  (Claude Code)                ▼
+          $octy-rca <id>     (Codex)          POST /api/mcp  (Bearer OCTY_MCP_API_KEY)
+                                                          │
+   octy_get_issue ─► octy_start_run ─► octy_query_dataset… ─► octy_complete_run
+                          │                                        │
+          instructions built server-side             summary + PRs on the report,
+          (same code path as an Oz run)              run shown as "Local · <you>"
+```
+
+`octy_start_run` builds the investigation instructions on the server from the same sections an Oz run receives — ground rules, architecture, skill prompt, Linear protocol, and so on (`src/lib/oz-skills/`). An edit to the RCA prompt therefore reaches every local agent on its next run, with no skill update required. Only the tool mechanics differ: MCP tools instead of HTTP endpoints, and no tokens.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `octy_list_issues` | Find reports (filter by status; search over description, loan number, ID prefix) |
+| `octy_get_issue` | Load one report: anchor, traces, Linear ticket, comments, every run |
+| `octy_start_run` | Start a run (`root-cause-analysis`, `rca-fix-and-pr`, `ad-hoc`) → full instructions |
+| `octy_get_run` | A run's status, summary, and (optionally) its instructions again |
+| `octy_list_datasets` / `octy_query_dataset` | The Oz data tools, scoped by `issue_id` or an explicit `audit_run_id` |
+| `octy_add_comment` | Post to the report's comment thread, as "Octy (via `<operator>`)" |
+| `octy_attach_linear_ticket` | Record the report's one Linear ticket |
+| `octy_complete_run` | Post the summary and PR links and close the run |
+| `octy_reopen_run` | Reopen a completed local run to keep working on it |
+| `octy_set_issue_status` | Set the report's triage status |
+
+IDs can be bare UUIDs or pasted Octy links (`/bug-reports?issue=<id>`).
+
+## Local runs vs cloud runs
+
+A local run is an ordinary `octy_runs` row. Its `oz_run_id` is `mcp:<operator>` instead of a Warp run ID (`src/lib/mcp/run-source.ts`), so no schema change was needed. Anything that calls Warp with `oz_run_id` checks `isMcpRunId` first, as the run-status poll does.
+
+| | Cloud (Oz) run | Local (MCP) run |
+|---|---|---|
+| Auth | Per-run token, 60 min, 4 h refresh | `OCTY_MCP_API_KEY`; the run never expires |
+| Lifecycle | Warp status, polled | Whatever the agent last wrote (`in_progress` → `succeeded` / `failed`) |
+| Revisit | Start a new run with it as context | `octy_reopen_run`, or a new run (earlier summaries are included by default) |
+| UI label | Warp session link | **Local** badge with the operator |
+
+The MCP tools refuse to complete or reopen a cloud run because Warp owns that lifecycle. To build on a cloud run, start a local run with the cloud run in `context_run_ids`.
+
+## Security posture
+
+- **One shared key: `OCTY_MCP_API_KEY`.** Compared in constant time. If unset, the server answers 503 — a missing key never leaves the server open.
+- **Holding the key is full trust.** The holder can read any report's data (including S3 documents through `loan-s3-object`) in whichever environment the key belongs to, and can start, complete, and reopen runs. Treat the prod key like a prod credential and rotate it in Secrets Manager (`Octy/McpApiKey`) when someone leaves.
+- **`X-Octy-Operator` is attribution, not authentication.** It names who is driving and is never verified.
+- `/api/mcp` is exempt from the AuthKit middleware (`src/middleware.ts`) because the bearer key authenticates it.
+
+## Transport
+
+Streamable HTTP, stateless, JSON responses only (`src/lib/mcp/protocol.ts`, `src/app/api/mcp/route.ts`):
+
+- `POST /api/mcp` accepts one JSON-RPC message or a batch.
+- Notifications get `202`.
+- `GET` and `DELETE` get `405`: there is no server-initiated stream and no sessions.
+
+Being stateless is important because Octy runs several ECS tasks behind one ALB. Supported protocol versions: `2025-06-18`, `2025-03-26`, and `2024-11-05`.
+
+## Setup (each engineer)
+
+Get the key for the environment you want (prod data: prod Octy) from Secrets Manager (`Octy/McpApiKey`) or from whoever administers Octy. Then configure your client:
+
+**Claude Code**
+
+```bash
+export OCTY_MCP_API_KEY=...   # add to ~/.zshrc
+claude mcp add --transport http --scope user octy https://octy.loanlight.com/api/mcp \
+  --header "Authorization: Bearer $OCTY_MCP_API_KEY" \
+  --header "X-Octy-Operator: you@loanlight.com"
+```
+
+Install the skills with `/plugin install ll@loanlight`: `/ll:octy-load`, `/ll:octy-rca`, `/ll:octy-fix`, `/ll:octy-resume`.
+
+**Codex** (`~/.codex/config.toml`)
+
+```toml
+[mcp_servers.octy]
+url = "https://octy.loanlight.com/api/mcp"
+bearer_token_env_var = "OCTY_MCP_API_KEY"
+http_headers = { "X-Octy-Operator" = "you@loanlight.com" }
+```
+
+Install the skills with `bash install.sh` in `loanlight-codex-skills`: `$octy-load`, `$octy-rca`, `$octy-fix`, `$octy-resume`.
+
+**Local Octy.** Set `OCTY_MCP_API_KEY` in `.env.local` and point the URL at `http://localhost:7873/api/mcp`. To smoke-test:
+
+```bash
+npx @modelcontextprotocol/inspector --cli http://localhost:7873/api/mcp \
+  --transport http --header "Authorization: Bearer $OCTY_MCP_API_KEY" --method tools/list
+```
+
+## Deploying
+
+Create the secret in each account **before** the first deploy that includes this change, or the ECS task will not start:
+
+```bash
+aws secretsmanager create-secret --name Octy/McpApiKey --secret-string "$(openssl rand -hex 32)"
+```
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Oz run lifecycle" href="/octy/oz-run-lifecycle" icon="workflow">
+    The cloud (Warp/Oz) run flow that the MCP run mirrors.
+  </Card>
+  <Card title="Oz tool API" href="/octy/oz-tool-api" icon="webhook">
+    The HTTP tool API cloud runs use instead of MCP.
+  </Card>
+  <Card title="Bug reports console" href="/octy/bug-reports-console" icon="bug">
+    Where you find and triage the issues MCP runs work.
+  </Card>
+  <Card title="Environment variables" href="/octy/environment-variables" icon="settings">
+    `OCTY_MCP_API_KEY` and related secrets.
+  </Card>
+</Columns>
