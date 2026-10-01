@@ -26,6 +26,14 @@ The read-side EPC controller mints the URL.
   Rendering context. `top` opens a new browser tab; `iframe` embeds inside Encompass. Any other
   value → 400 `{ error: "invalid_embed_context" }`.
 </ParamField>
+<ParamField query="layout" type="&quot;full&quot;" default="(omit)">
+  Portal layout for an iframe embed. `"full"` renders the results sidebar and all sections inside
+  the iframe frame (used by the Encompass plug-in full-results embed). Requires `embedContext=iframe`
+  and `ENCOMPASS_RESULTS_EMBED_ENABLED=true` (INT only). Omit for the existing single-section embed
+  behaviour. Returns 400 `{ error: "invalid_layout" }` if the value is not `"full"` or if
+  `embedContext` is not `"iframe"`. Returns 403 `{ error: "results_embed_disabled" }` if
+  `ENCOMPASS_RESULTS_EMBED_ENABLED` is not set to `"true"` in this environment (LOA-2856).
+</ParamField>
 
 The guard populates `req.user.{lenderId, lenderCode}` from the requestor id (see
 [Lender resolution](/integrations/lender-resolution)). The controller then:
@@ -81,6 +89,11 @@ Configuration:
 | `PARTNER_RESULTS_BASE_URL` | `http://localhost:3001/results` (dev) | URL base. Unset in production → endpoints return 503. |
 | `PARTNER_RESULTS_JWT_SECRET` | dev-only well-known secret | Signing secret. Unset in production → 503. |
 | `PARTNER_RESULTS_TOKEN_TTL_MINUTES` | `60` | Exchange-token lifetime. |
+| `ENCOMPASS_RESULTS_EMBED_ENABLED` | `(unset)` | Must be `"true"` for `layout=full` minting. INT only. |
+
+### Layout claim
+
+When `layout=full` is minted into the exchange token, the portal's exchange handler (`/results/audits/[auditId]/exchange`) passes `layout` through to the view token. The view token's `layout: "full"` claim unlocks the full sidebar layout and all-section rendering inside the Encompass iframe. See [Encompass plug-in frontend](/integrations/frontend-plugin) for the env vars and host-bridge setup required.
 
 ### Partner equivalent
 

@@ -111,10 +111,31 @@ The appraisal result page now includes a **collateral review** section that show
 The BFF forwards to `GET /api/v1/portal/collateral-review/appraisals/:runId`. The API resolves the run's loan server-side using the session's effective lender and redacts by role. The response is a `CollateralReviewPayload` discriminated union:
 
 - `{ active: false }` — no live activity on this loan (shadow mode, or loan never crossed the score threshold). The portal renders nothing.
-- `CollateralReviewOrdered` — the loan entered the collateral review flow. Carries the firing score, agency, threshold, AVM order state, and CDA order state (including `turnTimeHours` from the lender's config row and `documentAvailable` once delivered).
-- `CollateralReviewEvaluatedOnly` — staff-only view (sent only to `super_admin`). Shows the decision outcome and score without an order having been placed.
+- `CollateralReviewOrdered` — the loan entered the collateral review flow. Carries the firing score, agency, threshold, AVM order state (with `checks`), and CDA order state.
+- `CollateralReviewLowRisk` — visible to **all** roles. The agency score was below the lender's threshold so nothing was ordered. Reports `kind: "low_risk"`.
+- `CollateralReviewEvaluatedOnly` — staff-only view (`super_admin` only). Shows the decision outcome and score for non-`below_threshold` cases where no order was placed (e.g. `no_score`, `score_rejected`, `skipped_*`, `shadow_would_order_avm`).
 
 Decision outcomes: `avm_only`, `avm_then_cda`, `below_threshold`, `no_score`, `score_rejected`, `skipped_no_loan`, `skipped_before_effective_date`, `shadow_would_order_avm`. Order statuses: `pending`, `awaiting_callback`, `succeeded`, `failed`, `no_hit`, `declined`, `abandoned`.
+
+**CDA order fields (LOA-2581).** The `CollateralReviewPortalCda` shape now includes:
+
+| Field | Visibility | Meaning |
+|---|---|---|
+| `cdaValue` | all roles | Clear Capital's CDA value; `null` until the order completes or when the result is Indeterminate. |
+| `cdaVariancePct` | all roles | Clear Capital's stored difference from the appraised value, in percent. |
+| `riskScore` | `super_admin` only | Clear Capital's risk rating. |
+| `reviewRecommended` | `super_admin` only | Whether Clear Capital recommended a review. |
+| `mocked` | all roles | `true` when the CDA was completed through `clear_capital_mock_cda_enabled` (a placeholder report with the value copied from the AVM). Do not present a mocked CDA as an appraiser's result. |
+| `turnTimeHours` | all roles | The tier the order was placed at (from `collateral_review_orders.cda_turn_time_hours`), not the lender's current config. |
+
+**AVM checks (LOA-2581).** The AVM payload now carries `checks: CollateralReviewPortalChecks`, two server-side pass/fail grades against the decision that actually evaluated the shown AVM:
+
+| Check | Measurement |
+|---|---|
+| `avmConfidence` | `100 − forecastStdDev × 100`, graded against the lender's threshold. |
+| `avmValueVariance` | `|appraised − AVM| / AVM`, graded against the lender's threshold. |
+
+Each check carries `pct` (the measured value, unrounded; `null` when it cannot be computed) and `result` (`"pass"` / `"fail"` / `null`). The CDA itself is not graded — no rule is specified for its value and variance; those are shown as reported (LOA-2498).
 
 **Clear Capital webhook compatibility (LOA-2701).** The collateral review module now accepts live Clear Capital v1.51 webhook events. Two gaps are fixed: (1) the signed SNS message's `event` discriminator field is normalized to the module's internal `eventType` on ingest, so v1.51 payloads route correctly instead of being rejected as unparseable while the legacy alias is still honoured; (2) deliverable IDs in a callback are treated as optional — when the callback carries no fetchable PDF, the module falls back to the export response, so completed CDA orders no longer remain `awaiting_callback` when the deliverable link is absent.
 

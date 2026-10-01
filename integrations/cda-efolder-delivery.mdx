@@ -125,12 +125,12 @@ Before enabling a lender, verify:
 - The shared event contract release.
 - The integrations consumer deployment.
 
-The following are owned by `loanlight-integrations` and are not configurable here: document-push queue routing, per-lender routing-config overrides, delivery claim management, and the `document-push-dlq` redrive. The retired Developer Connect resources (target DLQ, processing DLQ, archive, disabled rule) remain until phase 2 removes them.
+The following are owned by `loanlight-integrations` and are not configurable here: document-push queue routing, per-lender routing-config overrides, delivery claim management, and the `document-push-dlq` redrive.
 
 ## Consumer side (loanlight-integrations)
 
 <Warning>
-The Developer Connect delivery module (`packages/encompass/src/cda-efolder-delivery/`) was **deleted in phase 1** (PRs #611, #613, #615). AVM and CDA report PDFs now deliver through the existing **document-push** SQS pipeline. The old `CdaEfolderDeliveryRule` is synthesized with `State: DISABLED`; its queue, two DLQs, and archive remain unconsumed until phase 2 removes them. Do not replay that archive — its events would now match `DocumentPushRule` and re-file reports a second time. The `cda_efolder_delivery` and `cda_efolder_delivery_config` tables remain in the schema pending a later migration that drops them.
+The Developer Connect delivery module (`packages/encompass/src/cda-efolder-delivery/`) was **deleted in phase 1** and the remaining infrastructure was cleaned up in **phase 2** (#619, #610). The old `CdaEfolderDeliveryRule`, its event archive, the target DLQ, and the `cda_efolder_delivery` / `cda_efolder_delivery_config` tables were deleted in phase 2. The idle processing queue and its DLQ remain until the prod application stack stops importing their CloudFormation exports. `DocumentPushRule` is now the only rule that routes AVM and CDA delivery events.
 </Warning>
 
 ### Route
@@ -159,14 +159,14 @@ loanlight-api ──PutEvents──▶ EventBridge default bus
 Each report message goes through these steps:
 
 1. **Parse** with the shared-types parser for the event kind (`parseAvmEfolderDeliveryRequestedEvent` or `parseCdaEfolderDeliveryRequestedEvent`). A parse failure is logged (`report_delivery.invalid_payload`) and consumed.
-2. **Resolve the EPC transaction.** `getTransactionRecordByEncompassLoanIdOrThrow(encompassLoanId)` finds the loan's earliest `transaction_record` with an `active transaction_state` whose status is not `cancelled` or `failed`. No row → `no_transaction` (message consumed, not retried).
+2. **Resolve the EPC transaction.** When `auditRunId` is present: `getTransactionRecordOwningStateOrThrow(auditRunId)` finds the record that owns that state even after a re-audit. When `auditRunId` is absent or null: `getTransactionRecordByEncompassLoanIdOrThrow(encompassLoanId)` finds the loan's earliest `transaction_record` with an `active transaction_state` whose status is not `cancelled` or `failed`. No row found by either path → `no_transaction` (message consumed, not retried).
 3. **Shadow check.** `transaction_record.is_shadow = true` → `shadow_skipped`.
 4. **Verify bytes.** The S3 object is streamed and re-hashed. Hash mismatch → `content_mismatch` (terminal). Object missing or stalled → `retriable` (SQS redelivers, up to 5 receives).
 5. **Push** via `DocumentPushService.push` with `documentId = orderId`, `contentHash = pdfSha256`, `classificationType = avm_report | cda_report`, `documentName = filename`.
 6. **Open validation.** On the `attached` transition, the push stores the PATCH's `X-Correlation-ID` and starts the validation clock (`validation_pending_since`, migration `041`).
 
 <Note>
-`auditRunId` is included in the event payload as of shared-types 2.5.0 (LOA-2921), but the consumer currently always passes `null` for the transaction lookup. The correlation lookup over `auditRunId` will be wired in a follow-up, together with handling for superseded transaction states.
+`auditRunId` (the EPC correlation id, i.e. `transaction_state.id`) is included in event payloads as of shared-types 2.5.0 (LOA-2921). When present, the consumer resolves the transaction record via `getTransactionRecordOwningStateOrThrow(auditRunId)`, which finds the record that owns that state **even if a re-audit has since superseded it**, then files the report against the record's newest active (non-cancelled, non-failed) state. When `auditRunId` is absent or `null`, the lookup falls back to `getTransactionRecordByEncompassLoanIdOrThrow(encompassLoanId)` (earliest active record, unchanged from the previous behaviour). The `encompassLoanId` field is always used for final loan-id verification regardless of which lookup path resolved the record.
 </Note>
 
 ### Where the file lands

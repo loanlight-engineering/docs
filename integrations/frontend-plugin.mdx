@@ -77,6 +77,23 @@ The appraisal issue count on the sidebar badge (`countAppraisalFindings`) was co
 The appraisal review PDF is filed into the Encompass eFolder on every completed audit regardless of the lender's `document_push` flag (LOA-1993). For `document_push`-enabled lenders it routes to the `appraisal_review_summary` container (seeded by migration 020). For non-routed lenders it travels as a bare "AUS Results" resource alongside the AUS report and property PDFs. The EPC inline audit surface should always find the appraisal PDF present on a complete audit.
 </Note>
 
+## Unified audit view and full-results embed (LOA-2856/2951/3019)
+
+The portal staff audit view (`/loan-audits/[auditRunId]`) and the partner results viewer (`/results/audits/[auditId]`) now share the same per-section React components. Server-side visibility logic controls which links and fields appear for each surface — corrections, audit logs, `uploader`, and `enrichmentData` are withheld for read-only viewers (EPC, partner). The feature is gated by the `UNIFIED_AUDIT_VIEW_ENABLED` env flag on the portal. Route compatibility redirects keep old paths (`/property-data`, `/credit`, `/income`) working.
+
+The Encompass plug-in can now request the portal `/results` viewer in **full iframe embed** mode (INT environment only). To do this, the plug-in requests a results-access URL with `embedContext=iframe&layout=full`. The API mints an exchange token carrying `layout: "full"`, which the portal exchanges for a view cookie that unlocks the full sidebar layout and section rendering inside the iframe. The portal's `HostBridgeProvider` accepts `postMessage` calls only from the origin in `ENCOMPASS_HOST_ORIGIN`, and applies Partitioned (CHIPS) cookies for cross-site embedding.
+
+Two environment variables are added to the portal CDK for this feature:
+
+| Env var | Effect |
+|---|---|
+| `ENCOMPASS_RESULTS_EMBED_ENABLED` | Must be `"true"` (strict) for `layout=full` minting. Only set on INT. |
+| `ENCOMPASS_HOST_ORIGIN` | Exact HTTPS origin the host-bridge `postMessage` handler accepts. |
+
+<Note>
+`ENCOMPASS_RESULTS_EMBED_ENABLED` is INT-only. Do not set it on prod until this feature exits INT gating.
+</Note>
+
 ## Component conventions
 
 From the package `CLAUDE.md`:

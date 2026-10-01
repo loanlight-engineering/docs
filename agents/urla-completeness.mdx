@@ -144,4 +144,19 @@ The Postgres enums (`database/schema/enums.ts`): `finding_type` = `['PASS','FAIL
 
 <Note>
 The `urla_completeness` API response includes both `rules_engine_result` (BORROWER_1 only, the `LIMIT 1` field) and `rules_engine_results` (all borrowers, plural). The EPC app and the audit PDF 1003 Check section now read `rules_engine_results` when present, so all borrowers' findings are shown (LOA-3020, LOA-2827). The shared-types `UrlaCompletenessData` type does not expose `rules_engine_results`; integrations consumers cast to `UrlaCompletenessWithBorrowers` (`packages/frontend/src/utils/urlaBorrowerResults.ts`) to access it.
+
+## LL-1003-01 Encompass finding (LOA-2827)
+
+When the 1003 completeness rules produce FAIL outcomes, `loanlight-integrations` sends an EPC finding `LL-1003-01` back to Encompass. One finding is sent per audit run regardless of the number of FAIL rows. The title counts the total items (`[LoanLight] 5 items needed to complete the loan application`) and the description lists them grouped by borrower:
+
+- Each line reads: `• Section 1a (Borrower 2): <the rules engine's message>`.
+- Section 3 findings name the property by position (`Section 3 (Borrower 1, Property 2)`) rather than address; `property not identified` when no index is available.
+- `INFO` and `PASS` outcomes are never included; only `FAIL` rows fire.
+- Descriptions are capped at 25 lines with `…and N more` when the list is longer.
+
+A borrower is treated as unchecked (and called out in the finding) rather than clean when: they appear on the extraction roster but have no rules result, their result reports `total_rules: 0`, or their `failed_count` is higher than the `FAIL` rows that parsed. An unchecked borrower with no other failures does not produce a finding; `findings.1003.unchecked_borrower` is logged instead.
+
+**Suppression.** The finding is suppressed when the `urlaExtraction` agent failed (`degraded`) or is absent from a non-empty ledger. Only a `ran` section produces findings.
+
+**Activation.** `LL-1003-01` defaults to `off` (`findings_1003` per-lender mode). Setting a lender to `auto` activates sending. The finding must be mapped to a condition template in the Encompass environment (Int and prod separately) before any lender is enabled — an unmapped finding code is accepted by EPC and silently dropped.
 </Note>

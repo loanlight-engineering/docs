@@ -6,11 +6,17 @@ icon: eye
 
 The partner results viewer is a separate UI under `/results/audits/[auditId]` that shows audit results to partners and the Encompass (EPC) iframe without a WorkOS login. It authenticates with a short-lived view JWT carried in a cookie. It is not under the `(app)` route group.
 
+## Shared components with staff audit view (LOA-2951/3019)
+
+The `/results` viewer and the staff audit view (`/loan-audits/[auditRunId]`) now render the **same per-section React components**. The server decides which links and fields each surface can see — read-only viewers (EPC, partner) receive responses with `enrichmentData`, `uploader`, correction `userId` fields, and audit-log links withheld. This makes the two surfaces pixel-identical for shared content while letting staff see additional controls.
+
+Route compatibility redirects keep old paths working. Old sub-routes `/credit`, `/income`, `/property-data` redirect to their new equivalents. The `appraisal` sub-route now proxies via a new BFF route: `app/api/v2/audits/[auditRunId]/appraisal/runs/[runId]/[[...path]]/route.ts` (LOA-2856).
+
 ## Routes
 
-`/results/audits/[auditId]` with sub-routes `1003-check`, `credit`, `data-consistency`, `document-health`, `property-data`, `appraisal`, and `exchange`. It renders with `@loanlight-engineering/shared-ui` `Sidebar`/`SidebarLayout` and the "audit-catalyst" theme.
+`/results/audits/[auditId]` with sub-routes `1003-check`, `credit-results`, `data-consistency`, `document-health`, `properties-check`, `appraisal`, and `exchange`. It renders with `@loanlight-engineering/shared-ui` `Sidebar`/`SidebarLayout` and the "audit-catalyst" theme. Legacy paths `/credit`, `/property-data`, and `/income` redirect to their new equivalents.
 
-The `appraisal` sub-route (`/results/audits/[auditId]/appraisal`) was added in LOA-1994. It renders `AppraisalSection` — the same component the overview's standalone-appraisal branch uses — so both display identically. The sidebar nav shows the appraisal item when a run is linked, the ledger reports pending or failed, or the appraisal fetch failed; it is hidden for audits with no appraisal run. The sidebar badge counts non-passing compliance outcomes (FAIL + WARNING); see [appraisal sidebar counting](#appraisal-sidebar-and-badge).
+The `appraisal` sub-route was added in LOA-1994. It renders `AppraisalRunContent` — the same component the staff appraisal view uses (LOA-3019) — so both surfaces display identically. The sidebar nav shows the appraisal item when a run is linked, the ledger reports pending or failed, or the appraisal fetch failed; it is hidden for audits with no appraisal run. The sidebar badge counts non-passing compliance outcomes (FAIL + WARNING); see [appraisal sidebar counting](#appraisal-sidebar-and-badge).
 
 <Note>
 The `credit` page now renders the shared `CreditLiabilitiesView` component (the same view used by the staff `credit-results` page), so partner and staff credit results stay in sync. Routes are unchanged.
@@ -31,7 +37,7 @@ The `urlaCompleteness` field is tri-state: `null` (not run) vs `{rules_engine_re
 `src/lib/results-access-token.ts` mints and verifies HS256 JWTs (`jsonwebtoken`):
 
 - **Purposes:** exchange (`partner-results-exchange`, `epc-results-exchange`) and view (`partner-results-view`, `epc-results-view`).
-- **Claims:** `{ auditId, lenderId, loanId, lenderCode, purpose, embedContext?, iat, exp }`.
+- **Claims:** `{ auditId, lenderId, loanId, lenderCode, purpose, embedContext?, layout?, iat, exp }`. The `layout` claim carries `"full"` when the EPC plug-in requested a full-results embed (see [Results access](/integrations/results-access#layout-claim)).
 - **TTL:** `VIEW_TOKEN_TTL_SECONDS = 120`, with `CLOCK_TOLERANCE = 5`.
 - **Functions:** `mintViewToken`, `verifyViewToken`, `verifyExchangeToken`, `decodeViewPurpose`.
 - **Cookie:** `RESULTS_VIEW_COOKIE = "ll_results_view"`.

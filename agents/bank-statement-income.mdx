@@ -182,6 +182,24 @@ Two portal defaults changed in the same fix (LOA-2280):
 - **Upload modal** — `EMPTY_BANK_STATEMENT_CONFIG.borrowerType` is now `business` (was `personal`). The modal and its reset path both derive from this constant, so the Business-only Expense Factor and Ownership inputs render by default (prefilled at 50% / 100%).
 - **Transactions table** — the initial filter on the bank-statements explorer, statement-analyzer tab, and `/results` income editor is now **All Deposits** (credits only). Clearing the chip falls back to All Transactions.
 
+## Payer column (LOA-2992)
+
+The bank-statement income API and the portal transactions table now expose a **Payer** column that shows who originated each credit deposit.
+
+`credit_category_payer` on `transactions` stores the raw ACH company field as printed by the bank. `BankStatementResponseMappers` derives a `PayerColumn` shape from this stored value combined with the served category and qualifier:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `payer` | `string \| null` | The human-readable payer name shown in the Payer column. Derived from `printedPayer`, the P2P or wire originator, the structural qualifier, or the Plaid-served label, in that priority order. Withheld when the category label-safety gate suppresses the name. |
+| `payerSource` | `"printed" \| "p2p" \| "wire" \| "identified" \| "named" \| "plaid" \| null` | How the payer was derived. |
+| `p2pPlatform` | `string \| null` | The P2P platform label (e.g. `"Zelle"`) for display in the **category cell**, not the payer cell. Never duplicates the payer. |
+
+Categories that carry a payer-naming qualifier (`Merchant Settlement`, `Marketplace Settlement`, `Rental Income`, `W2`) surface the qualifier as the payer when no printed payer is available. `Loan` credits with a payer (lender disbursements) also carry the printed field when present. `Account Transfer` and `Customer Payment` categories are withheld from payer derivation — the label-safety gate controls those names independently.
+
+### Payer column and lender disbursements (LOA-3015)
+
+Lender disbursements sent by wire or ACH — credits whose originator matches the bank's own lender-registry entry — are now categorized as `Loan` income (not business income). The `lender-registry.ts` module recognizes structured NACHA and wire fields carrying institution-style disbursement phrases, and `rules.ts` classifies matching credits under the `Loan` category. This corrects a misclassification that had admitted lender-originated credits into qualifying income on business bank-statement analyses.
+
 ### PFC category corrections and counterparty ledger
 
 Two post-categorization passes run inside the `categorize` node after Plaid PFC enrichment, in order (LOA-2197). Both apply to **credits only** and skip any row whose `category_detailed` is disposition-gated (i.e. a code the income-exclusion pass keys on, such that rewriting it would silently re-admit excluded income).

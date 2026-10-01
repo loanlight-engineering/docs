@@ -59,6 +59,14 @@ Config validation in `app.module.ts` fails boot fast if any of `LOANLIGHT_API_UR
 
 Modules wired in `AppModule`: Webhooks, Token, Epc, Http, Loanlight, EpcOrigin, Auth, Health, Messaging, EpcTransaction, AuditDetails, Documents, Images, ResultsAccess, Common.
 
+## EPC transaction credential security (LOA-3066)
+
+EPC lender client secrets (`credentials.token` on the `Request` object inside a `Transaction`) are **stripped in memory** in `EpcApiClientService.getOrigin` and `getTransaction` before any caller can log or store them. The strip happens immediately on receipt — before the value is returned to any service — so `credentials.token` never reaches Datadog logs, Sentry, or the DB. Migration `044` backfills existing `transaction_state` rows that pre-date this fix by removing the stored `credentials` field from the JSONB column in-place.
+
+<Warning>
+Do not add logging calls around `originResponse` or `transaction` raw objects in `epc-api-client.service.ts`. Log only specific non-sensitive fields (e.g. `origin.id`, `origin.environment`).
+</Warning>
+
 ## Relationship to loanlight-api
 
 The encompass service talks to the AUS over two channels:
