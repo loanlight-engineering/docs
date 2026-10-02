@@ -376,6 +376,12 @@ No default is set deliberately: a code-side omission stays `NULL` and visible, r
 being silently stamped `safe`. The companion migration `0067` also guards column integrity with a
 CHECK constraint that enumerates the two allowed non-null values.
 
+**DIRECT DEP payer reading, declined-row categorization, and unconfirmed marking (LOA-3052).** Three new behaviours apply to Morgan Stanley `DIRECT DEP FUNDS RECVD <company>` credits that land on the fallback tier:
+
+- **AC2 — Payer reading.** `descriptor-shape.ts::directDepPayer` reads the company field from the `DIRECT DEP FUNDS RECVD <company>` layout on the null rail. `pipeline.ts::nullRailSignature` carries it as `printedPayer`. The company field is at most 16 characters (the NACHA width), measured after stripping trailing `,;:`. The prefix match is case-insensitive. The payer is not part of `nullRailHash`, so no signature hash moves and no resolver memo is orphaned.
+- **AC3 — Rule R19 (declined fallback rows).** When the resolver proposed no category for a `DIRECT DEP` row, `rules.ts::tryDirectDepPayerRule` serves `Customer Payment — <payer>`, which is income-eligible for both borrower profiles. Each row is named from its own payer. R19 does **not** fire when the resolver was never asked (budget exhausted), failed (transport error), or had its proposal demoted; those rows stay on the `Credit` fallback. It does not fire when the payer names the account holder. A row the resolver placed keeps its existing category, so a resolver `W2` is never overridden.
+- **AC1 — Unconfirmed marking.** `transaction-helpers.ts::categoryUnconfirmed` puts an **Unconfirmed** note under the category select on a fallback row, or on a row v2 never categorized. The marker is left off when a reviewer override or a category-replacing disposition (`refund`, `self_transfer`, `family_transfer`, `account_transfer`) decided the row. `p2p_profile_excluded` rows keep the note because that exclusion leaves the category in place. R19 rows are not marked, since the product ruling decides them.
+
 **Reviewer sentinels in the v2 category picker (#4199).** Three reviewer sentinel options —
 previously removed during the v2 migration — have been restored to
 `CREDIT_CATEGORIES_V2_PICKER_OPTIONS`. Three defects fixed alongside the restoration: sentinel

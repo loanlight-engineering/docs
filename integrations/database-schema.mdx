@@ -52,11 +52,14 @@ The current schema has **18 tables**. Migration `001_baseline_schema.sql` create
 || `031_create_findings_delivery` | `findings_delivery` table (LOA-2039) — see below |
 || `032_seed_bank_statement_income_report_routing` | DML: merges a `bank_statement_income_report` routing rule into the active global `document_push_routing_config` (LOA-1951). `nameTemplate` = `"Bank Statement Income — LoanLight Report"`, `typeTemplate` = `"bankStatementIncomeReport"`, `onMissingFields` = `degraded`. Idempotent: the seed is the LEFT operand of `||`, so an existing entry is never overwritten. No new table. |
 || `034_create_cda_efolder_delivery` | `cda_efolder_delivery_config` (per-lender config: instance, environment, credential reference, destination selector) + `cda_efolder_delivery` (durable workflow ledger keyed on `order_id`). Plus partial unique index `uq_cda_efolder_delivery_config_active_lender` (at most one active config per lender) and three indexes on the ledger (due-state sweep, state/next-attempt, lease expiry). (LOA-2847) |
-|| `035`–`038` | Added columns to `cda_efolder_delivery` for the Developer Connect and AVM adapter slices (LOA-2921). The Developer Connect module has since been deleted; these tables remain until a later migration drops them. |
+|| `035`–`038` | Added columns to `cda_efolder_delivery` for the Developer Connect and AVM adapter slices (LOA-2921). Both tables were dropped by migration `043`. |
 || `039_loa_3021_routing_metadata_to_file_names` | DML: strips `{placeholder}` metadata from eFolder `nameTemplate`, `typeTemplate`, and `descriptionTemplate` in the active global routing config and lender overrides. Adds `fileNameTemplate` entries carrying that metadata instead. Excludes `property_report` (which keeps the property address in the folder name). Idempotent: a re-run with no placeholders present is a no-op. (LOA-3021) |
 || `040_seed_collateral_report_routing` | DML: merges `avm_report` (`AVM Report` / `avmReport`) and `cda_report` (`CDA Report` / `cdaReport`) routing entries into the active global `document_push_routing_config`. Idempotent (left-merge). Seeds the delivery destinations for AVM and CDA report PDFs delivered via the document-push pipeline. |
 || `041_document_push_record_validation` | DDL: adds six validation-bookkeeping columns to `document_push_record`: `epc_correlation_id` (text, the PATCH's `X-Correlation-ID`), `validation_status` (CHECK `pending \| validated \| processing_failed \| timed_out`), `validation_checked_at`, `validated_at`, `validation_detail` (jsonb, booleans and event IDs only), `validation_pending_since` (timestamptz, start of the timeout clock). Also adds a partial index on `(COALESCE(validation_pending_since, updated_at), id) WHERE validation_status = 'pending'`. Idempotent per `ADD COLUMN IF NOT EXISTS`. |
 || `042_epc_event_transaction_type_index` | DDL: creates `idx_epc_event_transaction_record_type` on `epc_event (transaction_record_id, type, created_at)`. Backs the delivery-validation query that reads `response:updated` / `response:processed` events by transaction and type. Idempotent via `CREATE INDEX IF NOT EXISTS`. |
+|| `043_drop_cda_efolder_delivery` | DDL: drops `cda_efolder_delivery` and `cda_efolder_delivery_config` — the retired Developer Connect CDA delivery tables (phase 2 of LOA-2847 cleanup). AVM / CDA delivery now rides document push (`document_push_record`, `document_delivery_claim`). Idempotent (`DROP TABLE IF EXISTS`). |
+|| `044_loa_3066_strip_transaction_state_credentials_token` | DML: removes `request.credentials.token` from every stored `transaction_state.transaction` jsonb column. Left in place, each lender's client secret was readable by every role with read access to `transaction_state`. Re-runs as a no-op once stripped. |
+|| `045_edu04_intake_provenance` | DDL: creates `intake_occurrence` (one row per unique raw PDF received per EPC transaction document) and `intake_provenance_binding` (version-bound, hash-verified intake record per `transaction_state` + `transaction_document` pair). See tables below. (LOA-2929 / EDU-04) |
 || `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
@@ -316,6 +319,48 @@ Per-lender feature gates (added in 019; LOA-1336). Column names mirror octy's `l
 <Note>
 Default OFF is the **absence of a row** — a lender is enabled for a feature only when a row exists with `enabled = true`. There is no backfill of existing lenders. The [document-push consumer](/integrations/messaging) checks `EpcClientRepository.isLenderFeatureEnabled(lenderId, "document_push")` before materializing.
 </Note>
+
+### intake_occurrence
+
+One row per unique raw PDF received per EPC transaction. Deduplication key is `(client_id, encompass_loan_guid, epc_transaction_id, doc_id, raw_sha256)` — the same bytes submitted for the same document on the same loan produce one row. Added by migration `045` (LOA-2929 / EDU-04).
+
+| Column | Notes |
+|---|---|
+| `id` | PK (uuid) |
+| `client_id` | FK → `client` |
+| `encompass_loan_guid` | text NOT NULL |
+| `epc_transaction_id` | text NOT NULL |
+| `doc_id` | text NOT NULL — the EPC resource id |
+| `raw_sha256` | text NOT NULL — lowercase 64-char SHA-256 of the received PDF bytes. CHECK `^[0-9a-f]{64}$` |
+| `created_at` | timestamptz NOT NULL, default `now()` |
+
+UNIQUE: `uq_intake_occurrence_identity (client_id, encompass_loan_guid, epc_transaction_id, doc_id, raw_sha256)`.
+
+### intake_provenance_binding
+
+Version-bound, hash-verified provenance record linking a `transaction_state` + `transaction_document` pair to the original intake occurrence. Tracks whether the S3 object version matches the ingested bytes and gates EventBridge announcement of the binding. Added by migration `045` (LOA-2929 / EDU-04).
+
+| Column | Notes |
+|---|---|
+| `id` | PK (uuid) |
+| `transaction_state_id` | FK → `transaction_state` |
+| `transaction_document_id` | FK → `transaction_document` ON DELETE CASCADE |
+| `intake_occurrence_id` | FK → `intake_occurrence`, nullable. NULL when `state = 'failed'` and `failure_reason IN ('scope_unresolved', 'scope_and_version_unavailable')` |
+| `parent_doc_id` | text, nullable — package ancestor chain for carved members |
+| `object_key` | text NOT NULL — S3 object key of the PDF |
+| `object_version` | text, nullable — S3 object version id. Non-null when `state = 'recorded'`. NULL on failure with `version_unavailable` or `scope_and_version_unavailable` |
+| `normalized_sha256` | text, nullable — lowercase 64-char SHA-256 of the normalized (decompressed) PDF bytes. NULL until verification completes |
+| `package_ancestry` | text[] NOT NULL — ordered list of package doc ids containing this document. CHECK `cardinality > 0` |
+| `state` | text NOT NULL — CHECK `pending \| failed \| recorded` |
+| `failure_reason` | text, nullable — non-null iff `state = 'failed'`. CHECK: `version_unavailable`, `raw_hash_mismatch`, `scope_mismatch`, `scope_unresolved`, `scope_and_version_unavailable`, `verification_exhausted` |
+| `delivery` | text, nullable — CHECK `attached \| handed_to_sweep \| announced`. Tracks announcement of the binding to the AUS side |
+| `delivered_at` | timestamptz, nullable |
+| `claimed_until` | timestamptz, nullable — sweep lease expiry |
+| `attempt_count` | integer NOT NULL, default 0 |
+| `last_error_name` | text, nullable |
+| `created_at`, `updated_at` | timestamptz NOT NULL |
+
+Key constraints: UNIQUE `uq_ipb_run_occurrence (transaction_state_id, intake_occurrence_id)`. CHECK constraints enforce: `state = 'failed'` iff `failure_reason IS NOT NULL`; `state = 'recorded'` requires `object_version IS NOT NULL`; `delivery = 'attached'` or `'announced'` requires `state = 'recorded'`; `scope_and_version_unavailable` requires both `intake_occurrence_id` and `object_version` to be NULL.
 
 ## Access
 

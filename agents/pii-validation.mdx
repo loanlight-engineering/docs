@@ -171,6 +171,20 @@ The EIN comparison is **not live on its own**: the classifier only emits a `clas
 
 Migration `0112` (`LOA-2792`) seeds three new `pii_field_doc_type_rules` rows that sanction business bank statements as a source for `EmployerName`: `classification_type = 'bank_statement_business'`, `'bank_statement_business_asset'`, and `'bank_statement_business_income'` (all loan-purpose-agnostic). Personal and kindless bank-statement labels are deliberately not added — their account title names a person, not an employer.
 
+Migration `0123` (`LOA-2791`) adds seven new `pii_field_doc_type_rules` rows that make income-documentation bank statements a source for `FullName` and `MailingAddress`. Income statements are persisted under `split_type BANK_STATEMENT` (legacy: `INCOME`), which the prior `split_type`-keyed rules never reached, so an income-only loan had silently skipped both fields. The new rules match by `classification_type` (not `split_type`):
+
+| Field | `classification_type` | Notes |
+|---|---|---|
+| `FullName` | `bank_statement_income` | Legacy kindless income statement |
+| `FullName` | `bank_statement_personal_income` | Personal statement used as income |
+| `FullName` | `bank_statement_business_income` | Business statement used as income |
+| `FullName` | `bank_statement_personal_asset` | Personal statement used as assets |
+| `FullName` | `bank_statement_business_asset` | Business statement used as assets |
+| `MailingAddress` | `bank_statement_personal_income` | Personal statement header address |
+| `MailingAddress` | `bank_statement_personal_asset` | Personal statement header address |
+
+`MailingAddress` is scoped to personal income and asset statements only — a business statement prints the business address, and a kindless statement cannot be attributed to the borrower. The existing `FullName` `split_type = ASSETS` rule note is also corrected to clarify that `BANK_STATEMENT`-split labels are now matched by `classification_type` instead (the prior note had over-claimed income statement coverage it never reached).
+
 The core prompt's `issueKind` taxonomy:
 
 | Situation | hasIssue | issueKind |

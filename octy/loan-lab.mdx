@@ -95,6 +95,59 @@ Loan Lab's scenario library and run history are stored in two tables in loanligh
 
 Octy tolerates the absence of these tables: `src/lib/loan-lab/scenario/store.ts` falls back to the in-code preset specs when the tables are unavailable, so scenario generation still works before the migration lands. Saving and run history are unavailable without the tables.
 
+## Predicted findings and the fact catalog
+
+`facts/catalog.ts` records what each loan fact means to LoanLight: where it lives in MISMO and in the Encompass entity, which documents it implies, and the loanlight-api rule that reacts to it (cited by path). A permanent resident implies a `permanent_resident_card` (`decl.status.citizenship`); alimony implies the family-law set (`decl.alimony.obligation`); renting implies `rental_history`.
+
+`facts/predict.ts` turns any spec into the findings LoanLight should raise, from deterministic sources: the program's day-1 requirements in the vendored YAML against the documents the build produces, the catalog, and what the scenario was built to break (mismatches, appraisal defects, unsigned documents, and document dates against LoanLight's expiry rule). The preview shows them live, and flags a scenario whose declared `expect` disagrees. It is a prediction, not a grade: nothing yet compares it with the audit's actual result.
+
+When a LoanLight rule changes, the catalog entry citing it is what goes stale. Update the entry, then the builders if a new fact needs emitting.
+
+## Optional and Encompass-only fields
+
+The form shows only what nearly every scenario needs. Two tiers sit behind **Add a field** (a search, not a catalogue):
+
+- **Supported optional fields** (`fields/registry.ts`) — Loan Lab code builds them for both destinations and the fact catalog predicts their findings (alimony, marital status). A field is on the form exactly when the spec uses it. Adding one is a registry entry plus its control in `OptionalFields.tsx::FIELD_CONTROLS` — `OptionalFields.test.tsx` fails if either is missing.
+- **Encompass-only fields** (`spec.encompassFields`) — raw Encompass paths from the vendored schema (`encompass/schema-index.ts`: approximately 8,700 scalar fields reachable without creating array rows; co-borrower fields, Encompass-assigned keys, and the generated borrower facts Encompass repeats are excluded). Checked before the run (`encompass/raw-fields.ts`), read back after it, never predicted, and absent from MISMO — so a LoanLight int run refuses the scenario (`409 encompass_only`) instead of sending it without them.
+
+The scenario agent lists plain facts with no spec field in `analysis.unmapped`. The code searches the schema for candidates and a second small call picks one per fact, or none (`agent/propose-fields.ts`); the model can only choose from listed candidates. The result is shown as proposals to **Accept** or **Dismiss** — nothing is added automatically. A fact with no proposal is shown under **Map these yourself** with an inline schema search.
+
+Guards in code, not prompt:
+
+- `collectUnmapped` reads `unmapped` wherever the model put it, including nested in the spec.
+- `withKnownGaps` detects co-borrowers, gifts, support received as income, and credit scores in the prose, and lists any the model did not name as unsupported. Such facts are never offered for mapping.
+- `withoutProgramQuestions` turns a question choosing between loan programs into a stated assumption.
+- The schema index leaves out generated borrower facts (name, SSN, birth date, income figures, credit scores) and all co-borrower fields — setting these by raw path would contradict the builder.
+
+Accepted fields live on the scenario, so saving keeps them.
+
+## Documents
+
+The form's **Documents** section edits `spec.documents` through `scenario/documents.ts`. It starts from the **program's required set** (the day-1 list resolved against the lender YAML; the preview reports each document's `origin` because only the server reads the YAML): removing a required document excludes it, which LoanLight then flags missing; adding one the program does not require is an extra. **Exact set** switches to a plain list, starting from what the scenario produces so the switch changes nothing.
+
+Predicted findings for documents the loan data implies (rental history for a renter) carry a `catalogType` and a one-click **Add** in the preview.
+
+The agent maps document instructions the same way: "didn't provide" → `exclude`, "uploaded" (not required) → `extras`, "only X and Y" → an exact list, "N days old" → `perDocument.ageOffsetDays`, "unsigned" → `perDocument.signature`. A document Loan Lab cannot generate (green card, divorce decree, separation agreement, child support order, visa) is named as unsupported and will still be flagged missing.
+
+**Expiry.** LoanLight counts a document's window to the estimated closing date, not to the day of the audit. Every run states a closing date 21 days out, under the shortest window a clean set carries (paystubs, 30 days), so a clean scenario expires nothing. `pdf/document-dates.ts` holds the rule and the dates for both the generator and the predictor.
+
+**Appraisals and signatures.** An appraisal (`pdf/appraisal.ts`) can be added to any loan — no program requires one day 1. It is the scenario's own report: Form 1004 / 1073 / 1025 by property type, final opinion = the loan's property value, effective date = the document date. Clean by default; `documents.appraisal.defects` builds in poor condition, a distant comparable, a misstated proximity, or a missing E&O certificate. Documents on the YAML's `signature_required_documents` are signed in ink by default; `perDocument.signature: "unsigned"` leaves the signature off, and the preview predicts the missing signature as a finding.
+
+## The scenario agent
+
+`agent/generate.ts` makes the model show its work before the spec: split the prompt into loan-data and document facts, name the documents each implies, state every default it chose, and ask every question — but only ones whose answer changes the findings. Never the program, destination, or identity. The spec is built on the stated defaults, so it is runnable without answering; answering rebuilds it. The system prompt renders the fact catalog and each program's day-1 documents, so the model reasons from LoanLight's rules rather than guessing. The model does **not** author `expect` or predictions — those are computed from the spec after it answers.
+
+## Errors
+
+Every `/api/loan-lab/*` route is wrapped in `withLoanLabErrors` (`errors.ts`): an unexpected throw is logged as `[loan-lab] <route> failed (<code>)` and answered as JSON naming the cause — the upstream body for Encompass and the partner API, the Anthropic status and reason for the agent. A run that fails records the same message on its row. Nothing should reach the UI as a bare status code.
+
+**Encompass rejections** get more detail, because Encompass's 400 body often does not name the field:
+
+- `encompass/schema-check.ts` validates every payload against `config/encompass-loan-schema.json` (Encompass's loan-entity schema, captured by loanclone). The preview warns before **Run**; a rejection carries the fields the schema flags ("Schema check points at: …"). It is not a gate — the schema is a snapshot and Concept may accept a field it predates.
+- Failures are logged as one line with the run id, seed, program, Encompass's request/correlation ids, the body (up to 4,000 characters), and the violations.
+- `GET /api/loan-lab/runs/<id>/payload` rebuilds the payload a run sent from its spec, seed, and start time — with today's builder code, so a run made before a builder change may have sent something different (the response's `caveat` says so). Dates are day-granular, so with unchanged builders the rebuild is exact unless the run straddled a UTC midnight.
+- `encompass/schema-check.test.ts` fails `pnpm test` if any preset's payload stops passing the schema.
+
 ## Prerequisites
 
 Loan Lab is always available to signed-in users, but it degrades gracefully when credentials are absent. Two things must be provisioned for Loan Lab to function:
@@ -147,3 +200,5 @@ The following loanclone features were not ported:
 - **Document type names disagree** between the YAML and the generator registry. `config/doc-type-aliases.ts` maps them and `findUnmappedDocTypes()` guards the gap. In loanclone this mismatch silently omitted the 1003, the paystub, and the W-2 from every YAML-driven document set — including the scenario called "Perfect Loan".
 - **Listings are vendored**, not scraped. Six scenarios need real, publicly-resolvable addresses; loanclone fetched Zillow live. Refresh `config/listings.fixture.json` by re-capturing.
 - **Runs are database-backed**, not in memory. Octy runs 2–4 ECS tasks, so a poll can land on a task that never heard of the run. A reconciler moves abandoned `running` rows to `interrupted` rather than leaving them stuck after a deploy.
+- **Encompass runs read the loan back** after create and field writes (`encompass/read-back.ts`) — the key fields a scenario varies (loan amount, property value, purpose, occupancy, borrower profile, expense rows) plus every Encompass-only field — and name any it dropped or changed. Discarded fields ride on the run's `error` until `loan_scenario_runs` gains a dedicated column.
+- **`scenario/regression.test.ts`** fingerprints every preset's MISMO, Encompass payload, and PDFs. A new capability must leave them unchanged; update the snapshot only when changing a preset's output is the point.

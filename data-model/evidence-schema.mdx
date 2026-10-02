@@ -7,7 +7,7 @@ icon: shield-check
 The evidence capture subsystem retains the URLA MISMO XML submitted with each loan and extracts structured "facts" from it — borrower declarations, asset references, and similar assertions. The tables listed here are the durable store for that evidence. The system is **in initial rollout**: as of late September 2026 it is active on `local` and `int` only, behind a per-lender allowlist and a feature flag.
 
 <Note>
-These tables are in the `loanlight-api` AUS database (the shared Aurora cluster), not the integrations database. They are introduced by migrations `0116`–`0121` (LOA-2927).
+These tables are in the `loanlight-api` AUS database (the shared Aurora cluster), not the integrations database. They are introduced by migrations `0116`–`0121` (LOA-2927). Migration `0122` (LOA-2928 / EDU-03) widens `evidence_entities` to support employer, employment, property, and gift subjects and adds `assertion_ordinal` to `evidence_facts`.
 </Note>
 
 ## Eligibility and rollout
@@ -66,12 +66,12 @@ A named participant (borrower or account) extracted from a source. One row per `
 | `id` | `uuid` PK | |
 | `lender_id`, `loan_id`, `source_id` | scope | FK chain → `evidence_sources` |
 | `source_alias` | `text` NOT NULL | The label as it appears in the source (e.g. a party role or asset reference) |
-| `alias_kind` | `text` NOT NULL | CHECK: `party` \| `role` \| `asset` |
-| `entity_kind` | `text` NOT NULL | CHECK: `borrower` \| `account` |
+| `alias_kind` | `text` NOT NULL | CHECK: `party` \| `role` \| `asset` \| `employer` |
+| `entity_kind` | `text` NOT NULL | CHECK: `borrower` \| `account` \| `employment` \| `property` \| `gift` |
 | `binding_authority` | `text` NOT NULL | CHECK: `source_observed` \| `reused_authoritative_binding`. Default `source_observed` |
 | `bound_at` | `timestamptz` NOT NULL | |
 
-Coherence CHECK: `asset` alias kind always pairs with `account` entity kind; `party` or `role` always pair with `borrower`.
+Coherence CHECK (migration `0122`): `asset` alias kind pairs with `account`, `property`, or `gift`; `employer` pairs with `employment`; `party` or `role` pair with `borrower`. The widening is a strict superset of the prior constraint, so existing rows re-validate.
 
 ### evidence_registry_definition_snapshots
 
@@ -134,11 +134,12 @@ One row per extracted fact — a single attribute assertion about a single entit
 | `currency_state` | `text` NOT NULL | CHECK: `unknown` \| `known`. Only `unknown` is in scope today |
 | `currency_code` | `text` | NULL when `currency_state = 'unknown'` |
 | `source_locator` | `jsonb` NOT NULL | Namespace/name/position or opaque reference — never PII-bearing source labels |
+| `assertion_ordinal` | `integer` | Position of this fact in its emission batch (migration `0122`). Nullable — rows written before the migration retain `NULL` and read back in `id` order. Non-negative (CHECK `>= 0`) when present. |
 | `correction_of_id` | `uuid` | When non-null, this row supersedes the referenced fact (same entity, definition, source, scope) |
 | `correction_rationale` | `text` | Required when `correction_of_id` is set |
 | `recorded_at` | `timestamptz` NOT NULL | |
 
-A partial unique index on `correction_of_id WHERE correction_of_id IS NOT NULL` prevents a fact from being corrected more than once.
+A partial unique index on `correction_of_id WHERE correction_of_id IS NOT NULL` prevents a fact from being corrected more than once. A unique index `evidence_facts_batch_ordinal_unique (batch_id, assertion_ordinal)` preserves emission order for batch reconstruction (migration `0122`).
 
 ### evidence_read_snapshot_members
 
@@ -162,7 +163,7 @@ Per-audit, per-slot status row that tracks where capture stands for an audit run
 | `source_slot` | `text` NOT NULL | Part of composite PK |
 | `lender_id`, `loan_id` | `uuid` NOT NULL | Scope |
 | `status` | `text` NOT NULL | CHECK: `pending` \| `incomplete` \| `unsupported_source` \| `failed` \| `committed` |
-| `failure_reason` | `text` | Non-null only when `status = 'failed'`. Controlled vocabulary: `source_unavailable`, `source_size_exceeded`, `pinned_source_conflict`, `capture_persist_failed`, `capture_eligibility_failed`, `source_unreadable`, `append_rejected`, `publication_unexpected_error` |
+| `failure_reason` | `text` | Non-null only when `status = 'failed'`. Controlled vocabulary: `source_unavailable`, `source_size_exceeded`, `pinned_source_conflict`, `capture_persist_failed`, `capture_eligibility_failed`, `source_unreadable`, `append_rejected`, `entity_kind_conflict`, `publication_unexpected_error` |
 | `last_transitioned_at` | `timestamptz` NOT NULL | |
 
 ON DELETE CASCADE from `audit_runs` — capture status rows are removed if the audit run is removed.
