@@ -23,8 +23,12 @@ The integrations consumer subscribes to that event type and handles eFolder cred
 Keep every lender absent/off until the cross-service preflight below is complete. Set it to `true` to resume; the flag write releases only eligible rows that are unleased, already due, or carry a retry error.
 
 <Warning>
-**The only supported activation path is the authenticated internal-super-admin portal/API feature-flag route:** `PUT /api/v1/portal/lenders/:id/feature-flags`. Direct SQL (`enabled = true`) is not sufficient. The sweep checks the flag with `cdaEfolderDeliveryEnabledSql`, which validates that the flag row was written by an active internal super-admin actor on behalf of an active, non-internal lender. A row written outside this path does not satisfy those conditions and is treated as absent.
+**The only supported activation path is the authenticated internal-super-admin portal/API feature-flag route:** `PUT /api/v1/portal/lenders/:id/feature-flags`. Direct SQL (`enabled = true`) is not sufficient. The sweep checks the flag with `cdaEfolderDeliveryEnabledSql`, which validates that the flag row was written by a `super_admin` on an internal lender (or with no lender, which covers WorkOS offboarding) on behalf of an active, non-internal lender. A row written outside this path does not satisfy those conditions and is treated as absent.
 </Warning>
+
+<Note>
+**eFolder delivery persists after admin offboarding (LOA-3075).** The predicate deliberately does not check the enabling admin's active status. Deleting, deactivating, or offboarding the `super_admin` who turned on delivery (which WorkOS handles by setting their `lender_id` to null) no longer switches delivery off mid-flight. Only an explicit `enabled = false` write disables delivery.
+</Note>
 
 ## AVM report acquisition columns on `collateral_review_orders`
 

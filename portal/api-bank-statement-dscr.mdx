@@ -10,6 +10,51 @@ These modules cover bank-statement analysis (fraud and income), the QI calculati
 The portal API runs on the NestJS Fastify adapter, so multipart uploads are parsed with `req.parts()`, not Express multer. Using `FileInterceptor` / multer on a multipart endpoint (such as the DSCR lease and MISMO imports) throws before the handler runs.
 </Warning>
 
+## bank-statement-upload
+
+Controller: `bank-statement/bank-statement-upload.controller.ts` at `api/v1/portal/bank-statements/uploads`. Roles: `client_admin`, `client_user`. Class throttle 600/min (headroom for 32 chunks per 250 MiB file); `POST /uploads` and `POST /:id/submit` have a tighter 10/min limit.
+
+The portal no longer sends all bank-statement PDFs in one form-data request. Instead it creates a durable **upload session**, streams each file in 8 MiB S3 multipart chunks, then submits the batch when all files are complete. Sessions are durable: the browser can retry a failed chunk without restarting the whole upload.
+
+| Method / path | Purpose |
+|---|---|
+| `POST /api/v1/portal/bank-statements/uploads` | Create a session. Returns `id`, per-file slots, and `expiresAt` |
+| `GET /api/v1/portal/bank-statements/uploads/:id` | Session state — files, status, and any accepted analysis |
+| `POST /api/v1/portal/bank-statements/uploads/:id/files/:fileId/parts/:partNumber` | Register one 8 MiB chunk. Returns the S3 `uploadId` and `key` for direct upload |
+| `POST /api/v1/portal/bank-statements/uploads/:id/files/:fileId/complete` | Mark a file finished after all its parts land in S3 |
+| `POST /api/v1/portal/bank-statements/uploads/:id/submit` | Submit the completed batch for analysis |
+| `DELETE /api/v1/portal/bank-statements/uploads/:id` | Cancel an open session |
+
+#### Session state machine
+
+`bank_statement_uploads.state` follows this lifecycle:
+
+| State | Meaning |
+|---|---|
+| `uploading` | Files are being chunked and uploaded to S3 |
+| `submitting` | All files complete; analysis is being enqueued |
+| `submitted` | Analysis accepted; the session is frozen |
+| `deleting` | Cancel requested; S3 objects are being cleaned up |
+| `deleted` | Fully removed |
+
+Constraints:
+- A user may have at most **5 open sessions** (`uploading` or `submitting`) at once. Creating a sixth returns `429` with the message "You have five open uploads. Cancel an existing upload before starting another."
+- Sessions expire **24 hours** after creation. The cleanup cron runs every minute and advances or removes expired sessions.
+- Each file is up to **250 MiB**; files are chunked at **8 MiB**. The 12-month limit is 15 files and the 24-month limit is 27 files (matching the existing enqueue limits).
+- Retry resends only the failed chunks — completed files and form settings are retained.
+
+#### BFF routes
+
+The portal proxies the session endpoints from `src/app/api/bank-statements/uploads/`:
+
+| BFF route | Backend |
+|---|---|
+| `POST/GET /api/bank-statements/uploads/[uploadId]` | Create / get a session |
+| `POST /api/bank-statements/uploads/[uploadId]/files/[fileId]/parts/[partNumber]` | Register a chunk |
+| `POST /api/bank-statements/uploads/[uploadId]/files/[fileId]/complete` | Mark file complete |
+| `POST /api/bank-statements/uploads/[uploadId]/submit` | Submit |
+| `DELETE /api/bank-statements/uploads/[uploadId]` | Cancel |
+
 ## bank-statement
 
 Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank-statements`. Class throttle 60/min.

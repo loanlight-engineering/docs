@@ -117,7 +117,7 @@ The BFF forwards to `GET /api/v1/portal/collateral-review/appraisals/:runId`. Th
 
 Decision outcomes: `avm_only`, `avm_then_cda`, `below_threshold`, `no_score`, `score_rejected`, `skipped_no_loan`, `skipped_before_effective_date`, `shadow_would_order_avm`. Order statuses: `pending`, `awaiting_callback`, `succeeded`, `failed`, `no_hit`, `declined`, `abandoned`.
 
-**CDA order fields (LOA-2581).** The `CollateralReviewPortalCda` shape now includes:
+**CDA order fields (LOA-2581).** The `CollateralReviewPortalCda` shape includes:
 
 | Field | Visibility | Meaning |
 |---|---|---|
@@ -127,6 +127,10 @@ Decision outcomes: `avm_only`, `avm_then_cda`, `below_threshold`, `no_score`, `s
 | `reviewRecommended` | `super_admin` only | Whether Clear Capital recommended a review. |
 | `mocked` | all roles | `true` when the CDA was completed through `clear_capital_mock_cda_enabled` (a placeholder report with the value copied from the AVM). Do not present a mocked CDA as an appraiser's result. |
 | `turnTimeHours` | all roles | The tier the order was placed at (from `collateral_review_orders.cda_turn_time_hours`), not the lender's current config. |
+
+<Note>
+**CDA reports are only accessible in the Encompass eFolder (LOA-3078).** The `documentAvailable` field and the CDA document / document-URL BFF routes (`/api/appraisal/[runId]/collateral-review/orders/[orderId]/document` and `/document-url`) were removed due to CORS failures that prevented the in-portal PDF viewer from loading CDA documents from the integration files bucket. Completed CDAs are delivered to Encompass via [CDA eFolder delivery](/integrations/cda-efolder-delivery) and are not accessible inside the portal UI.
+</Note>
 
 **AVM checks (LOA-2581).** The AVM payload now carries `checks: CollateralReviewPortalChecks`, two server-side pass/fail grades against the decision that actually evaluated the shown AVM:
 

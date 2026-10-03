@@ -21,25 +21,36 @@ The portal accepts large document uploads for appraisal, credit, income, and ban
     The `PORTAL_TEST_PLAN` notes an earlier mismatch where the env was referenced as `PORTAL_S3_BUCKET`; the current variable is `S3_UPLOAD_BUCKET`.
     </Note>
   </Tab>
-  <Tab title="Form-data POST proxies (income, bank statements)">
-    Income and bank-statement uploads use form-data POST proxies through the BFF rather than direct S3 server actions. The bank-statement cap is 250 MB (the largest upload type). See [the bank statement / DSCR API surface](/portal/api-bank-statement-dscr).
+  <Tab title="Form-data POST proxy (income)">
+    Income uploads use a form-data POST proxy through the BFF rather than a direct S3 server action.
 
     <Note>
-    The bank-statement **Loan ID** is free-text (≤255 chars), not a UUID (#2426, LOA-1577). On enqueue, `resolveLoanLink` links a real `loan_id` only when the value is a UUID matching a loan in the tenant; otherwise the raw value is stored verbatim in `borrower_files.loan_reference` with `loan_id` left null (migration `0195`). The separate **income** upload still requires a UUID `loanId` (`@IsUUID()` on `CreateIncomeRunDto`). `formatUploadError` surfaces per-field validation errors in the upload UI.
+    The income upload requires a UUID `loanId` (`@IsUUID()` on `CreateIncomeRunDto`). `formatUploadError` surfaces per-field validation errors in the upload UI.
     </Note>
 
-    **Upload timeout (LOA-2195).** Form-data proxies that carry files use `UPLOAD_TIMEOUT_MS = 1_200_000` (20 minutes) defined in `src/lib/constants/upload.ts`. The previous value was 30 seconds, which aborted a ∼25 MB two-file upload that completed in 30.66 s after the server had already returned 200. The 20-minute ceiling covers a ∼25 MB upload at ≈0.2 Mbps effective uplink with headroom for protocol overhead. Plain JSON reads and writes must keep their own short timeouts — only `fetch` calls whose body is a `FormData` carrying files should use this constant.
+    **Upload timeout.** Form-data proxies that carry files use `UPLOAD_TIMEOUT_MS = 1_200_000` (20 minutes) defined in `src/lib/constants/upload.ts`. Plain JSON reads and writes must keep their own short timeouts — only `fetch` calls whose body is a `FormData` carrying files should use this constant.
+  </Tab>
+  <Tab title="Chunked multipart sessions (bank statements)">
+    Bank-statement uploads use a durable **upload session** (LOA-3055). The portal creates a session, streams each PDF to S3 in 8 MiB chunks, and submits the batch when all files are complete.
+
+    Each PDF may be up to **250 MiB**. Because files travel as independent chunks rather than one combined request, there is no aggregate request-size cap for bank statements — the 260 MB body-size limit in `next.config.ts` no longer constrains a bank-statement batch.
+
+    Retry resends only failed chunks while retaining completed files and form settings. Sessions are durable for up to 24 hours; a cleanup cron removes expired or cancelled sessions from S3. See [bank-statement-upload](/portal/api-bank-statement-dscr#bank-statement-upload) for the full API surface.
+
+    <Note>
+    The bank-statement **Loan ID** is free-text (≤255 chars), not a UUID (#2426, LOA-1577). On enqueue, `resolveLoanLink` links a real `loan_id` only when the value is a UUID matching a loan in the tenant; otherwise the raw value is stored verbatim in `borrower_files.loan_reference` with `loan_id` left null (migration `0195`).
+    </Note>
   </Tab>
 </Tabs>
 
 ## Body-size limits
 
-`next.config.ts` raises the upload ceiling well above the largest cap:
+`next.config.ts` raises the upload ceiling well above the largest per-request cap:
 
 - `experimental.serverActions.bodySizeLimit: "260mb"`
 - `experimental.middlewareClientMaxBodySize: "260mb"`
 
-That is headroom over the 250 MB bank-statement cap; the appraisal cap is 200 MB.
+The 200 MB appraisal cap fits comfortably within this limit. Bank-statement uploads now use chunked multipart sessions with individual 8 MiB chunks, so the 260 MB ceiling no longer constrains how much total data a bank-statement batch can carry.
 
 ## Backend multipart parsing
 
