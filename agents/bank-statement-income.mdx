@@ -184,17 +184,50 @@ Two portal defaults changed in the same fix (LOA-2280):
 
 ## Payer column (LOA-2992)
 
-The bank-statement income API and the portal transactions table now expose a **Payer** column that shows who originated each credit deposit.
+The bank-statement income API and the portal transactions table expose a **Payer** column. On credits it shows who originated each deposit; on debits it shows who received the payment.
 
-`credit_category_payer` on `transactions` stores the raw ACH company field as printed by the bank. `BankStatementResponseMappers` derives a `PayerColumn` shape from this stored value combined with the served category and qualifier:
+`credit_category_payer` on `transactions` stores the raw ACH company field as printed by the bank. `BankStatementResponseMappers` derives a `PayerColumn` shape from this stored value combined with the served category, qualifier, row type, and file party names:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `payer` | `string \| null` | The human-readable payer name shown in the Payer column. Derived from `printedPayer`, the P2P or wire originator, the structural qualifier, or the Plaid-served label, in that priority order. Withheld when the category label-safety gate suppresses the name. |
+| `payer` | `string \| null` | The human-readable payer name shown in the Payer column. On credits: derived from `printedPayer`, the P2P or wire originator, the structural qualifier, or the Plaid-served label, in that priority order. On debits: `debitPayer()` reads the counterparty from the bank's description before falling back to Plaid's merchant name. Withheld when the category label-safety gate suppresses the name. |
 | `payerSource` | `"printed" \| "p2p" \| "wire" \| "identified" \| "named" \| "plaid" \| null` | How the payer was derived. |
 | `p2pPlatform` | `string \| null` | The P2P platform label (e.g. `"Zelle"`) for display in the **category cell**, not the payer cell. Never duplicates the payer. |
 
 Categories that carry a payer-naming qualifier (`Merchant Settlement`, `Marketplace Settlement`, `Rental Income`, `W2`) surface the qualifier as the payer when no printed payer is available. `Loan` credits with a payer (lender disbursements) also carry the printed field when present. `Account Transfer` and `Customer Payment` categories are withheld from payer derivation — the label-safety gate controls those names independently.
+
+### Debit payer reading (LOA-3006)
+
+`lib/bank-statement/debit-payer.ts::debitPayer(description, partyNames)` reads the counterparty for a debit row from the bank's own printed description. `payerColumn` calls it after `printedPayer` for any row where `type === "debit"`, and returns the result as `payer_source: "printed"`. The payer is derived at serve time, not persisted — existing debit rows show it without reprocessing and no migration was needed. `toTransactionResponse` receives the file's borrower and co-borrower names via `filePartyNames(file)` on all three read paths (`getDetail`, `listTransactions`, `exportData`).
+
+The reader recognises these debit description shapes across the four-bank fixture corpus:
+
+- **Chase ACH** — `Orig CO Name:<company> …` (via `signature.ts::printedAchSender`, so debits and credits parse the same field the same way) and the standard `… PPD ID:` / `Web ID:` form.
+- **Chase online bill payment** — `Online Payment <n> To <payee>`.
+- **Wells Fargo business-to-business ACH** — payee after the dash, skipping the `Business to Business ACH Debit` phrase.
+- **Zelle** (Chase and Wells Fargo) — `Zelle Payment To <payee>`.
+- **Card and PayPal purchases** — `Recurring? Card Purchase <date> <merchant>` and `Paypal Purchase <merchant> Web ID:`.
+- **Transfers to a named person** — `Transfer … to <payee>`, including a payee that follows a masked account (`To ...4532 Acme Holdings LLC`). Transfers to the borrower's own account (recognised by `Checking`, `Savings`, `Loan`, `Share`, `Card`, etc.) yield no payer.
+- **Y-12 shapes** — `Merch. Post: <date> <merchant>`, `POS #<n> POS <merchant>`, `TYPE: … CO: <company>`, and `Bill Payment #<n> BP <merchant>`.
+
+Rows that yield no payer (Plaid's merchant name fills in, or the cell is blank):
+
+- A transfer to the borrower's own account, identified by account-type wording (`Checking`, `Chk`, `Savings`, `Sav`, `Mma`, `Money Market`) optionally preceded by a product word (`Premier`, `Business`, etc.) when a number or mask follows or nothing does, and `Loan`, `Share`, or `Card` only when a number or mask follows — so `Loan Depot`, `Acme Card Services`, and `Savings Bank LLC` keep their names.
+- A transfer to an account whose leading words name the borrower or co-borrower (any product word between the name and account type is ignored — e.g. `Carpenter J Navigate Business Checking xxxx7684`).
+- Outbound wires (`Online International Wire Transfer A/C: …`).
+- A bare reference or mask: digits alone, a lettered mask (`Xxxx1234`), or one token with digits between letters or in two runs (`Jpm99Abcdefg`, `AB12CD34`). A name with no letters (`7/11`) or a one-word merchant with digits (`12MONKEYS`) is still served.
+- ATM/ITM sessions, NSF returns, and interest withholding.
+- A payee whose name matches the borrower or co-borrower (`isPartyName`): same words in any order (Wells Fargo prints Zelle recipients surname-first), or Wells Fargo's two-word `<Surname> <Initial>` form when the surname and initial match. Numbers in the two names must also match so a similarly-named business is never suppressed.
+
+Plaid's `merchantName` is also suppressed on a debit when it names the borrower or co-borrower, for the same reason.
+
+### Portal transaction table (LOA-3070)
+
+Three changes to the portal's transaction table (`transaction-table.tsx`):
+
+- **Column order.** The Payer column now sits immediately after Category and before Amount. Sort order uses the displayed payer name (see below).
+- **`(identified)` suffix hidden.** `shownPayerOf(tx)` strips every trailing ` (identified)` occurrence when `payer_source === "identified"`, so the reviewer never sees the suffix. The API continues to serve it; a printed or Plaid name that happens to end in `" (identified)"` is shown unchanged. Sort and filter keys use the stripped name.
+- **Payer multi-select filter.** A multi-select dropdown next to the Category filter, built like the Statement Period filter. Options are the distinct displayed payer names across the current transaction set, sorted A–Z, with **"Not available"** appended for rows that carry no payer. Selected options display as removable chips labelled `Payer: <name>` (or `Payer: Not available`). **Clear all** clears the Payer filter alongside the other active filters.
 
 ### Payer column and lender disbursements (LOA-3015)
 
