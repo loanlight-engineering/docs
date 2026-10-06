@@ -128,6 +128,16 @@ exist.
     Columns: `split_category_id` FK → `split_categories.id`, `llama_classify_type` (the subtype label,
     e.g. `chase_bank_statement`), `llama_classify_description`, `is_active`. The rule's category is the
     subtype's "correct bucket" used by `resolveBucket`. Unique `uq_classify_rules_category_type`.
+
+    `llama_classify_description` is prompt text sent to LlamaCloud, which rejects values longer than
+    **2000 characters**. Migration `0348` (LOA-2595) adds a DB CHECK constraint
+    `classify_rules_classify_description_max_len` (`length(llama_classify_description) <= 2000`,
+    counting characters not bytes) on both `classify_rules` and `split_categories`
+    (`split_categories_split_description_max_len` on `llama_split_description`). Both constraints
+    are added `NOT VALID` then validated, so a pre-existing over-length row leaves the guard `NOT
+    VALID` (still blocking new writes) without failing the deploy. Octy's classify-split config
+    editor enforces the same 2000-character limit client-side
+    (`CLASSIFY_SPLIT_CONFIG_LIMITS.ruleDescription`).
   </Accordion>
   <Accordion title="split_confusion_edges — low-confidence neighbors">
     Directed neighbor edges for low-confidence expansion. Columns: `source_category_id`,

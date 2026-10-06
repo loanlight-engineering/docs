@@ -66,6 +66,15 @@ SECTION_8_DEMOGRAPHICS
 </Accordion>
 <Accordion title="Section 3 — real estate owned (REO)">
 `REO_REFINANCE_SUBJECT_PROPERTY`, `REO_PURCHASE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH` (deprecated), `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`
+
+Since LOA-2716 the five rules that previously named properties by array ordinal only
+(`REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`,
+`REO_CURRENT_ADDRESS_MATCH`, and their sub-findings) now use `formatReoPropertyLabel`, which
+produces labels like `Real Estate Property 2 (2808 John Roe Smith, Medford, NY)`. The ordinal is
+retained because it matches `fieldPath` (`ownedProperties[N]`) and distinguishes duplicate
+addresses. Each REO finding also carries `metadata` with `propertyIndex`, `propertyOrdinal`,
+`propertyAddress`, and `propertyAddressSummary` (plus `mortgageIndex` on mortgage sub-findings),
+so downstream consumers can match on address rather than parsing the title string.
 </Accordion>
 <Accordion title="Sections 4, 5, 7, 8 and cross-section">
 `SECTION_4_LOAN_AND_PROPERTY_DETAILS`, `SECTION_4_PROPERTY_VALUE_REQUIRED`, `SECTION_4D_GIFT_FUNDS_PRESENT`, `SECTION_5_DECLARATIONS`, `SECTION_6_ACKNOWLEDGEMENTS`, `SECTION_7_MILITARY_SERVICE`, `SECTION_8_DEMOGRAPHICS`, `SECTION_8_FACE_TO_FACE_VISUAL_OBSERVATION`, `DTI_EXCEEDS_50_PERCENT` (cross-section)
@@ -76,7 +85,7 @@ SECTION_8_DEMOGRAPHICS
 
 ## Rule authoring
 
-Rules are built from helpers in `utils/rule-helpers.ts`: `isDefined` (treats `""`, whitespace, and the literal `"null"` as undefined), `hasAtLeastOne`, `allDefined`, `getTotalInMonths`, `isMortgageEffectivelyEmpty`, `isAtCurrentAddressLessThan2Years`, `isForeignAddress` (foreign = street+city present, state+postalCode both absent), `areAddressesDifferent`, `isValidPastDate`, `getMonthsSinceDate`, plus the finding factories `createPassFinding` / `createFailFinding` / `createInfoFinding`.
+Rules are built from helpers in `utils/rule-helpers.ts`: `isDefined` (treats `""`, whitespace, and the literal `"null"` as undefined), `hasAtLeastOne`, `allDefined`, `getTotalInMonths`, `isMortgageEffectivelyEmpty`, `isAtCurrentAddressLessThan2Years`, `isForeignAddress` (foreign = street+city present, state+postalCode both absent), `areAddressesDifferent`, `isValidPastDate`, `getMonthsSinceDate`, `formatAddressSummary(address)` (builds a one-line address label, skipping blank parts), `formatReoPropertyLabel(index, address)` (returns `"Real Estate Property N (<address>)"`, falling back to the bare ordinal when no usable address exists), plus the finding factories `createPassFinding` / `createFailFinding` / `createInfoFinding`.
 
 <Note>
 **Employment fields are arrays (LOA-2736).** `previousEmployment` and `additionalEmployment` on `section1BorrowerInfo` are `z.array(EmploymentSchema)` — a borrower may have multiple previous or additional employers. Before LOA-2736 the schema bound a single `EmploymentSchema` object, silently discarding every employer past the first (confirmed by LangSmith trace `f49a2d95`: all three `<EMPLOYER>` elements appeared in the structured-output input; only one survived in the output). All employment-history rules now receive the full set.
@@ -150,7 +159,7 @@ The `urla_completeness` API response includes both `rules_engine_result` (BORROW
 When the 1003 completeness rules produce FAIL outcomes, `loanlight-integrations` sends an EPC finding `LL-1003-01` back to Encompass. One finding is sent per audit run regardless of the number of FAIL rows. The title counts the total items (`[LoanLight] 5 items needed to complete the loan application`) and the description lists them grouped by borrower:
 
 - Each line reads: `• Section 1a (Borrower 2): <the rules engine's message>`.
-- Section 3 findings name the property by position (`Section 3 (Borrower 1, Property 2)`) rather than address; `property not identified` when no index is available.
+- Section 3 findings name the property by position (`Section 3 (Borrower 1, Property 2)`) — the EPC finding format is fixed and does not yet use the address label added by LOA-2716. `property not identified` when no index is available.
 - `INFO` and `PASS` outcomes are never included; only `FAIL` rows fire.
 - Descriptions are capped at 25 lines with `…and N more` when the list is longer.
 

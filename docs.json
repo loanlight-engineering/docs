@@ -27,6 +27,7 @@
               "index",
               "overview/system-architecture",
               "overview/repositories",
+              "overview/bounded-context-map",
               "overview/environments",
               "overview/using-these-docs",
               "overview/glossary"

@@ -42,6 +42,28 @@ checks, and route documents back into Encompass.
     versus failing fast at batch 1 before this fix. Only the degraded all-timeout case is affected;
     HTTP and `FAILED` errors throw instantly, so typical failure paths are unchanged. A tighter
     per-attempt timeout or a circuit-breaker is deferred reliability work (see ticket).
+
+    **UNKNOWN segment recovery (LOA-2840).** An `UNKNOWN`-bucket segment has no classify rules and
+    no confusion edges, so `classifyWithRules` previously short-circuited with `subtype: 'unknown'`
+    and persisted `classification_status = 'classified'` — disarming the salvage net that requires
+    `classification_failed`. The fix operates in `classifySegment`:
+
+    1. An `UNKNOWN` segment with zero expanded rules falls back to `buildAllRules(snapshot)` — the
+       full active rule set (~169 types live) — so it receives a real classification attempt.
+    2. Under `documentLevel = true` (majority_bucket / two_pass), a segment whose original bucket is
+       `UNKNOWN` may now adopt the matched rule's category (e.g. `IDENTITY` for
+       `social_security_card`). A confident non-UNKNOWN bucket is still only suggested, not
+       overridden (FR-1 still holds).
+    3. The zero-rules short-circuit, the `!bestResult` path, and the single-segment
+       `buildSingleSegmentResult(null)` path now return `failed: true` with
+       `errorMessage: 'no_rules'` / `'no_classification'`. Persistence records
+       `classification_failed`, so `isSalvageSegment` can rescue genuinely untyped pages.
+    4. These three paths also set `ClassificationResult.unclassifiable: true`. An unclassifiable
+       segment still writes `classification_failed` but does **not** count toward the document's
+       failure total, so the run status stays `complete` (not `partial`). A broken classify call
+       that throws still makes the run `partial` as before.
+    5. In `db-classifications.map.ts`, unclassifiable rows move from `skippedNoDocType` to
+       `droppedNotClassified` in the counter, because they are no longer `classified`.
   </Step>
 </Steps>
 

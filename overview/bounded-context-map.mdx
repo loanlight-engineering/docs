@@ -1,0 +1,117 @@
+---
+title: API bounded-context map
+description: How loanlight-api organises its code into 13 bounded contexts with layered import rules.
+icon: map
+---
+
+The API bounded-context map (`packages/api/architecture/contexts.json`) assigns every production file under `src/` to one of 13 named contexts and gives each context an integer layer. A context may import only from strictly lower layers. The system was introduced in Phase 0 of the API bounded-contexts initiative (LOA-2387).
+
+## Why it exists
+
+`loanlight-api/packages/api` grew without explicit module boundaries, producing a graph with 42 mutually-importing context pairs and 267 violating cross-layer imports at the time the map was declared. The bounded-context map and its accompanying ratchet freeze the violation count at that baseline: no new violation may enter, but existing ones may shrink. Each subsequent phase targets a subset of the violations until the graph is acyclic.
+
+## The 13 contexts
+
+Each context has a `name`, a `layer` integer, an `owner`, a `responsibility`, a set of `members` (path prefixes / globs / exact paths under `src/`), declared `entryModules`, and a `channels` block declaring queues, SQS topics, EventBridge events, and calls to other LoanLight services the context uses.
+
+| Context | Layer | Responsibility |
+|---|---|---|
+| `platform` | 1 | NestJS composition root; cross-cutting concerns: LlamaCloud, S3, LangSmith, SQS/EventBridge, PDF generation, LLM services |
+| `identity` | 2 | WorkOS auth, partner API keys, FusionAuth, JWT validation |
+| `runtime` | 3 | Oz/Octy dry-run and internal proxy endpoints |
+| `ruleops` | 4 | Lender rule authoring: appraisal rules, credit rules, portal rules catalog |
+| `loan` | 5 | Loan and lender management, classify-split runs, loan-document registry |
+| `documents` | 6 | Document-health agent and retrieval scoping |
+| `income` | 7 | Bank-statement income, asset reporting, income analysis agents, portal-income queue |
+| `credit` | 8 | Credit evaluation agent, credit data retrieval |
+| `appraisal` | 9 | Appraisal evaluation, IRIS photos, CDA/AVM collateral review |
+| `eligibility` | 10 | Property data, property red-flags, URLA completeness rules |
+| `audit` | 11 | Audit-run orchestration, agent router, entitlements, results persistence |
+| `ingress` | 12 | EPC/SQS ingest, Partner API, LOS controller, integrations orchestration |
+| `ops` | 13 | Portal admin, billing, config management, LLM experiments |
+
+A context at layer N may import any context at layer < N. Two contexts on the same layer may not import each other. The composition root (`app.module.ts`, `main.ts`, `reconcile.module.ts`, `reconcile-entrypoint.ts`) sits above layer 13 and may import anything.
+
+<Note>
+A deprecated entry exists for the `encompass-developer-connect` paths (`src/los/providers/dev-connect/`, `src/audit/providers/dev-connect/`). No new code may import or reference those paths by string literal. Existing uses are baselined and may only shrink.
+</Note>
+
+## The ratchet
+
+The check runs in CI as the **Context boundaries** step and is available locally:
+
+| Command | Does |
+|---|---|
+| `pnpm check:architecture` | Boundary check, channel check, and exports check — no ESLint |
+| `pnpm check:context-boundaries` | Boundary check alone (`--check` mode); what CI runs |
+| `pnpm check:context-boundaries:baseline [--accept-moved <file>]` | Rewrite the baseline; refuses to record new violations |
+| `pnpm check:context-boundaries:report` | Totals, mutual pairs, components, deprecated uses — no check |
+| `pnpm context:explain <file>` | A file's context and which contexts it may import |
+| `pnpm context:exports:update` | Regenerate `architecture/context-exports.json` |
+
+`scripts/check-context-boundaries.baseline.json` records every pre-existing violation. The writer refuses to add a new key (a new violation), refuses to record a new cycle, and refuses when fewer than half the baseline's source files are still present — safeguards against the baseline being gamed by removal.
+
+When you remove a baselined violation (fixed a cross-layer import), the check prints `Fixed — these baselined imports … no longer exist`. Run `pnpm check:context-boundaries:baseline` and commit the smaller baseline alongside the fix.
+
+**Baseline merge conflicts** — take `main`'s side, then run `pnpm check:context-boundaries:baseline`, adding `--accept-moved <original file>` for each file your branch split, moved, or deleted.
+
+## Channel declarations
+
+Each context's `channels` block declares the queues (`queuesProduced` / `queuesConsumed`), SQS topics (`sqsPublished` / `sqsConsumed`), EventBridge events (`eventBridgePublished`), and internal service calls (`serviceCalls`) the context's code uses. A channel use the scanner finds that no context declares, or a declared channel no code uses, fails `pnpm check:architecture`.
+
+`internalServices` (top level in `contexts.json`) lists LoanLight services the API calls over HTTP: currently `integrations` (reached over the internal NLB via `x-internal-api-key`). A production file that calls `fetch` and contains the config key string anywhere in the file must be declared in exactly one context's `channels.serviceCalls`.
+
+## Adding a file or context
+
+- A new file under `src/` must match exactly one context's `members`. Add it to the appropriate context's `members` in `contexts.json`, or raise with the architecture owner if no context fits.
+- A new top-level directory joins an existing context in the same PR.
+- A new context needs `name`, `layer`, `owner`, `responsibility`, `members`, `entryModules`, `ownedTables`, and a `channels` block. Edit `contexts.json` in a reviewed PR.
+- Run `pnpm context:exports:update` when `entryModules` change.
+
+## Fixing a violation
+
+A violation is a new import from a higher-layer context into a lower-layer one, or a new cycle.
+
+1. Run `pnpm context:explain <file>` to see what the file may import.
+2. Invert the dependency through a port owned by the importing context, or move the code to the lower context.
+3. Run `pnpm check:context-boundaries`. It reports the baselined imports you removed.
+4. Run `pnpm check:context-boundaries:baseline` and commit the smaller baseline with the fix.
+
+Do not add a new violation to the baseline to resolve a CI failure — that is the one action the writer refuses unconditionally.
+
+## Roadmap
+
+Phase 0 (LOA-2387) declared the map and the ratchet with 267 violating imports across 47 context pairs and 42 mutual-importing pairs. Each subsequent phase reduces that count. The roadmap:
+
+| Phase | Goal | Ticket |
+|---|---|---|
+| 0 | Map, ratchet, channels, agent rules | LOA-2387 |
+| 1 | Remove context pairs with < 5 violating imports | LOA-3058 |
+| 2 | Stop `platform` importing feature modules | LOA-3059 |
+| 3 | `credit` context acyclic (pilot) | LOA-3060 |
+| 4 | Move `portal-lenders` aggregators to owning modules | LOA-3061 |
+| 5 | Rule-engine core | LOA-2799 |
+| 6 | Agent result-sink interface | LOA-3062 |
+| 7 | Remaining cycles: `audit ↔ ingress`, `appraisal ↔ income` | LOA-3063 |
+| 8 | `src/contexts/<context>/` directory layout + eslint-plugin-boundaries | LOA-3064 |
+| 9 | One definition per domain concept | LOA-3065 |
+| 10 | Table ownership (`ownedTables`) | LOA-2388 |
+
+Phase 7 ends at zero violating imports; Phase 8 enforces the boundaries via directory structure and ESLint.
+
+## Related pages
+
+<Columns cols={2}>
+<Card title="System architecture" href="/overview/system-architecture" icon="network">
+The repositories, services, data stores, and AI agents.
+</Card>
+<Card title="Repositories" href="/overview/repositories" icon="folder-tree">
+Package breakdown across all four repos.
+</Card>
+<Card title="Observability" href="/ops/observability" icon="telescope">
+Datadog and LangSmith monitoring.
+</Card>
+<Card title="Infrastructure" href="/ops/infrastructure" icon="server">
+Deployment, CDK, and environment config.
+</Card>
+</Columns>

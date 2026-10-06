@@ -187,6 +187,37 @@ The append is inside a database transaction that first locks the `audit_runs` ro
 
 The `emission_id` is deterministic (`uuidv5(auditRunId:sourceId, EVIDENCE_EMISSION_ID_NAMESPACE)`), so a crashed-and-retried append re-derives the same id and the `evidence_emission_batches_emission_identity_unique` constraint deduplicates it.
 
+## Observation registry snapshots
+
+The evidence system uses frozen registry snapshots to guarantee that a stored emission batch can
+always be re-parsed against the same schema it was written with. A snapshot id is stored with
+every `evidence_emission_batches` row; consumers select the parser by that id.
+
+**`observation-first-proof.v1`** (`OBSERVATION_FIRST_PROOF_REGISTRY`, EDU-08) — the initial
+snapshot. The `bank_statement.ending_balance` observation row names EDU-05 as the adopter. This
+snapshot is frozen and will not change.
+
+**`observation-first-proof.v2`** (`OBSERVATION_FIRST_PROOF_V2_REGISTRY`, LOA-3089 / shared-types
+2.6.0) — identical to v1 except the `bank_statement.ending_balance` adopter is **EDU-07**
+(the income lane, the only lane that reads statement balances). Every other row is the same
+object reference as v1. The coverage row `doc_health.bank_statement_period_coverage` stays with
+EDU-05 in both snapshots.
+
+The change ships as a **new snapshot, not an edit to v1**, following the EDU-01.5 precedent.
+Editing a published snapshot in place would allow one id to name two different schemas across
+package versions, silently re-parsing stored batches differently on upgrade. EDU-07 (LOA-2932)
+pins `packages/api` to shared-types 2.6.0 and emits `bank_statement.ending_balance` under v2
+with adopter EDU-07; v1 batches continue to parse against v1.
+
+`parseObservationEmission` defaults to v1 and is unchanged. Callers that need v2 must pass
+`OBSERVATION_FIRST_PROOF_V2_REGISTRY` explicitly via the registry parameter.
+
+<Note>
+A published snapshot never changes. If a definition's semantics must evolve, add a new snapshot
+(e.g. `observation-first-proof.v3`) beside the existing ones. The EDU-01.5 precedent
+(`urla-declarations.v2` beside the unchanged v1) is the model to follow.
+</Note>
+
 ## Related
 
 <Columns cols={2}>
