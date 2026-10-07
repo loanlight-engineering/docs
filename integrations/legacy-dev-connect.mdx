@@ -11,6 +11,10 @@ unless you are explicitly working on Dev Connect. The Encompass `LosProvider` is
 non-functional stub, so the webhook path fails at runtime.
 </Warning>
 
+<Note>
+`DevConnectDocumentService.createAuditDocument` — which previously generated PII and document-expiration PDFs — now returns `{ success: false, error: "Developer Connect audit documents were removed (LOA-11)" }` immediately, before any Encompass call. The `ensureDocumentWithTitle` and `uploadPdfAttachment` helpers are retained because the property-data runner still uses them. Full Dev Connect removal is tracked on LOA-11.
+</Note>
+
 LoanLight's earliest Encompass integration pulled loan data and documents directly from the
 Encompass REST API rather than reading them from S3. Two HTTP endpoints remain wired for it.
 

@@ -19,7 +19,7 @@ The package exports from `src/index.ts`:
 | Function | Purpose |
 |---|---|
 | `generateAuditPdfV2(input: GenerateAuditPdfV2Input)` | Render the main AUS report. |
-| `generatePropertyPdf(input: GeneratePropertyPdfInput)` | Render one property's detail pages (subject + related + comparables) from `GetPropertyDataResponse`. |
+| `generatePropertyPdf(input: GeneratePropertyPdfInput)` | Render one property's detail pages (subject + related + comparables) from `GetPropertyDataResponse`, with optional listing screenshots. |
 | `combinePdfs(...)` | Merge audit + property PDFs (used in the combined-delivery path). |
 
 Exported types: `AuditState`, `AuditErrorDetails`, `AuditSectionsInput`, `GenerateAuditPdfV2Input`, `GeneratePropertyPdfInput`.
@@ -140,6 +140,37 @@ All values are pre-formatted display strings resolved by loanlight-api; an absen
 <Note>
 `LTV / CLTV` was removed from the Loan Details card in the grouped-Document-Health redesign (#516). The fields (`ltv`, `combinedLtv`) still exist in `LoanDetails` and the API type, but the card no longer renders them.
 </Note>
+
+## Subject listing screenshots (LOA-2989)
+
+`GeneratePropertyPdfInput` accepts an optional `listingScreenshots: ListingScreenshot[]` field. When present, `buildPropertyContent` appends one captioned page per screenshot **after the subject property's findings** and nowhere else (not for related properties or comparables).
+
+Each screenshot page carries a caption in the form:
+```
+<Zillow|Redfin> screenshot — Captured <MM/DD/YYYY HH:mm UTC> — <url>
+```
+where `<url>` is rendered as a live link. There is no standalone block heading; the caption names the artifact.
+
+`AuditResultsFetcherService.fetchListingScreenshots(auditRunId, requestorId, token)` fetches screenshots from the API:
+
+- Calls `GET /api/v1/audit_runs/:id/listing_screenshots` with a 15 s timeout covering the body read.
+- Any non-2xx response (for example a 404 on an API build that does not have the route), timeout, network failure, or unusable body resolves to `[]` and logs `audit_pdf.listing_screenshots.degraded`. It never rejects.
+
+In `AuditReportPdfService`, screenshots are fetched only when a `subject` row exists in the property data. On the combined-delivery path they are passed alongside property data; on the split-delivery path they are passed only to the subject property's PDF. If rendering with screenshots throws, the service logs `audit_pdf.listing_screenshots.render_failed`, drops the failing screenshot(s), and re-renders with the remainder. With no screenshots the call is byte-identical to the pre-LOA-2989 baseline.
+
+`ListingScreenshot` is defined in `@loanlight-engineering/shared-types`:
+
+```ts
+interface ListingScreenshot {
+  source: "zillow" | "redfin";
+  capturedAt: string;  // ISO-8601; time of original capture, not of this read
+  sourceUrl: string;   // the listing page screenshotted
+  contentType: "image/png" | "image/jpeg";
+  width: number;
+  height: number;
+  data: string;        // base64, no data: prefix; producer caps decoded size
+}
+```
 
 ## Source modules
 

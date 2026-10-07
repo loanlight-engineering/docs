@@ -4,54 +4,41 @@ description: How the audit PDF is rendered and delivered to the LOS.
 icon: file-text
 ---
 
-LoanLight renders per-agent audit reports as PDFs and pushes them back to the loan origination system (Encompass) as document attachments. The rendering lives in the `pdf/` module of loanlight-api (`PdfTemplateService`, `pdf/pdf-template.service.ts`).
+LoanLight renders the property data audit report as a PDF and uploads it to Encompass as a document attachment. The rendering lives in the `pdf/` module of loanlight-api (`PdfTemplateService`, `pdf/pdf-template.service.ts`).
 
 <Warning>
 Audit PDFs are **not stored in S3.** They are generated in-process and uploaded to the LOS. The only file-system copy is a local debug write under `./pdf-output/` when `NODE_ENV=development`.
 </Warning>
 
+<Note>
+The PII and document-expiration report PDFs that `DevConnectDocumentService.createAuditDocument` previously generated have been **removed** (LOA-3119). `createAuditDocument` now returns `{ success: false, error: "Developer Connect audit documents were removed (LOA-11)" }` immediately, before any Encompass call. The property data PDF is unaffected. Full Dev Connect removal is tracked in LOA-11.
+</Note>
+
 ## Engine
 
 The service uses **Handlebars** for templating and **Puppeteer** (headless Chromium) for HTML to PDF.
 
-- Templates are resolved at runtime via `path.join(__dirname, "..", "pdf", "templates", "{name}.hbs")`. Compiled templates are cached in an in-memory `Map` (`compiledTemplates`); `clearTemplateCache()` clears it.
+- Templates are resolved at runtime via `path.join(__dirname, "..", "pdf", "templates", "{name}.hbs")`. Compiled templates are cached in an in-memory `Map` (`compiledTemplates`).
 - `htmlToPdf(html, options)` launches Puppeteer with `{ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] }` (LOA-1727: `--disable-dev-shm-usage` and `--disable-gpu` were added to prevent intermittent "Failed to launch the browser process" crashes caused by the container's default 64 MB `/dev/shm`), calls `page.setContent(html, { waitUntil: ["networkidle0", "domcontentloaded"], timeout: 30000 })`, then `page.pdf(...)`. The browser is closed in a `finally` block. On launch failure the sequence retries once before giving up.
-- `registerHandlebarsHelpers()` runs in the constructor and registers helpers on the Handlebars singleton: `formatDate`, `severityBadge` (high/medium/low → `badge-*`), `issueIcon` (missing / inconsistent / default), `percentage`, `eq`, `gt`, and others.
+- `registerPdfHelpers()` is exported and runs in the constructor. It registers these helpers on the Handlebars singleton: `eq`, `gte`, `formatNumber`, `take`, and `filterPriceEvents` (the five helpers `property-data-report.hbs` uses). The dev preview server registers the same helpers so its HTML renders with production's helpers.
 
 <Warning>
 Templates MUST be fully self-contained — inline CSS, no CDN/font/image fetches. Any external request stalls `networkidle0` for the full 30s timeout.
 </Warning>
 
-## The three templates
+## Public API
 
-`TemplateType` is one of `data-discrepancy-audit-report`, `document-expiration-audit-report`, or `property-data-report`. `getTemplateNameForAgent(agentType)` maps an agent to its template:
+`PdfTemplateService` exposes one public method:
 
-| agentType | Template (`.hbs`) | Report |
-|---|---|---|
-| `PII` / `piiValidation` | `data-discrepancy-audit-report` | PII / data-discrepancy audit |
-| `documentExpiration` | `document-expiration-audit-report` | Document expiration audit |
-| `propertyData` | `property-data-report` | Property data report |
-| anything else | `data-discrepancy-audit-report` (fallback) | — |
+```ts
+renderPdf(templateName: string, data: object, options?: PdfRenderOptions): Promise<Buffer>
+```
 
-## Live render path: the FromNormalized builders
+`PdfRenderOptions` is `{ format?: "A4" | "Letter"; orientation?: "portrait" | "landscape" }`. The method compiles the named `.hbs` template from `pdf/templates/`, renders it with `data`, converts to PDF via Puppeteer, logs `Rendered <templateName> PDF (<N>KB)`, and returns the buffer.
 
-All production callers route through the `...FromNormalized` builders into a single entry point, `generateAgentDetailReportPdf(templateData, agentType, options): Promise<Buffer>`.
+## The template
 
-<AccordionGroup>
-<Accordion title="buildPiiTemplateDataFromNormalized(normalized, reportMetadata)">
-Builds PII template data from `pii_validation_results` (plus nested `pii_document_validations`). It defensively sorts `normalized.results` by `(field, borrower_index, id)` and validations by `(document_name, id)` before dedupe. Dedupe key: `field|borrower_index|encompass_attachment_name|page_ref|normalizeVal(doc_value)`.
-</Accordion>
-<Accordion title="buildDocumentExpirationTemplateDataFromNormalized(normalized, reportMetadata)">
-Sorts results by `(document_type, document_name, id)` and nested `doc_expiration_evidence` by `(created_at, id)`, then uses `.find()` to pick the canonical `date_extraction` / `expiration_calculation` / `flag_type` evidence rows. It also pulls `fetchDocumentCompletenessResults`.
-</Accordion>
-<Accordion title="fetchDocumentCompletenessResults(auditRunId)">
-Reads `doc_completeness_results` ordered `(document_name, id)` and classifies documents into failed (`page_mismatch`, `multi_doc_mismatch`, `composite_mismatch`, `independent_collection_incomplete`, or status `invalid_*`) versus warning.
-</Accordion>
-</AccordionGroup>
-
-<Note>
-`generateAgentDetailReportPdfFromRawData` and its helpers (`enhanceWithMultiDocumentData`, `fetchMultiDocumentAuditData`, `transformRawAuditData`, `transformDocumentExpirationData`, `createTemplateExtensions`) plus the `RawAuditData` / `RawAuditEntry` types are **dead code**. They have no production callers and survive only for the spec file. All live paths use the `...FromNormalized` builders.
-</Note>
+One live template is in `pdf/templates/`: `property-data-report.hbs`. It is the only template in use; no `TemplateType` enum or agent-to-template routing exists in the current code.
 
 ## Where the PDF goes
 
@@ -59,19 +46,11 @@ PDFs are generated in-process and uploaded to the LOS (Encompass) as attachments
 
 ### Property data PDF
 
-Generated in `langgraph/property-data-graph-runner.ts` after property data is persisted. It lazily resolves `PdfTemplateService` via `moduleRef`, builds `PdfTemplateData` (`reportType: "Property Data"`), and calls `generateAgentDetailReportPdf(templateData, "propertyData", { format: "A4", orientation: "portrait" })`.
+Generated in `langgraph/property-data-graph-runner.ts` after property data is persisted. It lazily resolves `PdfTemplateService` via `moduleRef` and calls `renderPdf("property-data-report", templateData, { format: "A4", orientation: "portrait" })`.
 
 - In `NODE_ENV=development` it writes `./pdf-output/property-data-{loanId}-{auditRunId}.pdf`.
-- When a loan-processing context with a token exists, it uploads to the LOS via `DevConnectDocumentService.ensureDocumentWithTitle(originalLoanId, "LLUE - Property Data", …)` then `uploadPdfAttachment(originalLoanId, docId, "property-data-report-{auditRunId8}.pdf", pdfBuffer, …)`.
+- When a loan-processing context with a token exists, it uploads to the LOS via `DevConnectDocumentService.ensureDocumentWithTitle(originalLoanId, "LLUE - Property Data", …)` then `uploadPdfAttachment(originalLoanId, docId, "property-data-report-{auditRunId8}.pdf", pdfBuffer, …)`. `ensureDocumentWithTitle` and `uploadPdfAttachment` are retained in `dev-connect-document.service.ts` for this purpose even though `createAuditDocument` is now removed.
 - All PDF failures are caught and logged; they are non-fatal to the audit run.
-
-### PII and document-expiration PDFs
-
-Generated in `los/providers/dev-connect/dev-connect-document.service.ts`.
-
-- For `documentExpiration`: `readDocumentExpirationResultsNormalized(db, auditRunId)` → `buildDocumentExpirationTemplateDataFromNormalized` → `generateAgentDetailReportPdf`.
-- Otherwise (PII): query `pii_validation_results` (ordered `field, borrower_index, id`; nested `pii_document_validations` ordered `document_name, id`) → `buildPiiTemplateDataFromNormalized` → `generateAgentDetailReportPdf`.
-- Uploaded to Encompass via `POST {baseUrl}/encompass/v3/loans/{loanId}/attachmentUploadUrl?view=id` (docGroup `Processing Docs`, docClassification `Other`). Filename: `{reportTitle-slug}-report-{auditRunId8}.pdf`. Existing attachments are de-duped via `checkForExistingAuditAttachment`. LOS container documents are titled `LLUE - ...`.
 
 For more detail on the standalone PDF library used by the integrations service, see [integrations audit PDF](/integrations/audit-pdf).
 
@@ -81,7 +60,7 @@ The AUS audit-report PDF generated by the integrations [audit-pdf](/integrations
 
 ## Appraisal Review Summary export PDF
 
-A separate PDF path lives in the portal-appraisal module (`AppraisalExportDataService.renderReviewPdf`), distinct from the three Handlebars templates above. It renders an appraisal run's **Review summary** (property facts, AI findings, and program-rule outcomes) as a LoanLight-branded PDF. The same `renderReviewPdf` entry point is used by two separate delivery paths:
+A separate PDF path lives in the portal-appraisal module (`AppraisalExportDataService.renderReviewPdf`), distinct from the `pdf/` module above. It renders an appraisal run's **Review summary** (property facts, AI findings, and program-rule outcomes) as a LoanLight-branded PDF. The same `renderReviewPdf` entry point is used by two separate delivery paths:
 
 **Portal export (user-triggered):**
 - **Endpoint** — `POST /api/v1/portal/appraisal/:id/export` (`PortalAppraisalController`, roles `client_admin` / `client_user` / `super_admin`, throttled 5/min because the render is expensive). Only `completed` / `reviewed` runs export; others 409.
@@ -98,12 +77,12 @@ A separate PDF path lives in the portal-appraisal module (`AppraisalExportDataSe
 - **Contents** — header (address, form type, loan + program); key facts; an **Issues Found** section surfacing failed/warning rules; a Findings section (ATTOM-enrichment AVM/market findings plus deny-list and Mashvisor rental findings); Sales Comparables (all forms) and, for form 1025 only, Unit Details and Operating Income tables; an AI "Summary of Appraiser Comments" (read cache-only); and the Program Rules outcomes.
 
 <Note>
-Despite the "Review Summary" PDF and the audit-report PDFs both being appraisal-adjacent, they are different mechanisms: the export here renders HTML with the Puppeteer writer; the per-agent appraisal audit report goes through the `pdf/` Handlebars/Puppeteer service (`data-discrepancy-audit-report` fallback) and is pushed to the LOS.
+Despite the "Review Summary" PDF and the audit-report PDFs both being appraisal-adjacent, they are different mechanisms: the export here renders HTML with the Puppeteer writer; the property data PDF in the `pdf/` module uses Handlebars + Puppeteer and is pushed to the LOS.
 </Note>
 
 ## Dev preview server
 
-`pdf/dev/template-dev-server.ts` (with `start-dev-server.ts`) serves the templates at `http://localhost:3001` (`pnpm template:dev`) using fixtures in `pdf/dev/fixtures/` (`pii-sample-enhanced.json`, `document-expiration-sample.json`, `property-data-sample.json`). Refresh the browser manually to see template changes.
+`pdf/dev/template-dev-server.ts` (with `start-dev-server.ts`) serves the templates at `http://localhost:3001` (`pnpm template:dev`) using fixtures in `pdf/dev/fixtures/` (`property-data-sample.json`). Refresh the browser manually to see template changes.
 
 ## Related pages
 

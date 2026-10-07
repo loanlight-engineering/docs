@@ -229,6 +229,26 @@ Three changes to the portal's transaction table (`transaction-table.tsx`):
 - **`(identified)` suffix hidden.** `shownPayerOf(tx)` strips every trailing ` (identified)` occurrence when `payer_source === "identified"`, so the reviewer never sees the suffix. The API continues to serve it; a printed or Plaid name that happens to end in `" (identified)"` is shown unchanged. Sort and filter keys use the stripped name.
 - **Payer multi-select filter.** A multi-select dropdown next to the Category filter, built like the Statement Period filter. Options are the distinct displayed payer names across the current transaction set, sorted A–Z, with **"Not available"** appended for rows that carry no payer. Selected options display as removable chips labelled `Payer: <name>` (or `Payer: Not available`). **Clear all** clears the Payer filter alongside the other active filters.
 
+### Comments column in v2 categorization (LOA-3072)
+
+Reducto now captures each transaction row's **Comments** cell and stores it as `evidence.comments` on the `transactions` response (no migration needed — `EvidenceSchema` already accommodated the field). Line breaks in the Comments value collapse to single spaces and the value is capped at 500 characters like `description`; a cut that lands inside a digit run drops that run so a truncated account tail does not match an owned account.
+
+`EXTRACTION_CONTRACT_VERSION` was bumped from 6 to 7. Redis extraction checkpoints keyed on the old version are automatically invalidated.
+
+The v2 categorization pipeline reads Comments as a separate field (`RawStatementLine.comments`), never appended to the description. Each reader consults Comments only where the description decides nothing:
+
+| Reader | What it uses Comments for |
+|---|---|
+| `linePlatform`, `lineP2pCounterparty` (`p2p-platforms.ts`, `signature.ts`) | P2P platform and sender identification; feeds the rail, group signature, FR-10 canonical map, `tryP2pRule`, and the label. |
+| `classifyRail` (`rail.ts`) | `Mobile Deposit` and `Interest` rail detection. |
+| `ownAccountSource` (`own-account.ts`) | An owned source account printed as `FROM 414-XXX407` (3-digit tail match against the file's owned last-4s). |
+| `commentsTransferTarget` (`own-account.ts`) | A debit's `To 414-XXX429`, added to the file's own-account set at `loadInputs`. |
+| `payerColumn` (`credit-category-payer.ts`) | P2P platform in the Payer column. |
+
+<Note>
+Lender detection on the P2P rail still reads the description only. A lender paying by Zelle with the platform only in Comments gets a plain P2P label. Change the lender-registry reader and the label-safety recheck together or not at all.
+</Note>
+
 ### Payer column and lender disbursements (LOA-3015)
 
 Lender disbursements sent by wire or ACH — credits whose originator matches the bank's own lender-registry entry — are now categorized as `Loan` income (not business income). The `lender-registry.ts` module recognizes structured NACHA and wire fields carrying institution-style disbursement phrases, and `rules.ts` classifies matching credits under the `Loan` category. This corrects a misclassification that had admitted lender-originated credits into qualifying income on business bank-statement analyses.

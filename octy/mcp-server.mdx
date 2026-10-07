@@ -100,7 +100,17 @@ Being stateless matters because Octy runs several ECS tasks behind one ALB; the 
 
 ## Setup (each engineer)
 
-Get the key for the environment you want (prod data: prod Octy) from Secrets Manager (`Octy/McpApiKey`) or from whoever administers Octy. Keep it out of your shell profile and out of `~/.claude.json`: put it in the macOS Keychain and let the client read it per connection.
+**Claude Code, scripted (macOS).** Run the interactive setup script from the `octy` repo:
+
+```bash
+pnpm mcp:setup        # or: bash scripts/setup-octy-mcp.sh
+```
+
+The script asks for the environment (prod or local), your `@loanlight.com` email, and the API key. It then saves the key to the macOS Keychain, writes a `headersHelper` file that reads the key per connection (the key is never stored in `~/.claude.json`), and registers the server with `claude mcp add-json --scope user`. It verifies the key and email are accepted before finishing. It is safe to re-run.
+
+The menu also offers: **Switch environment** (prod ↔ local — re-points the same `octy` server entry), **Change an API key**, **Show current setup**, and **Remove everything** (server, Keychain keys, header files). Each environment (`prod`, `local`) keeps its own Keychain key, so switching does not re-prompt for a key you already gave.
+
+If you prefer to set up manually, get the key from Secrets Manager (`Octy/McpApiKey`) or from whoever administers Octy. Keep it out of your shell profile and out of `~/.claude.json`: put it in the macOS Keychain and let the client read it per connection.
 
 ```bash
 security add-generic-password -a "$USER" -s octy-mcp -w   # prompts for the key
