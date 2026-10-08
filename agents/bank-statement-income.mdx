@@ -131,6 +131,37 @@ Collapsing happens over the transaction set handed in at the time of the call (p
 
 The flag is registered in the admin Flags tab (`KNOWN_FLAGS` + `KEY_MAP` + `FeatureFlags`) and resolves `false` when no `lender_feature_flags` row exists.
 
+## Loan-scoped parse cache (LOA-3105, migration 0141)
+
+When a loan has already been processed, earlier parses of the same source file can cover some or all of the pages needed by a new batch. The worker skips pages that are already covered and reuses the cached extraction, avoiding a redundant Reducto call and the associated cost.
+
+**How the cache works.** Alongside the per-file [Reducto extraction checkpoint](#reducto-extraction-checkpoint-loa-2517), a loan-scoped `bank_statement_parse_cache` table stores validated `ExtractionResult` objects keyed on `(lender_id, loan_id, source_sha256, page_selection_key, extraction_contract_version)`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `lender_id` | `uuid` NOT NULL | FK `lenders(id)` ON DELETE RESTRICT. |
+| `loan_id` | `uuid` NOT NULL | FK `loans(id)` ON DELETE CASCADE. |
+| `source_sha256` | `text` NOT NULL | SHA-256 of the source PDF bytes. |
+| `page_selection_key` | `text` NOT NULL | Encodes which pages were extracted (handles partial-parse cases). |
+| `extraction_contract_version` | `text` NOT NULL | Guards against stale payloads on contract bumps. |
+| `extraction_result` | `jsonb` NOT NULL | The validated `ExtractionResult`. |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+
+Unique index `bsi_parse_cache_lookup_uniq` on `(lender_id, loan_id, source_sha256, page_selection_key, extraction_contract_version)`.
+
+**Skip and reuse logic.** Before extracting, the worker inspects the source documents metadata stored on `borrower_files.source_documents` — classification evidence from the classify-split pipeline. Standalone statement files (a single account, a single period) whose account identity and covered months are already present in a prior parse for the same loan are skipped entirely; only their uncovered pages are extracted from combined PDFs. Fraud and font-integrity checks (`detectFraud`) still run on the raw PDF before any skip decision, so a tampered document is never silently accepted.
+
+If classification metadata is missing, incomplete, or contradictory, the worker falls back to full parsing. The optimization is metadata-driven and safe to miss.
+
+**New `borrower_files` columns (migration 0141).**
+
+| Column | Type | Notes |
+|---|---|---|
+| `source_documents` | `jsonb` | `BankStatementSourceDocument[]` — the classify-split metadata for each uploaded PDF, including segment page ranges, account periods, and classification confidence. Populated by the worker before extraction. |
+| `document_coverage` | `jsonb` NOT NULL | `BankStatementDocumentCoverage[]` — one entry per source document recording whether it was `parsed`, `partially_parsed`, `reused`, or `skipped`, plus which accounts/months covered it. Written by the worker at extraction time and exposed in the portal for reviewer visibility. |
+| `analysis_processing_started_at` | `timestamptz` | Set when the worker claims the job, used for deadline monitoring (migration 0140). |
+
 ## Parity with the legacy pipeline
 
 The port restores several extraction-time finding categories that the legacy hard-swap (T11) had dropped:

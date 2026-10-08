@@ -218,6 +218,38 @@ A published snapshot never changes. If a definition's semantics must evolve, add
 (`urla-declarations.v2` beside the unchanged v1) is the model to follow.
 </Note>
 
+## EDU-08.5 — subject-state view and obligation cause (shared-types 2.8.0, LOA-3117)
+
+`@loanlight-engineering/shared-types` 2.8.0 extends the evidence parser contract with the subject-state view and a `cause` field on unsatisfied obligation views.
+
+### Subject-state view
+
+`parseEvidenceSubjectStateView` is a new parser that reads a subject-state view — the EDU-06 resolution for a single borrower attribute. It supports three state values (`conflict`, `no_disagreement`, `unknown`) and a new scope form: `borrower_unidentified`, used when the borrower has no entity (no id or subject reference). That scope is only legal on state `unknown`, with exactly `["borrower_unlinked"]` or `["declared_receipt_unavailable"]` as its reasons.
+
+The parser rejects a `no_disagreement` view whose `scope.displayLabel` contains the whole word "verified" (any case) — that word asserts a pass, which `no_disagreement` does not warrant.
+
+**Exported vocabularies** — consumers assert their own unions against these frozen arrays:
+
+| Export | Members |
+|---|---|
+| `EVIDENCE_SUBJECT_STATE_REASONS` | `value_absent`, `value_joint_party`, `value_unparseable`, `check_unverifiable`, `party_mismatch`, `locator_unreadable`, `page_unreadable`, `document_unmapped`, `document_version_unverifiable`, `classification_missing`, `same_place_ambiguous`, `borrower_unlinked`, `role_label_unverified`, `declared_value_unavailable`, `masked_values_indistinct`, `declared_receipt_unavailable`, `extra_words_unverifiable`, `value_not_for_subject`, `observed_value_unavailable` |
+| `EVIDENCE_CONFLICT_SUBJECT_REASONS` | Subset of the above allowed on `conflict` views |
+| `EVIDENCE_NO_DISAGREEMENT_SUBJECT_REASONS` | `value_not_for_subject` only |
+| `EVIDENCE_SUBJECT_STATE_ATTRIBUTES` | `borrower.full_name` |
+| `EVIDENCE_OBLIGATION_CAUSES` | `unreadable`, `unattributable`, `could_not_match`, `version_unverifiable`, `other` |
+
+### Obligation cause
+
+`parseEvidenceObligationView` gains an optional `cause` field on views in state `unknown`. `cause` must be a member of `EVIDENCE_OBLIGATION_CAUSES`; absent `cause` implies `other` (no upload instruction). Any other state rejects a non-null `cause`.
+
+### Label validation
+
+`parseEvidenceObligationView` and `parseEvidenceConflictView` now reject a display label whose drawn text contains a run of more than four digits that were split by an invisible character, a compatibility form, or whitespace. Digits are counted after NFKC normalisation, keeping only visible characters and collapsing whitespace runs. This is a reject-only change; valid labels are unaffected. The subject-state view parser applies the same rule to the `roleLabel` field on `borrower_unidentified` scopes.
+
+<Note>
+A published snapshot never changes. If a definition's semantics must evolve, add a new snapshot beside the existing ones. The EDU-08.5 parsers are in shared-types and carry no new registry snapshot — they extend the consumer-facing contract on top of the existing v1/v2 snapshots.
+</Note>
+
 ## Related
 
 <Columns cols={2}>

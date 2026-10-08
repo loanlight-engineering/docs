@@ -1,10 +1,10 @@
 ---
 title: Octy MCP server
-description: Work Octy bug reports from a local coding agent (Claude Code, Codex) over the Model Context Protocol.
+description: Work Octy bug reports from a local coding agent (Claude Code, Codex) over the Model Context Protocol. Each engineer authenticates with their own API key.
 icon: plug
 ---
 
-The Octy MCP server lets a coding agent running on an engineer's machine work an Octy bug report the same way a cloud Oz run does: it reads the same data tools under the same per-run token, receives the same server-built instructions, and posts its results back into Octy, where they appear in the bug-reports UI next to cloud runs.
+The Octy MCP server lets a coding agent running on an engineer's machine work an Octy bug report the same way a cloud Oz run does: it reads the same data tools under the same per-run token, receives the same server-built instructions, posts its results back into Octy where they appear in the bug-reports UI next to cloud runs, and every call lands on the report's activity trail under the caller's own API key.
 
 Use it when you want to drive an investigation yourself or when the cloud runtime is unavailable.
 
@@ -18,105 +18,164 @@ This is a **local-agent** interface. The MCP endpoint is not used by Octy's own 
 teammate files a bug report ──► Octy /bug-reports ──► copy Report ID
                                                           │
 engineer: /ll:octy-rca <id>  (Claude Code)                ▼
-          $octy-rca <id>     (Codex)    POST /api/mcp  (Bearer OCTY_MCP_API_KEY + X-Octy-Operator)
+          $octy-rca <id>     (Codex)    POST /api/mcp  (Bearer octy_… — your own API key)
                                                           │
    octy_get_issue ─► octy_start_run ─► octy_query_dataset… ─► (operator decides) ─► octy_complete_run
-                          │                    │                                          │
+     (+ playbook)         │                    │                                          │
           instructions + run tokens     run token on every call              summary + PRs on the report,
           (same code path as Oz)        scoped to this report                run closed, tokens dead
+                                                                                          │
+                                       a PR opened later ─► octy_record_run ─► follow-up record on the report
 ```
 
 `octy_start_run` builds the investigation instructions on the server from the same sections an Oz run receives — ground rules, architecture, skill prompt, Linear protocol, and so on (`src/lib/oz-skills/`). An edit to the RCA prompt therefore reaches every local agent on its next run, with no skill update required. Only the tool mechanics differ: MCP tools instead of HTTP endpoints, the run token as a tool argument instead of a header, and completion split out as the operator's own step.
+
+## Three gates
+
+Every tool call passes up to three checks, in order:
+
+1. **The API key** (`src/lib/mcp/auth.ts`). `Authorization: Bearer octy_…`, a key created on Octy's **API Keys** page. The key is the identity: its row in `octy_api_keys` names the key, its kind, its optional owner (name, email), and its scopes. No header names the caller.
+2. **The key's scopes** (`src/lib/api-keys/scopes.ts`). Each tool needs one scope (`TOOL_SCOPES`). `tools/list` advertises only the tools the key may call; calling another returns a `SCOPE_DENIED` tool error.
+3. **The run token** (`src/lib/oz-token.ts`), for the tools that act for a run — presented by the run's own operator. A local run belongs to the operator whose key started it (`oz_run_id = "mcp:<operator>"`); a token alone does not let another key act for it (`NOT_YOUR_RUN`).
+
+### Scopes
+
+| Scope | Tools |
+|---|---|
+| `reports:read` | `octy_get_issue`, `octy_get_run`, `octy_list_datasets` |
+| `runs:start` | `octy_start_run` |
+| `runs:work` | `octy_query_dataset`, `octy_fetch_instructions`, `octy_refresh_token`, `octy_attach_linear_ticket` (still need the run token) |
+| `runs:complete` | `octy_complete_run` |
+| `runs:renew` | `octy_renew_run` |
+| `runs:record` | `octy_record_run` |
+
+A key's **kind** is a label plus a scope preset, editable afterwards: **Local engineer** (every scope), **Warp** and **Hermes** (`reports:read`, `runs:work`, `runs:complete` — for when cloud runners reach Octy over MCP), **Other** (`reports:read`, `runs:record`).
+
+## API keys — the /api-keys page
+
+Everyone signed into Octy sees and manages every key: they are team infrastructure, not personal settings.
+
+- **New key**: name (required), kind, owner name and email (optional), scopes, and **Verify PRs on GitHub** (on by default). The key is shown **once** — masked, with a show toggle and a copy button. Only its SHA-256 is stored.
+- **Edit** an active key's name, kind, owner, scopes, or PR verification. Takes effect on its next call.
+- **Revoke**: the key stops working on its next call. Keys are revoked, never deleted, so the activity trail keeps naming who did what.
+- The list shows each key's prefix (`octy_XXXXXXX`), owner, scopes, who created it, and when it was last used (stamped at most once a minute).
+
+The owner email matters: it is the operator recorded on runs and events, and — when it is on the team roster (`src/lib/github/team.ts`) — the `x-acting-user` sent to loanlight-api for the IRIS datasets. A key without a rostered owner acts as `system`.
 
 ## Tools
 
 | Tool | Needs | What it does |
 |---|---|---|
-| `octy_get_issue` | key + report ID | Load one report: anchor, traces, Linear ticket, comments, every run (with token expiries for open local runs) |
-| `octy_start_run` | key | Start a run (`root-cause-analysis`, `rca-fix-and-pr`, `ad-hoc`) → full instructions + `access_token` + `refresh_token` |
-| `octy_get_run` | key + run ID | A run's status, summary, and (optionally) a local run's instructions again |
-| `octy_list_datasets` | key | The datasets `octy_query_dataset` can read (static registry metadata) |
-| `octy_fetch_instructions` | run token | On-demand methodology (`prompt-tuning`, …) and the run's `completion` instructions |
-| `octy_refresh_token` | refresh token | New access token (60 min) while the 4 h refresh window is open |
-| `octy_renew_run` | key, own run | New token pair for an open run whose window lapsed, or from a new session |
-| `octy_query_dataset` | run token | The Oz data tools, scoped to the run's own bug report |
-| `octy_attach_linear_ticket` | run token | Record the report's one Linear ticket |
-| `octy_complete_run` | run token | Post the summary + PR links and close the run for good |
+| `octy_get_issue` | `reports:read` + report ID | Load one report: anchor, traces, Linear ticket, comments, every run (with token expiries for open local runs), and the `playbook` |
+| `octy_get_run` | `reports:read` + run ID | A run's status, runner, summary, and (optionally) a local run's instructions again |
+| `octy_start_run` | `runs:start` | Start a run (`root-cause-analysis`, `rca-fix-and-pr`, `ad-hoc`) → full instructions + `access_token` + `refresh_token` |
+| `octy_list_datasets` | `reports:read` | The datasets `octy_query_dataset` can read (static registry metadata) |
+| `octy_query_dataset` | `runs:work` + run token | The Oz data tools, scoped to the run's own bug report |
+| `octy_fetch_instructions` | `runs:work` + run token | On-demand methodology (`prompt-tuning`, …) and the run's `completion` instructions |
+| `octy_attach_linear_ticket` | `runs:work` + run token | Record the report's one Linear ticket |
+| `octy_refresh_token` | `runs:work` + refresh token | New access token (60 min) while the 4 h refresh window is open |
+| `octy_renew_run` | `runs:renew`, own run | New token pair for an open run whose window lapsed, or from a new session |
+| `octy_complete_run` | `runs:complete` + run token | Post the summary + PR links and close the run for good |
+| `octy_record_run` | `runs:record` | Add a **follow-up record** (summary + PRs) to a report after its run closed |
 
-IDs can be bare UUIDs or pasted Octy links (`/bug-reports?issue=<id>`). There is **no browsing**: you need the report's ID.
+IDs can be bare UUIDs or pasted Octy links (`/bug-reports?issue=<id>`). There is **no browsing**: you need the report's ID. A key can read a report it knows the ID of and start a run; a report's data needs a run token.
 
 ## The run token — same mechanism as Oz
 
 A local run is an ordinary `octy_runs` row with `oz_run_id = "mcp:<operator>"` (`src/lib/mcp/run-source.ts`). It carries the same token columns an Oz run does. `octy_start_run` mints both tokens exactly like the cloud `oz-run` route and stores only their SHA-256 hashes. `validateOzToken` validates them on every tool call.
 
-That gives a local run the same four properties Oz runs have:
+That gives a local run the same properties Oz runs have:
 
-- **Scope** — data tools resolve the audit run from the run's bug report server-side. A local run cannot name another audit run to read.
-- **Time bound** — access token 60 min, refresh token 4 h. The agent refreshes on its own with `octy_refresh_token`; once the refresh window lapses, only the operator can renew the run (`/ll:octy-renew`, which calls `octy_renew_run`).
-- **Closure** — completion consumes the token. Nothing can be read or changed afterwards, and a closed run cannot be reopened. Further work is a new run.
-- **Trail** — every token-gated call stamps `token_last_used_at`, and the MCP server logs one line per tool call (operator, tool, run, dataset — never a token or a payload).
+- **Scope** — data tools resolve the audit run from the run's bug report server-side. Unlike an Oz run on an unanchored report, a local run cannot name another audit run to read.
+- **Ownership** — only the operator who started the run can act for it.
+- **Time bound** — access token 60 min, refresh token 4 h. The agent refreshes on its own with `octy_refresh_token`; once the refresh window lapses, only the operator can renew the run.
+- **Closure** — completion consumes the token. Nothing can be read or changed afterwards, and a closed run cannot be reopened. A later PR is a follow-up record; further work is a new run.
 
 Tokens are surface-bound: the Oz HTTP routes reject a local run's token and the MCP server rejects an Oz run's (`RunSurface` in `src/lib/oz-token.ts`). Tokens are returned as fields of `octy_start_run`, never embedded in the stored instructions, so the prompt stored on the run holds no secret.
 
-## Local runs vs cloud runs
-
-| | Cloud (Oz) run | Local (MCP) run |
-|---|---|---|
-| Auth | Per-run token, 60 min, 4 h refresh | The same token, over the MCP key |
-| Data scope | The report's audit run; unanchored runs may pass `audit_run_id` | The report's audit run only |
-| Completion | The agent, at the end of its task | The operator, with `/ll:octy-complete` |
-| After 4 h | Run cannot be extended | `/ll:octy-renew` issues a fresh pair |
-| Kill switch | — | **End run** in the run details (any signed-in Octy user) |
-| Lifecycle | Warp status, polled | `in_progress` → `succeeded` / `failed` |
-| UI | Warp session link | **Running locally · \<operator\>**, elapsed time, token state |
+| | Cloud (Oz) run | Local (MCP) run | Follow-up record |
+|---|---|---|---|
+| `oz_run_id` | Warp's run id | `mcp:<operator>` | `followup:<operator>` |
+| Auth | Per-run token, 60 min, 4 h refresh | Your API key + the same token | Your API key (`runs:record`) |
+| Data scope | The report's audit run; unanchored runs may pass `audit_run_id` | The report's audit run only | None — write-only |
+| Completion | The agent, at the end of its task | The operator, with `/ll:octy-complete` | Created closed |
+| After 4 h | Run cannot be extended | `/ll:octy-renew` issues a fresh pair | — |
+| Kill switch | — | **End run** in the run details (any signed-in user) | — |
+| UI | Warp session link, who launched it | **Local · \<operator\>**, elapsed time, token state | **Follow-up · \<operator\>**, linked to the run it follows |
 
 The MCP tools refuse to complete or renew a cloud run because Warp owns that lifecycle. To build on an earlier run, start a new one with it in `context_run_ids` (every earlier summarized run is included by default).
 
+## Follow-up records — `octy_record_run`
+
+A closed run is locked: nothing reopens it. Work that happens afterwards — usually the PR for a fix made later, outside a run — goes on the report as a **follow-up record**:
+
+```
+octy_record_run({ issue_id, summary, pr_urls?, parent_run_id?, run_name? })
+```
+
+- It creates an `octy_runs` row with `oz_run_id = "followup:<operator>"`, status `succeeded`, its token consumed at creation, and `context_run_ids = [parent_run_id]`. No instructions, no prompt, and no token is ever returned, so it opens no data.
+- `parent_run_id` must be a run of the same report.
+- **PR checks.** Every URL must be `https://github.com/<GITHUB_ORG>/<repo>/pull/<n>`. When the key has **Verify PRs on GitHub** on, each PR is looked up with the GitHub App first; a miss fails the call with `PR_NOT_FOUND` and nothing is written.
+- **One record per PR.** If the report already has a follow-up carrying any of these PRs, the call returns that record (`already_recorded: true`) instead of writing a second one.
+- The server instructs agents to use it: the `playbook`, the run instructions' closing section, and the completion instructions all direct agents to record later PRs with `octy_record_run`, never by starting a new run just to carry it.
+
+## The activity trail — `octy_run_events`
+
+Every operation on a report or run lands in `octy_run_events` (`src/lib/run-events/record.ts`): every MCP tool call (success, tool error, or `SCOPE_DENIED`), every `/api/oz/tools/*` call, every dispatch from the web app, and every **End run**. Each event records the run, the report, the API key, the actor (owner email or key name; the web user; `Warp agent`), the surface (`mcp`, `http`, `web`), the tool, its operation (`read`, `write`, `lifecycle`), its outcome, a target (dataset, ticket, PR), allowlisted arguments, a row count, and the duration. Never a token, never row data.
+
+Recording never fails the call it records: if the insert fails, the whole event goes out as one `[run-event]` log line, so Datadog holds the trail until the table does.
+
+The run details panel shows the trail as the run's **Activity** timeline (`GET /api/octy-runs/[runId]/events`). The report's run list shows who started each run from its launch event.
+
+The schema for both tables is documented in [agent platform schema](/data-model/agent-platform-schema).
+
 ## Working a report locally
 
-1. `/ll:octy-load <id>` — look at a report, its runs and their summaries. Starts nothing.
-2. `/ll:octy-rca <id>`, `/ll:octy-fix <id>`, or `/ll:octy-adhoc <id> <task>` — start a run. The agent follows the server's instructions and does **not** close the run when it finishes; it presents its findings and stops.
-3. Take as long as you like. The agent refreshes its own access token for 4 h; after that its next Octy call fails with `REFRESH_EXPIRED` and it asks you to run `/ll:octy-renew <run-id>`. Nothing else changes while you are away.
+1. `/ll:octy-load <id>` — look at a report, its runs and their summaries, and the playbook. Starts nothing.
+2. `/ll:octy-rca <id>`, `/ll:octy-fix <id>`, or `/ll:octy-adhoc <id> [task]` — start a run. The agent follows the server's instructions and does **not** close the run when it finishes; it presents its findings and stops.
+3. Take as long as you like. The agent refreshes its own access token for 4 h; after that its next Octy call fails with `REFRESH_EXPIRED` and it asks whether to renew. Say yes and it renews; say no and the run waits for `/ll:octy-renew <run-id>`. Nothing else changes while you are away.
 4. `/ll:octy-complete <run-id>` — when **you** decide the run is done (or should stop). The agent fetches the completion instructions, writes the summary, does the deferred Linear step, shows you the summary, and posts it. The run is closed for good.
+5. `/ll:octy-record <id> [pr-url…]` — a PR opened after the run closed. The agent writes a short summary of what the PR changes, shows it, and records it on the report as a follow-up.
 
 A run someone walked away from shows in the bug report as **tokens lapsed** once its refresh window passed, with how long it has been open and when Octy last heard from it. **End run** closes it: the agent loses access on its next call and the run cannot be renewed. It reads as `failed` with a note saying who ended it.
 
 ## Security posture
 
-- **`OCTY_MCP_API_KEY` opens the door.** One static secret, compared in constant time; unset means 503, never open. It lets a caller load a report it knows the ID of and start a run. The report's *data* is behind the run token.
-- **`X-Octy-Operator` must be on the team roster** (`src/lib/github/team.ts`), or the request is refused with 403. This is a static check, not authentication: the header is still unverified, so it stops typos and anonymous runs, not impersonation by someone who holds the key. Only a run's own operator can renew it.
-- **Rate limits** (`src/lib/mcp/rate-limit.ts`): 10 failed keys per client IP per 5 min, 240 messages per operator per minute, 20 messages per batch. These limits are in-process, so the effective ceiling scales with the number of ECS tasks (typically 2–4).
+- **Your API key is your identity.** One key per person (or per runner), each with its own scopes, revocable on its own from the **API Keys** page. Only its SHA-256 is stored, and it is shown once. A revoked key fails on its next call.
+- **Every dependency failure denies.** A key lookup that fails for any reason other than a missing table is a 503; a missing key, a wrong key, and a revoked key all return 401.
+- **Everything is on the trail** — who (which key), what, on which report and run, when, and how it went.
+- **Rate limits** (`src/lib/mcp/rate-limit.ts`): 10 failed keys per client address per 5 min, 240 messages per key per minute, 20 messages per batch. In-process, so the effective ceiling scales with the number of ECS tasks (typically 2–4).
 - `/api/mcp` is exempt from the AuthKit middleware (`src/middleware.ts`) because the bearer key authenticates it.
 
-## Transport
+### The legacy shared key (transition)
 
-Streamable HTTP, stateless, JSON responses only (`src/lib/mcp/protocol.ts`, `src/app/api/mcp/route.ts`):
-
-- `POST /api/mcp` accepts one JSON-RPC message or a batch.
-- Notifications get `202`.
-- `GET` and `DELETE` get `405`: there is no server-initiated stream and no sessions.
-
-Being stateless matters because Octy runs several ECS tasks behind one ALB; the run token lives in the database, so any task can validate it. Supported protocol versions: `2025-06-18`, `2025-03-26`, and `2024-11-05`.
+The shared `OCTY_MCP_API_KEY`, sent with an `X-Octy-Operator` email on the team roster, still works so nobody is cut off mid-run. It has every scope, and its calls are recorded with actor kind `legacy`. The header is a claim, not an identity — anyone holding the shared key can name any rostered email. Move to your own key; once everyone has, the legacy path and the `Octy/McpApiKey` secret go away.
 
 ## Setup (each engineer)
 
-**Claude Code, scripted (macOS).** Run the interactive setup script from the `octy` repo:
+**First, your key.** Open Octy's **API Keys** page ([prod](https://octy.loanlight.com/api-keys)) and create a key: kind **Local engineer**, your name and LoanLight email. Copy it; it is shown only once.
+
+**Claude Code, scripted (macOS).** From the `octy` repo:
 
 ```bash
 pnpm mcp:setup        # or: bash scripts/setup-octy-mcp.sh
 ```
 
-The script asks for the environment (prod or local), your `@loanlight.com` email, and the API key. It then saves the key to the macOS Keychain, writes a `headersHelper` file that reads the key per connection (the key is never stored in `~/.claude.json`), and registers the server with `claude mcp add-json --scope user`. It verifies the key and email are accepted before finishing. It is safe to re-run.
+The script asks for the environment (prod or local) and your key. It then saves the key to the macOS Keychain, writes a `headersHelper` file that reads the key per connection, and registers the server with `claude mcp add-json --scope user`. It verifies the key is accepted before finishing. It is safe to re-run.
 
-The menu also offers: **Switch environment** (prod ↔ local — re-points the same `octy` server entry), **Change an API key**, **Show current setup**, and **Remove everything** (server, Keychain keys, header files). Each environment (`prod`, `local`) keeps its own Keychain key, so switching does not re-prompt for a key you already gave.
+The menu also offers: **Switch environment** (prod ↔ local), **Change an API key**, **Show current setup**, and **Remove everything** (server, Keychain keys, header files). Each environment (`prod`, `local`) keeps its own Keychain key (`octy-mcp` / `octy-mcp-local`), so switching does not re-prompt for a key you already gave.
 
-If you prefer to set up manually, get the key from Secrets Manager (`Octy/McpApiKey`) or from whoever administers Octy. Keep it out of your shell profile and out of `~/.claude.json`: put it in the macOS Keychain and let the client read it per connection.
+**LangSmith CLI.** The RCA instructions read traces with the `langsmith` CLI, so **Set up everything** also configures it. It installs the CLI if missing, asks for your LangSmith API key, and writes a `# >>> octy langsmith >>>` block to `~/.zshenv` (non-interactive shells, which agents use, never read `~/.zshrc`). Re-running replaces the block rather than adding another.
+
+**Manual steps (Claude Code):**
+
+Keep the key out of your shell profile and out of `~/.claude.json`: put it in the macOS Keychain.
 
 ```bash
 security add-generic-password -a "$USER" -s octy-mcp -w   # prompts for the key
 ```
 
-**Claude Code** — a `headersHelper` script runs on every connection and never stores the key in the config file:
+A `headersHelper` script runs on every connection:
 
 ```sh
 #!/bin/sh
@@ -128,14 +187,13 @@ printf '{"Authorization":"Bearer %s"}' "$(security find-generic-password -s octy
 claude mcp add-json --scope user octy '{
   "type": "http",
   "url": "https://octy.loanlight.com/api/mcp",
-  "headers": { "X-Octy-Operator": "you@loanlight.com" },
   "headersHelper": "~/.claude/octy-mcp-headers.sh"
 }'
 ```
 
-Install the skills with `/plugin install ll@loanlight`: `/ll:octy-load`, `/ll:octy-rca`, `/ll:octy-fix`, `/ll:octy-adhoc`, `/ll:octy-renew`, `/ll:octy-complete`.
+Install the skills with `/plugin install ll@loanlight`: `/ll:octy-load`, `/ll:octy-rca`, `/ll:octy-fix`, `/ll:octy-adhoc`, `/ll:octy-renew`, `/ll:octy-complete`, `/ll:octy-record`.
 
-**Codex** (`~/.codex/config.toml`) reads the key from an environment variable; export it from the Keychain in your shell profile instead of pasting it:
+**Codex** (`~/.codex/config.toml`) reads the key from an environment variable; export it from the Keychain in your shell profile:
 
 ```bash
 export OCTY_MCP_API_KEY="$(security find-generic-password -s octy-mcp -w)"
@@ -145,26 +203,40 @@ export OCTY_MCP_API_KEY="$(security find-generic-password -s octy-mcp -w)"
 [mcp_servers.octy]
 url = "https://octy.loanlight.com/api/mcp"
 bearer_token_env_var = "OCTY_MCP_API_KEY"
-http_headers = { "X-Octy-Operator" = "you@loanlight.com" }
 ```
 
-Install the skills with `bash install.sh` in `loanlight-codex-skills`: `$octy-load`, `$octy-rca`, `$octy-fix`, `$octy-adhoc`, `$octy-renew`, `$octy-complete`.
+Install the skills with `bash install.sh` in `loanlight-codex-skills`: `$octy-load`, `$octy-rca`, `$octy-fix`, `$octy-adhoc`, `$octy-renew`, `$octy-complete`, `$octy-record`.
 
-**Local Octy.** Set `OCTY_MCP_API_KEY` in `.env.local`, make sure your email is in `src/lib/github/team.ts`, and point the URL at `http://localhost:7873/api/mcp`. To smoke-test:
+**Local Octy.** Apply loanlight-api's migrations to your dev database, create a key on `http://localhost:7873/api-keys`, and point the URL at `http://localhost:7873/api/mcp`. To smoke-test:
 
 ```bash
 npx @modelcontextprotocol/inspector --cli http://localhost:7873/api/mcp \
-  --transport http --header "Authorization: Bearer $OCTY_MCP_API_KEY" \
-  --header "X-Octy-Operator: you@loanlight.com" --method tools/list
+  --transport http --header "Authorization: Bearer $OCTY_MCP_KEY" \
+  --method tools/list
 ```
 
 ## Deploying
 
-Create the secret in each account **before** the first deploy that includes this change, or the ECS task will not start:
+`octy_api_keys` and `octy_run_events` arrive by a loanlight-api migration (0142) that may not be deployed yet:
+
+- Without `octy_api_keys`, only the legacy shared key works, and the **API Keys** page shows a feature-unavailable notice.
+- Without `octy_run_events`, events go to the `[run-event]` log line only, and the Activity timeline says the log is not available here (not "no activity").
+
+The ECS task still reads the legacy `Octy/McpApiKey` secret. It must exist in each account or the task will not start:
 
 ```bash
 aws secretsmanager create-secret --name Octy/McpApiKey --secret-string "$(openssl rand -hex 32)"
 ```
+
+## Transport
+
+Streamable HTTP, stateless, JSON responses only (`src/lib/mcp/protocol.ts`, `src/app/api/mcp/route.ts`):
+
+- `POST /api/mcp` accepts one JSON-RPC message or a batch.
+- Notifications get `202`.
+- `GET` and `DELETE` get `405`: there is no server-initiated stream and no sessions.
+
+Being stateless matters because Octy runs several ECS tasks behind one ALB; the run token lives in the database, so any task can validate it. Supported protocol versions: `2025-06-18`, `2025-03-26`, and `2024-11-05`.
 
 ## Related
 
@@ -178,7 +250,7 @@ aws secretsmanager create-secret --name Octy/McpApiKey --secret-string "$(openss
   <Card title="Bug reports console" href="/octy/bug-reports-console" icon="bug">
     Where you find and triage the issues MCP runs work.
   </Card>
-  <Card title="Environment variables" href="/octy/environment-variables" icon="settings">
-    `OCTY_MCP_API_KEY` and related secrets.
+  <Card title="Agent platform schema" href="/data-model/agent-platform-schema" icon="boxes">
+    `octy_api_keys` and `octy_run_events` table definitions.
   </Card>
 </Columns>

@@ -207,6 +207,58 @@ PK `(experiment_id, audit_run_id, agent_type)`. A partial unique index `uq_llm_e
 
 `octy_runs.issue_id` is now nullable. A new `experiment_id` column (FK → `llm_model_experiments`, ON DELETE CASCADE) was added. A CHECK constraint enforces exactly one parent: `(issue_id IS NOT NULL AND experiment_id IS NULL) OR (issue_id IS NULL AND experiment_id IS NOT NULL)`. An Oz run hangs off either a bug report or a promotion experiment — never both, never neither.
 
+## Octy MCP tables (migration 0142)
+
+Two tables added by migration `0142_octy_api_keys_and_run_events.sql` (LOA-3149) back the per-caller API key model and the activity trail for the Octy MCP server. See [Octy MCP server](/octy/mcp-server) for the full feature description.
+
+### octy_api_keys
+
+Each row is a principal of the MCP server — a local engineer, a cloud runner (Warp, Hermes), or any other caller. Only the SHA-256 of the key is stored. Keys are revoked, never deleted, so the `octy_run_events` activity trail keeps naming them after revocation.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | Default `gen_random_uuid()`. |
+| `name` | `text` NOT NULL | Human label for the key. |
+| `kind` | `text` NOT NULL | `local`, `warp`, `hermes`, or `other`. |
+| `owner_name` | `text` | Optional display name of the key owner. |
+| `owner_email` | `text` | Owner's LoanLight email; used as the operator identity on runs and events. |
+| `key_prefix` | `text` NOT NULL | First 12 characters of the raw key (`octy_…`), stored for display. |
+| `key_hash` | `text` NOT NULL | SHA-256 of the raw key. UNIQUE. |
+| `scopes` | `text[]` NOT NULL | Allowed scopes (`reports:read`, `runs:start`, `runs:work`, `runs:complete`, `runs:renew`, `runs:record`). |
+| `verify_pull_requests` | `boolean` NOT NULL | Default `true`. When on, `octy_record_run` verifies PR URLs with the GitHub App before writing. |
+| `created_by` | `text` NOT NULL | Octy user who created the key. |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+| `updated_at` | `timestamptz` NOT NULL | Default `now()`. |
+| `last_used_at` | `timestamptz` | Stamped at most once per minute per key (`touchApiKey`). |
+| `revoked_at` | `timestamptz` | Set on revocation; never deleted. |
+| `revoked_by` | `text` | Who revoked the key. |
+
+Indexes: UNIQUE `uq_octy_api_keys_key_hash` on `(key_hash)`, INDEX `idx_octy_api_keys_created_at` on `(created_at)`.
+
+### octy_run_events
+
+The Octy activity trail — one row per operation on a bug report or run. Records every MCP tool call, every `/api/oz/tools/*` call, every dispatch and **End run** from the web app. Never holds a token or row data; `detail` carries allowlisted arguments only.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | Default `gen_random_uuid()`. |
+| `run_id` | `uuid` | FK `octy_runs(id)` ON DELETE CASCADE. Nullable — events tied to an issue but no run (e.g. `octy_get_issue`) carry only `issue_id`. |
+| `issue_id` | `uuid` | FK `octy_issues(id)` ON DELETE CASCADE. Nullable on run-only events. |
+| `api_key_id` | `uuid` | FK `octy_api_keys(id)` ON DELETE SET NULL. Null for legacy shared-key calls. |
+| `actor` | `text` NOT NULL | The key owner's email, the key's name, or the Octy web user. |
+| `actor_kind` | `text` NOT NULL | `local`, `warp`, `hermes`, `legacy`, or `web`. |
+| `surface` | `text` NOT NULL | `mcp`, `http`, or `web`. |
+| `tool` | `text` NOT NULL | MCP tool name (e.g. `octy_get_issue`), Oz route (e.g. `oz.complete`), or web action (e.g. `web.dispatch`). |
+| `operation` | `text` NOT NULL | `read`, `write`, or `lifecycle`. |
+| `outcome` | `text` NOT NULL | `ok`, `PR_NOT_FOUND`, or another error code. |
+| `target` | `text` | Dataset name, ticket identifier, or PR URL. |
+| `detail` | `jsonb` | Allowlisted arguments only. |
+| `row_count` | `integer` | Rows returned, for dataset reads. |
+| `duration_ms` | `integer` | Call duration. |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+
+Indexes: `idx_octy_run_events_run_id` on `(run_id, created_at)`, `idx_octy_run_events_issue_id` on `(issue_id, created_at)`, `idx_octy_run_events_api_key_id` on `(api_key_id)`.
+
 ## appraisal_runs link
 
 Migration `0203` adds `appraisal_runs.audit_run_id` (`uuid`, nullable, FK `audit_runs(id)` ON DELETE SET NULL) so the appraisal agent attaches to its parent audit run. Legacy rows stay NULL, and a `createUpdatedRun` revision legitimately shares its parent's `audit_run_id` (so there is no partial-unique). Indexes: `idx_appraisal_runs_audit_run_id` on `(audit_run_id)` and `idx_appraisal_runs_loan_audit` on `(loan_id, audit_run_id)`.
