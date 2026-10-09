@@ -31,7 +31,16 @@ Runs `ValidationService.validate` against the extracted statements and writes a 
 Calls `CategorizationService.categorizeStatement` (Plaid PFC enrichment) for each statement. Writes `enrichments`, `categorized`, `failed`, and `skipped` onto state.
 </Accordion>
 <Accordion title="detectFraud">
-Runs PDF-integrity and font-consistency fraud checks. PDF bytes arrive via `deps.readPdfBySourceKey(s3Key)`, which resolves the worker's already-downloaded temp file — **not** an S3 re-fetch. Attribution is file/s3Key-keyed, not statement-keyed (one PDF can produce multiple statements). Returns `fraudFindings`.
+Runs PDF-integrity and font-consistency fraud checks. PDF bytes arrive via `deps.readPdfBySourceKey(s3Key)`, which resolves the worker's already-downloaded temp file — **not** an S3 re-fetch.
+
+Since LOA-2831, each check is per-file and honest about failures:
+
+- **PDF integrity** (`detectFraud/node.ts`): each flagged file gets its own `fraud_pdf_integrity` finding row carrying only that file's signals, its statement span, and `sourceS3Key`. A check that throws instead of succeeding persists one `integrity_check_unverified` row (severity `info`, `evidence.check = "pdf_integrity"`) — never a `critical` fraud finding.
+- **Font consistency**: a font-extraction that throws, or a profile in which no font resolved and at least one page failed or had text whose fonts never resolved, persists one `integrity_check_unverified` row (`evidence.check = "font_consistency"`, `evidence.reason = "unreadable" | "fonts_unnamed"`) — but only when the file's bank has another file in the run to compare against. A lone file whose extraction throws writes no row.
+- **`integrity_check_unverified`** rows are excluded from the export risk summary, the AI summary prompt, the Issues Found table, and warning counts. The export Risk Summary renders them as **COULD NOT CHECK**.
+- **`sourceS3Key` / `sourceS3Keys`** are dropped from all served evidence (`/findings`, `/findings/:findingId`, `/export`, `listFindings`) — only file names are served to callers.
+
+Results are exposed through `GET /api/v1/audit_runs/:id/document_integrity` (`DocumentIntegrityReaderService`), which returns structured signals (embedded JavaScript, overlay annotations, font deviation), unverified entries, and a section status from the bank-statement ledger.
 </Accordion>
 <Accordion title="classifyDeposits">
 Classifies each extracted deposit (`deposit_classification`) by `borrowerType`. Pure; no I/O.
@@ -161,6 +170,46 @@ If classification metadata is missing, incomplete, or contradictory, the worker 
 | `source_documents` | `jsonb` | `BankStatementSourceDocument[]` — the classify-split metadata for each uploaded PDF, including segment page ranges, account periods, and classification confidence. Populated by the worker before extraction. |
 | `document_coverage` | `jsonb` NOT NULL | `BankStatementDocumentCoverage[]` — one entry per source document recording whether it was `parsed`, `partially_parsed`, `reused`, or `skipped`, plus which accounts/months covered it. Written by the worker at extraction time and exposed in the portal for reviewer visibility. |
 | `analysis_processing_started_at` | `timestamptz` | Set when the worker claims the job, used for deadline monitoring (migration 0140). |
+
+## EDU-07 income gate (LOA-2932)
+
+EDU-07 gates bank-statement income on **shared evidence records** before the
+agent reports income as complete. On an audit-bound, evidence-enabled audit the
+gate reads EDU-05's statement obligations and EDU-06's declared conflicts from
+the shared observation ledger. Income is `complete` only when every required
+statement obligation is satisfied by the statements the calculation actually
+consumed. Otherwise every consumer surface shows income as `preliminary` with
+named reasons.
+
+**What `preliminary` means on each surface:**
+- Audit results, the partner wire, and the viewer `calculations` / `summary` /
+  `findings` routes withhold income-derived figures.
+- The PDF / Excel export labels the document with a
+  `PRELIMINARY QUALIFIED INCOME CALCULATION` title and banner; the figures are
+  printed but clearly flagged.
+
+**Gate ledger.** EDU-07 appends rows to `evidence_observation_generations` with
+`adopter = 'EDU-07'` and a `bank_statement_income_gate` capture-status slot.
+Migration `0143_edu07_income_gate_ledger` adds the `income_gate_record` column
+and widens the adopter, item-kind, and outcome CHECKs.
+
+**When the gate fires.** Publication happens once per audit when the
+bank-statement agent completes. A gate-on audit with no committed generation
+reads `preliminary` (`gate_generation_missing` / `gate_generation_unfinished` /
+`gate_generation_failed` by slot state). The gate also reads `preliminary` when:
+- A credit with an unverified statement period sits on a qualifying statement.
+- EDU-05 requirements have not been committed before the bank-statement agent
+  completes (reads `requirements_not_ready` on the EPC lane, where the income
+  worker runs before Doc Health).
+- A gate-read date is not in an accepted form.
+- A qualifying statement's PDF is outside the audit's snapshot (`inventory_incomplete`).
+
+**A later recalculation** makes an earlier generation read `stale`; the stored
+generation itself is never rewritten.
+
+**Gate is internal/shadow.** Production makes no gate query until the feature is
+enabled. The gate is gated by the audit-bound evidence path — it is off for
+audit runs where evidence is not enabled.
 
 ## Parity with the legacy pipeline
 

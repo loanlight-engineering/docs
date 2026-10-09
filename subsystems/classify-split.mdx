@@ -136,6 +136,63 @@ A resumed run (`forceReclassify` plus an existing `audit_run_id`) keeps its **pe
 deletes the prior `document_classifications`, and resets the run to `running` — so a single run never
 splits across two mode behaviors.
 
+## Document consolidation (LOA-2876)
+
+After Phase 2 classifies every segment, a **consolidation pass** decides, per
+source PDF, which classified segments belong to the same final document — for
+example, a credit report split into three pieces, or an appraisal package filed
+alongside its score disclosure. Three nodes sit between the e-sign fold and
+extraction in the Pre-Audit-Classification agent:
+
+```text
+prepareConsolidation → consolidateSource ×N → storeConsolidation
+```
+
+Each node catches its own errors and settles an undecidable source PDF as one
+document per segment, so consolidation cannot fail a run.
+
+**This is additive.** Encompass folder delivery, PII, Document-Health, and every
+audit agent keep reading the original `document_classifications` segments unchanged.
+The grouping is stored alongside them in the consolidation tables and shown in
+Octy only — so it can be verified before anything is switched to it.
+
+**Gating.** The pass runs only for lenders with the `document_consolidation`
+per-lender feature flag on. With it off the three nodes pass straight through
+and decide nothing. There is no environment-level kill switch.
+
+**The decision.** For each source PDF the model step
+(`documentConsolidation.reconcileSegments`, `claude-sonnet-5`, up to 3 turns)
+reads the file's manifest and pre-loaded pages, and proposes a grouping against
+the published policies. Code validates every proposal: an anchor segment must
+carry a main label, every member needs a cited page of its own, pages must be
+continuous, and serial documents are never merged.
+
+**Serial protection (`protected_serial`).** Bank statements, tax returns,
+mortgage and HELOC statements, paystubs, W-2s, leases, insurance policies
+(hazard, flood, HOI, master), URLA, P&L statements, and LES are never merged —
+whether the model proposes it or an operator tries to force it in Octy. Any
+segment filed in the `BANK_STATEMENT` or `TAX_RETURNS` category is protected
+regardless of its `classification_type` label.
+
+**Budget cap.** At most 25 source PDFs per run go to the model
+(`MAX_MODEL_SOURCES_PER_RUN`), so a run makes at most 75 model calls. Sources
+past the cap keep their segments as-is, flagged `budget_exhausted`. A source
+answered from a previously committed decision does not count against the cap.
+
+**Seeded policies.** Migration `0150_seed_document_consolidation_policies` seeds
+five starter policies on deploy: credit report package, appraisal report,
+purchase agreement, brokerage statement, and flood certificate. The seed is
+idempotent and leaves any existing policy name alone. Because the policy
+configuration hash is computed at runtime over the live taxonomy, the seed
+cannot publish itself — `ConsolidationSeedPublisher` publishes the seeded drafts
+once on startup, only if the environment has never published and every stored
+revision is an untouched seed draft.
+
+Operators write and publish policies in Octy at
+[Classify & Split → Consolidation](/octy/classify-split-config#consolidation).
+For the storage schema see
+[classify-split data model — document consolidation](/subsystems/classify-split-data-model#document-consolidation).
+
 ## Downstream consumers
 
 - **Classifications API** — `GET /api/v1/audit_runs/:id/classifications` and

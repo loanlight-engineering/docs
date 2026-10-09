@@ -173,6 +173,97 @@ All four jsonb columns have size CHECKs (`pg_column_size ≤ 1 MiB` for `base_co
 
 See [Taxonomy staging](/octy/classify-split-config#taxonomy-staging-loa-2564) for how this table is used.
 
+## Document consolidation
+
+Added by LOA-2876. These tables store the grouping decisions alongside
+`document_classifications`. They live in
+`database/schema/document-consolidation.ts` (API) and are declared
+`.existing()` in Octy's schema so Octy can read them without owning the
+migrations.
+
+**`classify_split_runs` gains one column** (`0152_classify_split_runs_consolidation_attempt`):
+`consolidation_attempt` (integer NOT NULL default 0). It is incremented on a
+forced reclassify. Every worker checks it before settling or claiming a
+revision, so a stale concurrent worker from an earlier attempt cannot overwrite
+the current grouping.
+
+### document_consolidation_policies
+
+One row per consolidation policy (draft or finalized).
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `name` | text NOT NULL unique — human name for the policy |
+| `description` | text |
+| `enabled` | boolean NOT NULL — whether included in a published configuration |
+| `apply_merges` | boolean NOT NULL — if false, merges are proposed but not applied |
+| `main_labels`, `continuation_labels`, `companion_labels` | text[] — the classification labels this policy joins |
+| `join_when`, `keep_separate_when`, `when_not_clear` | text — evidence fields rendered into the model prompt |
+| `revision` | integer — draft revision counter |
+| `status` | text CHECK `draft \| published \| discarded` |
+| `created_at`, `updated_at` | timestamps |
+
+Policy examples are stored in a companion `document_consolidation_policy_examples` table but are **not** pinned into a published configuration and **not** sent to the model — the model decides from the labels and evidence fields alone.
+
+### document_consolidation_configurations
+
+A pinned bundle of policies published together. A `classify_split_runs` row
+pins the active configuration at run creation time
+(`classify_split_runs.pinned_consolidation_config_id`); a later publish rewrites
+nothing already decided.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `policy_ids` | text[] — snapshot of enabled policy IDs at publish time |
+| `policy_hash` | text — SHA of the bundle; deterministic for the same policies |
+| `published_at` | timestamp |
+
+### document_consolidation_revisions
+
+One append-only row per grouping decision (one per source PDF per run attempt).
+Human edits are stored as a new revision copied from the current one; nothing
+is edited in place. A 409 conflict is returned if the base revision changed
+before an edit arrived.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `classify_split_run_id` | FK `classify_split_runs` |
+| `loan_document_id` | FK `loan_documents` |
+| `attempt` | integer — matches `classify_split_runs.consolidation_attempt` at decision time |
+| `consolidation_state` | text CHECK `pending \| running \| complete \| failed` |
+| `groups` | jsonb — the final grouping: anchor segment, member segments, evidence citations, review flag, policies applied |
+| `outcome` | text CHECK `decided \| single_segment \| budget_exhausted \| error` |
+| `requires_review` | boolean NOT NULL |
+| `created_at`, `updated_at` | timestamps |
+
+### consolidation_page_evidence
+
+The pages the model was given for each source PDF, in delivery order. Kept for
+operator review and served by the `GET /internal/consolidation/…/page-evidence`
+endpoint.
+
+<Warning>
+`consolidation_page_evidence.body` stores each page's full extracted text,
+which carries borrower PII. Production does not hard-delete `loan_documents`
+rows, so the text is retained for the document's lifetime. No retention job was
+added in LOA-2876.
+</Warning>
+
+### effective_document_classifications (view)
+
+Defined in migration `0148_effective_document_classifications_view`. For runs
+that have a stored grouping, each row is one final (consolidated) document,
+spanning one or more original segments. For runs with no grouping, the view
+returns the original `document_classifications` rows unchanged.
+
+The view is declared `.existing()` in Octy's Drizzle schema — loanlight-api's
+migrations own it; Octy never creates or alters it. Octy reads it through
+`src/lib/consolidation/final-documents.ts` behind a schema-presence gate
+(`consolidationSchemaDeployed`).
+
 ## Dry-runs write real rows
 
 octy dry-runs (`POST /internal/dry-run/classify-split`) run the real agent against a tracked loan

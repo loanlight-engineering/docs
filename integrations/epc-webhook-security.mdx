@@ -125,6 +125,37 @@ The UTC day boundary means a non-UTC server would miscount around midnight.
 `DEVCONNECT_RESOURCE_OWNER_CREDENTIALS` (throwing if that env var is missing). It is a no-op in
 real AWS environments.
 
+## EPC webhook Lambda authorizer (production EPC path, LOA-3127)
+
+The production EPC integration also has an API Gateway Lambda authorizer
+(`shared-lambda-auth@0.3.2` in `loanlight-shared`, `src/encompass/index.ts`).
+This is separate from the legacy LOS interceptors above. Changes in LOA-3127
+tighten its security:
+
+- **Route scope.** `Elli-Signature` and `Elli-SubscriptionId` headers now
+  authorize **only** the two EPC webhook routes (`POST
+  /integrations/webhooks/transactions` and `POST
+  /integrations/webhooks/events`), matched exactly. Any other method or path
+  carrying `Elli-*` headers falls through to JWT auth and logs a warning.
+- **Method-scoped allow policy.** `createMethodAllowPolicy` sets `Resource` to
+  the request's `methodArn` (not the stage-wide wildcard `{api}/{stage}/*`). A
+  cached allow on one route can no longer be reused on another. Result caching
+  is off (`resultsCacheTtl: 0`).
+- **Subscription ID must be configured.** `handleEncompassWebhookAuth` looks up
+  `Elli-SubscriptionId` in `ENCOMPASS_WEBHOOK_KEYS` (cached 5 min) and denies
+  any entry missing an `instanceId`. A failed load, unparseable JSON, or
+  non-object JSON denies the request and retries on the next call (not cached).
+- **HMAC signature is not verified in the authorizer.** API Gateway Lambda
+  authorizers do not receive the request body, so HMAC cannot be checked here.
+  `VerifyElliSignatureMiddleware` in the integrations service performs the
+  signature verification on the two webhook routes.
+
+<Note>
+The API handler keeps its own separate webhook branch (subscription lookup,
+stage-wide policy, no path check). That path serves Dev Connect, which is
+retired. LOA-11 removes it.
+</Note>
+
 ## Related
 
 <Columns cols={2}>

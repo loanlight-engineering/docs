@@ -42,7 +42,18 @@ Each message flows through the same handler:
 </Steps>
 
 <Note>
-`stop()` is called bare (never `{ abort: true }`) on shutdown, so an in-flight audit running 40 minutes deep is not killed mid-run. `AuditQueueConsumers` no longer registers through `SqsModule` (`@ssut/nestjs-sqs`) because that module cannot run N consumers against one queue without N distinct names; the `documents.materialized` leg remains unchanged in `SqsModule`.
+`stop()` is called bare (never `{ abort: true }`) on shutdown, so an in-flight audit running 40 minutes deep is not killed mid-run.
+
+Since LOA-3120, both SQS queues (`audit-requested-events` and
+`documents-materialized`) use a single platform consumer, `SqsConsumerHost`
+(`messaging/sqs-consumer-host.ts`). Each feature calls `host.consume({ queue,
+queueUrlEnv, schema, handle, visibilityTimeoutSeconds })` in its own
+`onModuleInit` and receives a validated payload; the host owns the
+`@aws-sdk/client-sqs` transport, envelope parsing, schema validation, task
+protection, and drain/resume lifecycle. `@ssut/nestjs-sqs` has been removed.
+Envelope or schema failures log `{ queue, messageId, stage }` and throw a
+content-free `SqsMessageRejectedError` so the message redrives to the DLQ
+without logging message content.
 </Note>
 
 ### Request shape — `IntegrationAuditRequestSchema`

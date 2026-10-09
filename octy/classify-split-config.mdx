@@ -80,6 +80,77 @@ The old sample-based eval path (`run-eval.ts` / `EvalReportPanel`) was removed. 
 
 **Discard** marks the draft `discarded` and writes a `pending_change_discarded` audit row that records the diff summary, blocker/warning counts, and the eval verdict if one was run. Discards are audited because a deliberately rejected taxonomy change is often the most informative decision in the config history.
 
+## Consolidation
+
+**Classify & Split → Consolidation** (`tabs/ConsolidationTab.tsx`) is where
+operators write and publish the policies that drive document consolidation in
+loanlight-api. A policy names existing classification labels in three roles —
+main document, may continue it, may accompany it — and supplies three evidence
+fields (join when, keep separate when, when it is not clear). The model reads
+these fields; examples are stored on each policy but never included in a
+published bundle and never sent to the model.
+
+A lender takes part when its `document_consolidation` feature flag is on (Lenders
+→ the lender → Feature Flags). There is no environment-level kill switch.
+
+### Policy lifecycle
+
+Everything is a draft until **Publish**, which turns every open draft into one
+new configuration. A run pins the active configuration when it is created, so
+publishing rewrites nothing already decided. **Versions** lists all published
+configurations and can make an earlier one the active one again.
+
+**Starter recipes** create draft policies from labelled production grouping
+cases — a quick starting point for common document types.
+
+The policy editor (`tabs/consolidation/PolicyEditor.tsx`) has four sections:
+identity (name, description, whether enabled, whether merges are applied or only
+proposed), its three label groups (main, continuation, companion), the three
+evidence fields, and examples (local builds only).
+
+**Split definitions backlink.** Each label in Categories & Rules shows which
+consolidation policies use it and in which role. The publish panel shows the
+Split step's own description for every category a policy binds, so policy wording
+can be checked against the split-step framing before publishing.
+
+### Deployment gates
+
+Octy and loanlight-api deploy independently. Two gates keep the tab usable across
+deployment boundaries:
+
+| Gate | What it checks | Fallback |
+|---|---|---|
+| `isMissingConsolidationEndpoint` | Did the API return a Nest missing-route 404 for an `internal/consolidation` path? | The tab and each opened accordion show a "Feature unavailable" notice with "Check again". |
+| `consolidationSchemaDeployed` | Does `effective_document_classifications` exist? | Every reader falls back to raw `document_classifications` rows; no Final / Original toggle is offered. |
+
+### Consolidation in the dry-run
+
+The Dry Run tab gains a **Document consolidation** switch (off by default) when
+the API supports it. With the switch on, a Full run sends the source PDF through
+the consolidation model and returns a **side-by-side comparison**
+(`DryRunConsolidationCompare`): without consolidation (segments in page order) on
+the left; with consolidation (final documents) on the right. Each final document
+opens into the same read-down accordion as stored runs. The switch accepts
+**Published policies** or **Drafts** — use Drafts to try a policy on a real file
+before publishing it. Nothing is persisted.
+
+### Consolidation accordions on other surfaces
+
+Wherever Octy lists a file's classified segments, a consolidated document is an
+**accordion** (`ConsolidationAccordion`): closed, it shows the final document's
+label, page range, segment count, and review flag; open, it shows the decision
+reasoning, original segments (with their roles), merges proposed but not applied,
+and the evidence pages the model read. Operator controls (keep separate, attach,
+restore boundaries, mark reviewed) sit inside the open accordion. Surfaces
+that show the accordion include the Classifications tab, the Document Explorer
+(loan lookup), the audit modal's classifications pane, and the classify-split
+runs summary strip.
+
+See the [data model](/subsystems/classify-split-data-model#document-consolidation)
+for the storage schema and
+[classify-split overview](/subsystems/classify-split#document-consolidation-loa-2876)
+for how the consolidation nodes fit into the pipeline.
+
 ## Live dry-run
 
 The Dry Run tab exercises the real loanlight-api classify-split pipeline against an uploaded document or a JSON payload, without going through the full audit flow.

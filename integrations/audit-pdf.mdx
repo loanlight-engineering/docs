@@ -184,6 +184,37 @@ interface ListingScreenshot {
 
 The package has unit tests (`*.spec.ts`) and a `preview-server.ts` script for visual checks.
 
+## EPC findings delivered alongside the PDF
+
+The encompass service evaluates a set of **EPC findings** from the audit results
+and pushes them to the Encompass transaction alongside the PDF. Findings are
+defined in `packages/encompass/src/findings/definitions/`, each keyed by a
+finding code.
+
+### LL-Data-01 — data consistency (LOA-2829)
+
+`LL-Data-01` fires when the loan file and supporting documents disagree on one
+or more fields. It delivers **one finding per audit run** (never one per field)
+listing every discrepancy.
+
+- **Title:** `[LoanLight] N data discrepancies between the loan file and documents`
+- **Body:** one line per discrepancy in the form
+  `FAIL — Loan Amount (Co-Borrower): 1003 shows 412000; Note.pdf (p. 3) shows 410500.`
+  `high` severity rows appear as FAIL; `medium` and `low` as WARNING. The list
+  is capped at 25 lines with “…and N more”.
+- **Masking:** taxpayer identifiers (SSN, ITIN, EIN, TIN) show only their last
+  four digits. Dates of birth show no value.
+- **PII suppression:** when the PII validation agent failed or never ran, the
+  finding is suppressed — a failed PII run cannot be distinguished from a clean
+  run that produced no mismatches.
+- **Registration:** `LL-Data-01` is mapped on the Int EPC product only. On prod
+  it is `not requested` and will be silently accepted and dropped by EPC if
+  delivered. Enabled per lender by the `findings_data_consistency` flag
+  (`auto` value).
+
+The finding reads `dataConsistency` from `AuditSectionsInput` — the same
+section the PDF renders in its Data Consistency section.
+
 ## How encompass consumes it
 
 The encompass `AuditReportPdfService.generate(...)` orchestrates the render:

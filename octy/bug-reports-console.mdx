@@ -29,8 +29,17 @@ Filters are URL-driven, so a filtered view is shareable:
 | Status | `status` / `intake_status` | Comma list. Default shows `new,acknowledged,delegated,ai_complete,in_review` (hides `closed`/`cancelled`). |
 | Agent | `agents` | Comma list of agent types, each normalized to its canonical `agent_type` + LangSmith aliases (catalog-tolerant), matched against `related_traces[].agent_type`. |
 | Lender | `lenders` | Comma list of lender UUIDs (resolved against `audit_runs.lender_id`). |
+| Keys | `keys` | API-key owners that have acted on the report through Octy MCP. Reports with any selected key in their activity trail are shown. No schema change — without `octy_run_events` the filter returns nothing, never everything. |
 | Search | `q` | ILIKE over loan number or `audit_run_id`. |
 | Sort | `sort` | `date_asc` or `date_desc`. |
+
+**Activity column (LOA-3149).** Each row in the issue list shows small overlapping
+initial circles representing every API-key owner (or legacy operator) that has
+ever acted on the report through Octy MCP. A live dot marks any owner with an
+open run. Hovering shows a card with each owner's email and key. Owners are
+derived from the activity trail plus local-run and follow-up markers on the
+runs themselves, so pre-trail runs still count. No new column is added; row
+height is unchanged.
 
 The default page size is 20 (options 10/20/50/100). The `StatusChangerBadge` lets you change an issue's `intake_status` inline; it PATCHes `/api/octy-issues/[id]`.
 
