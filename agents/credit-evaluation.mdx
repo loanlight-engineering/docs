@@ -89,10 +89,14 @@ A parallel loan-view computation runs after the graph for audit-driven credit ru
 <Accordion title="prepare — cross-tenant guard">
 If `loanId` is undefined, looks up the `credit_runs` row by `(pipelineId, lenderId)` and reads
 `gross_monthly_income` and `rule_set_id`. If `loanId` is set, verifies the loan is owned by the
-lender, reads `credit_report_date` and `credit_reference_number` from the `loans` row (both
-nullable; see CRED_029/030 below), and throws `CrossTenantGuardError` on mismatch. This guard
-never soft-degrades. The audit-driven path keeps the orchestrator-seeded `grossMonthlyIncome`
-but always reads the fresh credit metadata from the DB.
+lender, reads `credit_report_date`, `credit_reference_number`, `loan_type`, and
+`loan_program_name` from the `loans` row, and throws `CrossTenantGuardError` on mismatch. This
+guard never soft-degrades. The audit-driven path keeps the orchestrator-seeded
+`grossMonthlyIncome` but always reads the fresh credit metadata from the DB.
+
+`isDscrLoan({ loanType, loanProgramName })` sets graph state field `dscrLoan: boolean | undefined`:
+`true` when the loan is a DSCR program, `undefined` (not `false`) otherwise — a defined
+`false` would turn CRED_001's "no loan context" `SKIP` into `NEEDS_INFO`.
 </Accordion>
 <Accordion title="detectScanned — digital vs scanned">
 Loads the PDF with pdfjs and extracts text items. A page counts as "digital" when it has at
@@ -134,10 +138,19 @@ As of LOA-2188 follow-up: `buildFactsFromCandidates` no longer fabricates `repor
 Resolves `loanProgramId` for program-scoped credit rules (LOA-1080) and calls
 `evaluateWithCreditRules`. The DB evaluator is authoritative; this node does no rule-set
 pre-lookup. Returns `complianceResults`, `ruleSetId`, `ruleSetVersion`, `scopedGrossMonthlyIncome`, and `dtiIncomeSuppressed`. The node threads
-`loanAmount`, `creditReportDate`, `creditReferenceNumber`, and `applicationBorrowers` from the
-graph state into `CreditRuleContext`. `loanAmount` is used by CRED_024; `creditReportDate` and
-`creditReferenceNumber` are the assertion side for CRED_029/030; `applicationBorrowers` is the per-person
-roster used by CRED_001/002/003 for multi-borrower consistency checks (see [Multi-borrower loan view](#multi-borrower-loan-view)).
+`loanAmount`, `creditReportDate`, `creditReferenceNumber`, `applicationBorrowers`, and
+`dscrLoan` from the graph state into `CreditRuleContext`. `loanAmount` is used by CRED_024;
+`creditReportDate` and `creditReferenceNumber` are the assertion side for CRED_029/030;
+`applicationBorrowers` is the per-person roster used by CRED_001/002/003 for multi-borrower
+consistency checks (see [Multi-borrower loan view](#multi-borrower-loan-view)).
+
+**DSCR loan DTI suppression (LOA-3146).** DSCR loans qualify on property cash flow, not DTI.
+When `dscrLoan === true`:
+- **CRED_014** (DTI Ratio) and **CRED_025** (Max DTI + Residual Income) yield `SKIPPED` with
+  reason `"Not applicable: DSCR loans qualify on property cash flow, not DTI"`.
+- **CRED_024** (Credit-event Seasoning LTV Cap) ignores the `max_dti` threshold condition; the
+  LTV and loan-amount conditions still apply.
+- No `dtiRatio` is computed, persisted, or shown in the loan narrative for DSCR runs.
 
 **Per-borrower credit group DTI scoping (LOA-2741).** On a multi-application loan, the
 dispatcher hands every credit document the same loan-level `grossMonthlyIncome` because the
@@ -155,7 +168,9 @@ document's owning credit group is only knowable after that document's borrowers 
 </Accordion>
 <Accordion title="generateAiSummary — DTI and narrative">
 Computes `dtiRatio = totalMonthlyDebt / grossMonthlyIncome`, guarding `grossMonthlyIncome > 0`.
-`generateCreditSummary` produces `aiSummary` (skipped when no OpenAI client is configured).
+When `dscrLoan` is true the ratio is not computed and `dtiShown` is `false`, so DTI is omitted
+from the per-person loan narrative lines. `generateCreditSummary` produces `aiSummary` (skipped
+when no OpenAI client is configured).
 </Accordion>
 <Accordion title="aggregate — persist">
 Builds the completed payload (status `completed`, `extractedData` = facts, `complianceResults`,

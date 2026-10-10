@@ -245,7 +245,15 @@ The message names the **statement period** (not a month label), which is correct
 - Accounts with **staggered coverage** (one starts where the other ends) are treated as one continuous stream — interpreted as a bank switch.
 - Accounts with **concurrent coverage** (overlapping months) are compared over their shared window. An account is **immaterial** and dropped when its deposits represent less than 10% of the window total, or when it has deposits in fewer than a third of the shared months. Concurrent material accounts are **never summed**; the account with the larger income sets the qualifying figure, and each other account is presented as its own worksheet contributing nothing to the total.
 
-`bank_statements.income_inclusion_override` (boolean, nullable, migration `0046`) lets a reviewer override the auto-detected inclusion decision. The cross-account decision is recorded as an `account_selection` finding type (migrations `0047`/`0048` — expand/contract pair widening `finding_type_check`).
+`bank_statements.income_inclusion_override` (boolean, nullable, migration `0046`) lets a reviewer override the auto-detected inclusion decision for **both** `immaterial` and `secondary` rows (LOA-2657). Previously overrides applied only to `immaterial` statements; they now extend to the concurrent second account as well. An overruled `secondary` row stays in the `secondary` verdict so the reviewer can still see which account it came from; it does not move to `immaterial`. The `account_selection` finding gains a `reviewer_included_statement_count` field that records how many secondary-account statements the reviewer has included.
+
+The income export moves reviewer-included secondary statements off the **Second Acct** worksheet and into the primary qualifying column. The divisor (months) is a union across accounts, so two accounts covering the same 12 months still divide by 12. The portal's Second account section shows:
+- An **Include** checkbox on each statement, and a header checkbox that ticks or clears the whole section at once.
+- An instruction line (shown only on editable surfaces).
+- A live section title reading "N of M included in qualifying income".
+- A reference deposit list showing only the statements still held out.
+
+The cross-account decision is recorded as an `account_selection` finding type (migrations `0047`/`0048` — expand/contract pair widening `finding_type_check`). The `account_selection` finding's notice and reason lines read `reviewer_included_statement_count` so they no longer say a second account is "not added" once statements from it are included.
 
 **P2P sender names without "from" (LOA-2683):** `extractP2pSenderName` previously anchored on `/\bfrom\b/` only, so banks that print the sender directly after the rail (`ZELLE <NAME> <phone>`) produced no sender name and the family/self exclusion never fired. A rail-anchored parse (Zelle, Venmo, Cash App, PayPal, Popmoney, QuickPay) is now applied alongside the existing `from` parse, with a newline-tolerant anchor and middle-name reconstruction. The new parse is gated to `direction === "inbound"` — the outbound and `descriptionFirst` expense paths are unchanged.
 

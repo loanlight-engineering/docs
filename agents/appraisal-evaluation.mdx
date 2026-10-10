@@ -11,11 +11,16 @@ graph — it runs in the processor, after the graph returns.
 
 <Note>
 The graph performs extraction and enrichment only. Its output type
-(`AppraisalEvaluationGraphOutput`) carries no `complianceResults`. The processor
-(`appraisal.processor.ts`) re-runs `evaluateWithCustomRules` with its dependency-injected DB and
-persists results. `LangGraphService.createAppraisalEvaluationGraph` does **not** persist
-`appraisal_runs` — the processor does. This is a deliberate divergence from the credit agent,
-whose `aggregate` node persists.
+(`AppraisalEvaluationGraphOutput`) carries no `complianceResults`. `appraisal.processor.ts` is
+the BullMQ `@Processor("appraisal-extraction")` entry point — after LOA-2273 it is a **167-line
+facade** that delegates to four collaborator services: `appraisal-extraction-job.service.ts`
+(extraction, `processExtractionJob`, PDF review rendering), `appraisal-queue-recovery.service.ts`
+(re-enqueue, circuit snapshots, drain), `appraisal-orphan-sweep.service.ts` (orphan detection
+and reaping), and `appraisal-processor-cleanup.service.ts` (S3 download, error classification,
+field metrics). The `@Processor` decorator, queue registration, job names, retry counts, and
+backoff settings are unchanged. `LangGraphService.createAppraisalEvaluationGraph` does **not**
+persist `appraisal_runs` — the processor does. This is a deliberate divergence from the credit
+agent, whose `aggregate` node persists.
 </Note>
 
 ## How it runs
@@ -582,12 +587,29 @@ processor's DI'd DB.
 </Step>
 <Step title="Cross-document validation (step 7d)">
 Once per extraction completion (gated on `auditRunId` + `loanId`; portal-only uploads skip
-silently): retrieves three source documents — the URLA/1003 (`urla_1003` or `ed_urla`
-classification type), the 1008 Transmittal (`transmittal_1008`), and the Flood Certificate
-(`flood_certificate`) — via per-document deterministic LlamaCloud retrieval, then runs one
-structured-output extraction call per source doc (3 LLM calls/run, no LLM query planner).
-Compares 10 appraisal-extracted fields against the source values using deterministic
-normalize-then-exact TypeScript (never fuzzy).
+silently): compares 10 appraisal-extracted fields against source values using deterministic
+normalize-then-exact TypeScript (never fuzzy). Two source paths feed the validation:
+
+**MISMO application data (LOA-3162):** Occupancy and unit-count comparisons read the primary
+borrower's stored `urla_extraction_results` (Section 4), scoped to the current audit and loan.
+This replaces the earlier `urla_1003` LlamaCloud PDF retrieval for those two checks. A late
+appraisal uses its own audit's application, never a newer audit's. Missing extraction silently
+skips the application comparisons. Previously persisted `urla_1003` source rows remain readable;
+new collections never create them. Application findings are labelled "Loan application" and carry
+no file or page citation.
+
+**LlamaCloud document retrieval:** Two document types are still retrieved per-document via
+deterministic LlamaCloud retrieval, each producing one structured-output LLM call:
+- 1008 Transmittal (`transmittal_1008`): loan purpose, occupancy, appraised value, appraiser license.
+- Flood Certificate (`flood_certificate`): SFHA indicator, FEMA flood zone, map number, map date.
+
+<Note>
+**UAD 3.6 flood coverage gap:** The five UAD 3.6 Reducto contracts and the 3.6 XML mapper
+currently supply only SFHA, not the FEMA zone, map number, or map date. Consequently
+`XDOC-FEMA-FLOOD-ZONE`, `XDOC-FEMA-MAP-NUMBER`, and `XDOC-FEMA-MAP-DATE` skip on UAD 3.6
+appraisals even when flood-certificate quote extraction succeeds. UAD 2.6 extraction carries all
+four fields.
+</Note>
 
 Disagreements surface as `XDOC-*` **`complianceResults` rows** (outcome `WARNING`, category
 `Cross-Document Validation`) — not as findings. This mirrors the `DIFF_*` pseudo-rule
@@ -611,9 +633,13 @@ compliance rows now flow through `audit-results` and the partner API projection.
 nine-bucket `totalIssues` count is move-neutral — a mismatch counts once whether it lives in
 `findings` or `complianceResults`.
 
-Two Datadog monitors cover the cross-document collection path (LOA-2038):
-- `appraisal-xdoc-collection-failed` — fires when `@event:appraisal.cross_doc_collection_failed` appears in prod logs; indicates the source collection step threw before storing anything, so all cross-doc validations yield no findings for that run.
-- `appraisal-xdoc-occupancy-unreadable` — fires on `@event:appraisal.cross_doc_occupancy_unreadable`; indicates the URLA occupancy field was not extractable from the source document, which prevents the occupancy cross-doc check from running.
+Six Datadog monitors cover the cross-document validation path:
+- `appraisal-xdoc-collection-failed` — fires when `@event:appraisal.cross_doc_collection_failed` appears in prod logs; indicates the source collection step threw before storing anything, so all cross-doc validations yield no findings for that run. (LOA-2038)
+- `appraisal-xdoc-occupancy-unreadable` — fires on `@event:appraisal.cross_doc_occupancy_unreadable`; indicates the URLA occupancy field was not extractable, preventing the occupancy cross-doc check. (LOA-2038)
+- `appraisal-xdoc-source-retrieval-failed` — fires on LlamaCloud document retrieval failures for the 1008 or flood certificate. (LOA-3162)
+- `appraisal-xdoc-application-read-failed` — fires when reading the stored MISMO application data fails, preventing the application-side occupancy or unit-count checks. (LOA-3162)
+- `appraisal-xdoc-1008-quotes-withheld` — fires when the 1008 Transmittal quote gate withholds extracted values before the LLM call. (LOA-3162)
+- `appraisal-xdoc-flood-quotes-withheld` — fires when the flood-certificate quote gate withholds extracted values. (LOA-3162)
 </Step>
 <Step title="Write the run">
 Writes `appraisal_runs` with `extractedData`, `complianceResults`, `findings`, coverage fields,

@@ -25,14 +25,8 @@ Under `app/`:
 
 | Route | Purpose |
 |---|---|
-| `/` | Home — routes to `NewAudit` / `AuditRunning` / `AuditError`, or redirects to `/audit` on `Complete`, based on `originResponse.auditDetail.auditState`. |
-| `/audit` | Results overview. |
-| `/audit/credit-liabilities` | Credit and liabilities results. |
-| `/audit/1003-check` | URLA (Form 1003) completeness. |
-| `/audit/document-health` | Document health results. |
-| `/audit/properties-check` | Property data results. |
-| `/audit/data-consistency` | PII / data-consistency results. |
-| `/audit/bank-statements` | Bank-statement income review — embeds the portal `/results` income section in an iframe (`embedContext=iframe&section=income`). Only rendered when the lender holds a `bankStatementIncome` entitlement and the EPC audit was enrolled for BSI (LOA-1951). |
+| `/` | Home — routes to `NewAudit` / `AuditRunning` / `AuditError`, or redirects to `/audit/embed/` on `Complete`, based on `originResponse.auditDetail.auditState`. |
+| `/audit/embed/` | Audit results — mints a one-shot exchange token via `GET /integrations/audits/:auditId/external-url?embedContext=iframe&layout=full`, then renders the full portal audit view inside a sandboxed `<iframe>`. Falls back to an `AgentNotRunCard` if minting fails, with a **Retry** button. See [Audit results embed](#audit-results-embed-loa-285629513019-3071). |
 | `/design-system` | Component gallery (non-prod). |
 
 ## The two backends it talks to
@@ -48,50 +42,23 @@ Via `audit-api.service.ts`, against `NEXT_PUBLIC_LL_WEB_AUS_API_HOST`. It calls 
 </Tab>
 </Tabs>
 
-## Appraisal rental data (LOA-1955)
+## Audit results embed (LOA-2856/2951/3019/3071)
 
-The appraisal review surface now renders **STR and LTR rental data** from the `rentalData` field of `PortalAppraisalPayload`. Two shared-ui components drive the display:
+On a completed audit, the plug-in redirects to `/audit/embed/`. That page mints a one-shot exchange token via `GET /integrations/audits/:auditId/external-url?embedContext=iframe&layout=full`, then renders the full portal audit view — sidebar, all sections, key-field review — inside a sandboxed `<iframe>` (`AuditResultsFrame`). This is the **only** audit-results path: the previous per-section pages (`/audit`, `/audit/credit-liabilities`, `/audit/document-health`, etc.) and the `MergedAuditSidebar` component were **removed in LOA-3071**. Those pages duplicated the portal's unified per-section components; the shared components are now the single source of truth.
 
-- **`AppraisalRentalMarketCard`** — STR aggregate performance card (monthly/annual revenue, occupancy, sample size) from Mashvisor's lookup endpoint.
-- **`AppraisalRentComparablesTable`** — merged comps table: the 1025 income-approach rent comparables (from the appraisal form) plus Mashvisor LTR comps as additional rows. STR comps are shown in a separate card.
+The portal mints the exchange URL when `embedContext=iframe`. Adding `layout=full` to the token payload unlocks the full sidebar layout and all audit sections inside the iframe. The `HostBridgeProvider` accepts `postMessage` calls only from the origin in `ENCOMPASS_HOST_ORIGIN` and applies Partitioned (CHIPS) cookies for cross-site embedding. `useEpcActionBridge` wires the iframe ref to the EPC action bridge so the host and the embedded portal can communicate.
 
-These components live in `@loanlight-engineering/shared-ui/audit/appraisal` (LOA-1953). The integrations frontend plugin imports them from `shared-ui` and feeds them the `rentalData` payload from `GET /api/v1/audit_runs/:id/appraisal`. `rentalData` is `null` when the run was not rental-gated (non-DSCR / non-Form-1025 appraisals); both components render nothing in that case. The EPC appraisal surface strips internal diagnostic fields (`_`-prefixed) before the data reaches the wire — see [Appraisal-Evaluation agent](/agents/appraisal-evaluation#epc-audit-path-loa-1675).
-
-## Credit and liabilities
-
-The `/audit/credit-liabilities` route renders the shared `CreditLiabilitiesView` from `@loanlight-engineering/shared-ui/audit`, fed by `AuditApiService.getCreditData` (`GET /api/v1/audit_runs/{id}/credit`). The sidebar nav item and the Overview card are shown when `creditData` is a non-empty array (LOA-1722: the `credit-liabilities` PostHog flag was removed; the section now gates purely on data presence).
-
-The sidebar (`MergedAuditSidebar`) lists, in order: **Overview**, **Data Consistency**, **Document Health**, **Properties Check** (flagged on `properties-check`), **Credit & Liabilities** (data-presence gate: `!!creditData?.length`), **Appraisal** (data-presence gate: `appraisalData != null`), **Bank Statements** (LOA-1951: shown when `bankStatementIncome` ran, is pending, or failed — `sectionDidRun || bsiLedger.pending || bsiLedger.failed`). Credit & Liabilities moved after Properties Check. The 1003-check is a route but not a sidebar item.
-
-The Document Health card on the Overview route now displays the **estimated closing date** when `auditData.summary.estimatedClosingDate` is present (LOA-1875). The date is parsed from `YYYY-MM-DD` using the numeric constructor (local time, no UTC day-shift) and validated against calendar roll-over before rendering; an invalid or absent date renders nothing. The integrations frontend plugin reads this from the same `audit_runs.summary` payload the portal uses, so the two UIs stay in sync.
-
-<Note>
-LOA-1722 removed the `appraisal` and `credit-liabilities` PostHog feature flags. Both sections are now gated on whether an agent run exists for the loan — entitlement is enforced server-side at run creation, so an unentitled lender never gets a run and the section stays hidden without a client-side flag.
-</Note>
-
-<Note>
-The appraisal issue count on the sidebar badge (`countAppraisalFindings`) was corrected in LOA-1995. It now reads `complianceResults` (the rules engine) and counts `FAIL` + `WARNING` outcomes. The old path read the enrichment `findings` array, which is legitimately empty on most runs and produced false all-clear badges. Pre-migration-0021 runs where `complianceResults === null` fall back to `findings.length`. Credit issue count is FAIL-only on the badge; `WARNING`, `NEEDS_INFO`, `PASS`, and `SKIPPED` are excluded. The detail `CreditLiabilitiesView` still lists both FAIL and WARNING.
-</Note>
-
-<Note>
-The appraisal review PDF is filed into the Encompass eFolder on every completed audit regardless of the lender's `document_push` flag (LOA-1993). For `document_push`-enabled lenders it routes to the `appraisal_review_summary` container (seeded by migration 020). For non-routed lenders it travels as a bare "AUS Results" resource alongside the AUS report and property PDFs. The EPC inline audit surface should always find the appraisal PDF present on a complete audit.
-</Note>
-
-## Unified audit view and full-results embed (LOA-2856/2951/3019)
-
-The portal staff audit view (`/loan-audits/[auditRunId]`) and the partner results viewer (`/results/audits/[auditId]`) now share the same per-section React components. Server-side visibility logic controls which links and fields appear for each surface — corrections, audit logs, `uploader`, and `enrichmentData` are withheld for read-only viewers (EPC, partner). The feature is gated by the `UNIFIED_AUDIT_VIEW_ENABLED` env flag on the portal. Route compatibility redirects keep old paths (`/property-data`, `/credit`, `/income`) working.
-
-The Encompass plug-in can now request the portal `/results` viewer in **full iframe embed** mode (INT environment only). To do this, the plug-in requests a results-access URL with `embedContext=iframe&layout=full`. The API mints an exchange token carrying `layout: "full"`, which the portal exchanges for a view cookie that unlocks the full sidebar layout and section rendering inside the iframe. The portal's `HostBridgeProvider` accepts `postMessage` calls only from the origin in `ENCOMPASS_HOST_ORIGIN`, and applies Partitioned (CHIPS) cookies for cross-site embedding.
-
-Two environment variables are added to the portal CDK for this feature:
+Two environment variables govern the embed on the portal side:
 
 | Env var | Effect |
 |---|---|
-| `ENCOMPASS_RESULTS_EMBED_ENABLED` | Must be `"true"` (strict) for `layout=full` minting. Only set on INT. |
-| `ENCOMPASS_HOST_ORIGIN` | Exact HTTPS origin the host-bridge `postMessage` handler accepts. |
+| `ENCOMPASS_RESULTS_EMBED_ENABLED` | Must be `"true"` (strict) for `layout=full` token minting. Set in all environments. |
+| `ENCOMPASS_HOST_ORIGIN` | Exact HTTPS origin the `HostBridgeProvider` `postMessage` handler accepts. |
+
+Appraisal rental data, credit and liabilities, bank-statement income, document health, properties check, and all other audit sections are rendered by the portal inside the iframe. Entitlement gating (e.g. whether the bank-statements section appears) is enforced server-side — the plug-in no longer makes per-section entitlement checks.
 
 <Note>
-`ENCOMPASS_RESULTS_EMBED_ENABLED` is INT-only. Do not set it on prod until this feature exits INT gating.
+The appraisal review PDF is filed into the Encompass eFolder on every completed audit regardless of the lender's `document_push` flag (LOA-1993). For `document_push`-enabled lenders it routes to the `appraisal_review_summary` container. For non-routed lenders it travels as a bare "AUS Results" resource alongside the AUS report and property PDFs. The EPC inline audit surface should always find the appraisal PDF present on a complete audit.
 </Note>
 
 ## Component conventions
