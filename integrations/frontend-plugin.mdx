@@ -61,6 +61,30 @@ Appraisal rental data, credit and liabilities, bank-statement income, document h
 The appraisal review PDF is filed into the Encompass eFolder on every completed audit regardless of the lender's `document_push` flag (LOA-1993). For `document_push`-enabled lenders it routes to the `appraisal_review_summary` container. For non-routed lenders it travels as a bare "AUS Results" resource alongside the AUS report and property PDFs. The EPC inline audit surface should always find the appraisal PDF present on a complete audit.
 </Note>
 
+## EPC popup window (LOA-3210)
+
+`useEpcActionBridge` handles two distinct actions: wiring the embedded-portal iframe for
+`postMessage` bridging (described above) and opening the **"View in LoanLight"** popup when
+the embedded portal requests a full-window results view. For the popup path the hook calls
+`openInNewWindow`, which follows this sequence:
+
+1. `window.open("about:blank", "_blank")` opens the popup.
+2. `getExternalResultsUrl(auditId, "top")` fetches a one-shot results URL from
+   `/integrations/audits/:auditId/external-url?embedContext=top`.
+3. `popup.location.href = url` navigates the popup to the URL.
+4. `popup.opener = null` severs the opener reference **after** navigation.
+
+Step 4 must follow step 3. Chromium and WebKit only allow a sandboxed frame to navigate
+or close its popup while it remains the opener. Severing the opener before navigating
+causes a `SecurityError` in those browsers and the popup never reaches the results page
+(LOA-3210). Reverting to navigate-first makes the popup work in Chrome, Edge, and Safari
+inside Encompass.
+
+All popup-opening failures are logged to Datadog via `logError` with a structured
+`failedStep` field (`open`, `blocked`, `mint`, `validate`, `closed`, `navigate`,
+`opener`, or `timeout`) so failures are traceable without exposing one-shot token URLs
+in error messages.
+
 ## Component conventions
 
 From the package `CLAUDE.md`:
