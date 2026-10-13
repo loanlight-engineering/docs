@@ -172,9 +172,44 @@ Every leaf is nullable, and the literal string `"null"` is sanitized to `null` (
 
 Persisted by `urla-extraction-graph-runner.ts` (`persistUrlaExtractionResults` / `persistUrlaRulesFindings`). See [URLA data model](/data-model/urla-data-model).
 
-- **`urla_extraction_results`** — `audit_run_id` (unique, FK → `audit_runs` cascade), `loan_id`, `urla_extraction_result` (jsonb, GIN-indexed). One row per audit run.
+- **`urla_extraction_results`** — `audit_run_id` (unique, FK → `audit_runs` cascade), `loan_id`, `urla_extraction_result` (jsonb, GIN-indexed), `input_raw_sha256` (text, nullable). One row per audit run. `input_raw_sha256` was added in migration `0153` (EDU-03.5 / LOA-3054): it records the lowercase hex SHA-256 of the MISMO bytes the extraction read, so the declared-evidence overlay can verify it is reading the same source (source-sameness check, see below). Rows written before the migration retain `NULL`, which reads as "not retained".
 - **`urla_rules_engine_results`** — one row per borrower (`borrower_label`, default `BORROWER_1`); unique `(audit_run_id, borrower_label)`. Written by the embedded rules engine.
 - **`urla_rules_findings`** — one row per rule finding.
+
+## EDU-03.5 — declared businesses and the employment→borrower link (LOA-3054)
+
+EDU-03.5 extends declared-evidence capture to publish two new fact classes from the retained URLA MISMO bytes.
+
+### What is published
+
+The producer emits new emissions under **`urla-declarations.v3`**:
+
+- **Declared businesses** (`alias_kind = 'business'`, `entity_kind = 'business'`). Each EMPLOYER entry in the MISMO XML that names a self-employed business is extracted as a business entity and bound as a declared business alias.
+- **Employment→borrower link** — each EMPLOYER is associated with its BORROWER ROLE, published as an employer–borrower link. An EMPLOYER with an ambiguous or unreadable ROLE label records an `ambiguous` link kind.
+
+These facts are gated by the `W-1` test-only snapshot on `int` and are not live in production as of this release. The G1 switch (v3 as the active registry on `int`) applies on `int` after this merge.
+
+### Source sameness check (S-0)
+
+Before any declared-evidence overlay runs, the overlay service verifies that the retained source bytes are the same ones the extraction read. It compares `urla_extraction_results.input_raw_sha256` against the current `evidence_sources.raw_sha256` for the pinned source.
+
+- If S-0 is `same`, the overlay proceeds normally and the shipped name and account overlays run.
+- If S-0 is `source_differs` (hashes do not match), the overlay stops. No employment, business, or prior overlays run. A cached run over a row written before migration `0153` reads `input_raw_sha256 = NULL` (`not_retained`) and also reads `source_differs`; overlays resume once a fresh extraction is written.
+- A missing extraction row produces `extraction_hash_unreadable`; a deleted source row produces `cached_source_row_missing`, also mapping to `source_differs`.
+
+### Shadow-path validation (SV)
+
+SV counts, per production MISMO file, whether each `SV_ROWS` row finds its expected XML element in the real bytes. It runs before `prepareEvidenceCapture`, deferred and never awaited, and writes only Datadog counts plus one log line per rejected file. It does not gate capture or alter any audit result.
+
+Three new Datadog monitors (added by migration `0153`):
+
+| Monitor name | Purpose |
+|---|---|
+| `edu-declaration-path-shape` | Alarms when an unexpected XML shape is found at a declaration path |
+| `edu-declaration-path-file` | Alarms when a file has one or more declaration path mismatches |
+| `edu-declaration-path-no-files` | Alarms when no files have been processed by SV (canary for SV not running) |
+
+On production, the MISMO bytes are parsed once (SV only) because evidence capture is gated off. On `int` and `local` the bytes are parsed up to three times (SV, publication, and the append's subject-coverage pass).
 
 ## Eval fixtures
 

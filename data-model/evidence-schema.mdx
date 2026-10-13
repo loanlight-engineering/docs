@@ -7,7 +7,7 @@ icon: shield-check
 The evidence capture subsystem retains the URLA MISMO XML submitted with each loan and extracts structured "facts" from it — borrower declarations, asset references, and similar assertions. The tables listed here are the durable store for that evidence. The system is **in initial rollout**: as of late September 2026 it is active on `local` and `int` only, behind a per-lender allowlist and a feature flag.
 
 <Note>
-These tables are in the `loanlight-api` AUS database (the shared Aurora cluster), not the integrations database. They are introduced by migrations `0116`–`0121` (LOA-2927). Migration `0122` (LOA-2928 / EDU-03) widens `evidence_entities` to support employer, employment, property, and gift subjects and adds `assertion_ordinal` to `evidence_facts`.
+These tables are in the `loanlight-api` AUS database (the shared Aurora cluster), not the integrations database. They are introduced by migrations `0116`–`0121` (LOA-2927). Migration `0122` (LOA-2928 / EDU-03) widens `evidence_entities` to support employer, employment, property, and gift subjects and adds `assertion_ordinal` to `evidence_facts`. Migration `0153` (LOA-3054 / EDU-03.5) adds `alias_kind = 'business'` and `entity_kind = 'business'` to `evidence_entities`, and adds the nullable `input_raw_sha256` column to `urla_extraction_results`.
 </Note>
 
 ## Eligibility and rollout
@@ -66,12 +66,12 @@ A named participant (borrower or account) extracted from a source. One row per `
 | `id` | `uuid` PK | |
 | `lender_id`, `loan_id`, `source_id` | scope | FK chain → `evidence_sources` |
 | `source_alias` | `text` NOT NULL | The label as it appears in the source (e.g. a party role or asset reference) |
-| `alias_kind` | `text` NOT NULL | CHECK: `party` \| `role` \| `asset` \| `employer` |
-| `entity_kind` | `text` NOT NULL | CHECK: `borrower` \| `account` \| `employment` \| `property` \| `gift` |
+| `alias_kind` | `text` NOT NULL | CHECK: `party` \| `role` \| `asset` \| `employer` \| `business` |
+| `entity_kind` | `text` NOT NULL | CHECK: `borrower` \| `account` \| `employment` \| `property` \| `gift` \| `business` |
 | `binding_authority` | `text` NOT NULL | CHECK: `source_observed` \| `reused_authoritative_binding`. Default `source_observed` |
 | `bound_at` | `timestamptz` NOT NULL | |
 
-Coherence CHECK (migration `0122`): `asset` alias kind pairs with `account`, `property`, or `gift`; `employer` pairs with `employment`; `party` or `role` pair with `borrower`. The widening is a strict superset of the prior constraint, so existing rows re-validate.
+Coherence CHECK (migration `0153`, EDU-03.5 / LOA-3054): `asset` alias kind pairs with `account`, `property`, or `gift`; `employer` pairs with `employment`; `party` or `role` pair with `borrower`; `business` pairs with `business`. The `business` kind covers declared employer entities that name a self-employed business. Each widening is a strict superset of the prior constraint, so existing rows re-validate.
 
 ### evidence_registry_definition_snapshots
 
@@ -203,6 +203,19 @@ snapshot is frozen and will not change.
 object reference as v1. The coverage row `doc_health.bank_statement_period_coverage` stays with
 EDU-05 in both snapshots.
 
+**`observation-asset.v1`** (`OBSERVATION_ASSET_V1_REGISTRY`, LOA-3228 / EDU-27.0, shared-types
+3.1.0) — a new snapshot introduced by the asset-evidence release. It holds exactly one row:
+`asset.statement_account.balance@1` (observation, subject `["account"]`, required period,
+`decimal_amount` value kind, `["pdf"]` locator kinds, adopter EDU-27).
+
+**`observation-appraisal.v1`** (`OBSERVATION_APPRAISAL_V1_REGISTRY`, LOA-3159 / EDU-28.0,
+shared-types 5.0.0) — the appraisal evidence snapshot. Holds the EDU-28 P7 registry rows;
+no decision rows are included (EDU-28 has no decision-row adopter). Adopter is EDU-28.
+
+**`observation-property-data.v1`** (`OBSERVATION_PROPERTY_DATA_V1_REGISTRY`, LOA-3229 / EDU-29.0,
+shared-types 5.1.0) — the property-data evidence snapshot. Holds the EDU-29 registry rows;
+adopter is EDU-29.
+
 The change ships as a **new snapshot, not an edit to v1**, following the EDU-01.5 precedent.
 Editing a published snapshot in place would allow one id to name two different schemas across
 package versions, silently re-parsing stored batches differently on upgrade. EDU-07 (LOA-2932)
@@ -249,6 +262,60 @@ The parser rejects a `no_disagreement` view whose `scope.displayLabel` contains 
 <Note>
 A published snapshot never changes. If a definition's semantics must evolve, add a new snapshot beside the existing ones. The EDU-08.5 parsers are in shared-types and carry no new registry snapshot — they extend the consumer-facing contract on top of the existing v1/v2 snapshots.
 </Note>
+
+## EDU-27.0 — asset evidence: `asOf` ordering and required pins (shared-types 3.1.0, LOA-3228)
+
+`@loanlight-engineering/shared-types` 3.1.0 extends the observation eligibility contract for the EDU-27 asset adopter.
+
+**Required pins.** `OBSERVATION_REQUIRED_PINS["EDU-27"]` is `["inputFingerprint", "sourceHashById", "implementationVersion"]`. Every EDU-27 generation must carry these pins in addition to the common required pins. A missing or empty common pin reads `required_pin_lacking`; a missing adopter pin reads the same.
+
+**`asOf` ordering.** `OBSERVATION_ORDER_KEY` is a new export (deep-frozen `Record<adopter, orderKey>`) that declares each adopter's replacement ordering. EDU-27 uses `as_of`; every other adopter uses `evidence_revision`. `GenerationRecord` gains an optional `asOf` field (`YYYY-MM-DD`). The parser accepts `asOf` only on `as_of` producers and rejects it on all others (`illegal_state`). `asOf` is not part of generation identity but does participate in collision checks, ranking, and tie-breaking. A missing `asOf` on an `as_of` producer reads `null_identity`.
+
+`decideEligibility` gains a fourth parameter `orderKey = OBSERVATION_ORDER_KEY`; the first three parameters are unchanged, so existing positional callers are untouched. `decideEligibilityForProduction` passes the full frozen map.
+
+**`OBSERVATION_REQUIRED_PINS["EDU-29"]`** was changed from `null` (no eligibility check) to `[]` (empty — common pins only). An EDU-29 generation now reads `current` freshness and participates in live comparisons, matching the behaviour that EDU-05 and EDU-06 already have.
+
+## EDU-28.0 — appraisal evidence: value kinds and subject kind (shared-types 5.0.0, LOA-3159)
+
+`@loanlight-engineering/shared-types` 5.0.0 extends the observation contract with appraisal-specific types.
+
+**New subject kind.** `ObservationSubjectKind` gains `subject_property`. It is an `Extract` over `DeclarationSubjectKind`, so one identity vocabulary serves both.
+
+**New value kinds.** `ObservationItemValue` and `parseItemValue` gain `decimal`, `date`, and `boolean` value kinds. `parseItemValue` dispatches on the declared `valueKind` and reads values through the declaration helpers. A boolean must be an actual boolean (`"true"`, a nested `null`, and `1` are rejected with `invalid_value`).
+
+**`observation-appraisal.v1` snapshot.** Ships the EDU-28 P7 registry rows. No decision rows are included.
+
+## EDU-11.1 — dependents decision cause (shared-types 3.1.0, LOA-3230)
+
+`@loanlight-engineering/shared-types` 3.1.0 extends the dependents decision contract with a machine-readable cause set.
+
+**`DependentsUnknownCause`.** A new exported type:
+
+```typescript
+type DependentsUnknownCause =
+  | "change_id_null"
+  | "names_nothing"
+  | "prior_conflict"
+  | "prior_unreadable"
+  | "record_unloadable"
+  | "leaf_lacking";
+```
+
+The `unknown` arm of `DependentsDecision` gains `causes: readonly DependentsUnknownCause[]` — every applicable condition, unique and sorted by code units. A readable prior with the change id and another identity is `prior_conflict`; a prior that is not a plain object or that `readPrior` refuses is `prior_unreadable`.
+
+**Narrowed EDU-07 reach (LOA-3230).** An EDU-07 change now reaches only EDU-07 items of its own scope (same producer, kind, and key). Before 3.1.0 it reached all EDU-07 items for the loan. An upstream (non-EDU-07 producer) change still reaches every EDU-07 item of the loan, as before.
+
+The intended output changes (prior with NULL id → `unknown [prior_unreadable]`; EDU-07 items outside the change's own scope no longer in the stale set) are backwards-compatible: no default branch in another repository read the `unknown` arm before this release.
+
+## EDU-01.8 — declare loan amount, purchase price, and subject property (shared-types 4.0.0, LOA-3158)
+
+`@loanlight-engineering/shared-types` 4.0.0 extends the declaration registry with loan-level and subject-property subjects.
+
+**Two new subject kinds.** `DeclarationSubjectKind` gains:
+- `loan` — identified by (tenant, `loan_id`).
+- `subject_property` — identified by (tenant, `loan_id`, role `subject`). This is distinct from `property` (which remains for owned REO properties).
+
+**`URLA_DECLARATIONS_V4_REGISTRY`.** A new v4 registry adds declaration rows for the loan amount, purchase price (sales contract amount), and subject property address. v4 builds on v3. v2 and v3 registries remain unchanged. No consumer adopts 4.0.0 in this release.
 
 ## Related
 

@@ -122,6 +122,29 @@ The shared `<Pagination>` component (`components/ui/pagination.tsx`) and the `us
 
 The dashboard distinguishes a pre-underwriting audit from a standalone agent run via the `AuditOverview` fields `isPreUnderwriting` and `linkedRuns` (`lib/api-types.ts`). A pre-underwriting audit filters on `audit.isPreUnderwriting`; a standalone run is matched through `audit.linkedRuns` by `agent`, and the row links to its first linked run. `AuditSidebar` renders the same `linkedRuns` as per-agent sidebar entries.
 
+`components/audits/linked-run-target.ts` exports two helpers that centralize badge/link logic:
+
+- **`linkedRunTarget(run)`** — maps each `linkedRun.agent` value to a `{ href, label }` pair. Known agents:
+
+  | `agent` | Label | `href` | Source |
+  |---|---|---|---|
+  | `appraisal` | Appraisal | `/appraisal-review/{runId}` | pre-underwriting or standalone |
+  | `credit` | Credit | `/credit-review/{runId}` | pre-underwriting or standalone |
+  | `bankStatement` | Income | `/income/bank-statements/{runId}` | portal bank-statement run (LOA-3161) |
+  | `auditBankStatement` | Income | `/loan-audits/{runId}/bank-statements` | Encompass/partner audit with a bank-statement step (LOA-3161) |
+  | `income` / unknown | Income | `/income/{runId}` | other income runs; also the fallback for any future agent the portal does not yet know, so unknown agents fall back to Income rather than throwing mid-render |
+
+- **`linkedRunMatchesFilter(run, agentFilter)`** — the Income filter matches every run whose badge label is `"Income"` (derived from `linkedRunTarget`), so the filter and the badge can never disagree.
+
+**Bank-statement income runs (LOA-3161):** before this fix, bank-statement runs never appeared as "Income" in the Agents column. The API now emits two linked-run types depending on how the audit was triggered:
+
+- **Portal run** — the API reads `borrower_files` by `audit_run_id` and emits `agent: "bankStatement"`. A bank-statement-only portal audit is considered standalone (`isStandaloneAudit`), not pre-underwriting, so it no longer appears under the Pre-Underwriting filter.
+- **Encompass or partner run** — the API adds `agent: "auditBankStatement"` when the audit was not triggered from the portal and the `bankStatementIncome` ledger row is `processing`, `complete`, or `failed`. A `pending` or `skipped` row (no bank statements) emits nothing. These rows keep their Pre-Underwriting badge and gain an Income badge once the bank-statement step has run.
+
+<Warning>
+Deploy order matters: ship the portal before the API, or together. With the old portal and the new API, `bankStatement`/`auditBankStatement` rows open the wrong page until the portal catches up. The reverse order (new portal, old API) is harmless.
+</Warning>
+
 <Warning>
 The staff properties-check page (`(detail)/loan-audits/[auditRunId]/properties-check`) passes `proxyImages={false}` to `PropertiesCheckView`. The partner results pages already opted out of the Encompass image proxy; this staff page had missed it (LOA-894).
 </Warning>
