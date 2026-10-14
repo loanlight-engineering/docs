@@ -22,8 +22,8 @@ Source root: `loanlight-api/packages/api/src/langgraph/agents/piiValidation/`.
 ```text
 __start__ → prepare → plan-validation
 plan-validation → [conditional] one Send("validate-field", …) per pending field (fan-out)
-                                or → aggregate when pending is empty
-validate-field → aggregate → __end__
+                                or → reconcile-employer-address when pending is empty
+validate-field → aggregate → check-undisclosed-properties → reconcile-employer-address → __end__
 ```
 
 State (`PiiValidationStateSchema`) carries `xmlData`, `pipelineId`, `loanId`, `documentId`, `fieldsOverride`, `auditRunId`, `borrowerCount`, `fieldsToProcess`, `pending`, `loanPurpose` (`PURCHASE`/`REFINANCE`/undefined), `classificationMap` (`ClassificationSegment[]`), `classifySplitRunStatus`, `results` (concat reducer), and `completed`.
@@ -217,6 +217,20 @@ The `unverifiable` kind is emitted only by `VestingEntityName` on a whole-index 
 - `deduplicateDateFindings` — collapse same-document findings with the same normalized doc value, preferring `hasIssue=true`.
 - digitsOnly — distinguish a genuine valid match from OCR-overridden chunks; if every chunk is an OCR artifact, surface as `missing`.
 - **`dedupDocValidations` (LOA-2734, fix E)** — re-keys from `(document_name, doc_value)` to the **normalized value**, and carries `documentNames` onto the surviving row. This collapses findings from multiple documents with the same normalized DOB into one, so the portal table and the exported PDF agree with each other. The `overallMessage` now counts distinct **values** and distinct **documents** separately ("1 conflicting value found on 3 documents" instead of "4 values inconsistent across 4 documents").
+
+## Employer address reconciliation (LOA-2733)
+
+`ReconcileEmployerAddressNode` (`nodes/reconcileEmployerAddress/node.ts`) runs after the fan-out completes, as the `reconcile-employer-address` graph node. Because `EmployerAddress` and `EmployerName` are separate fields validated in parallel tasks, this node has access to both fields' results simultaneously — something no per-field `Send` node can achieve.
+
+For each `EmployerAddress` result that carries a `hasIssue: true, issueKind: "inconsistent"` finding, it looks up the corresponding borrower's `EmployerName` result and 1003 employment context, then evaluates three suppression reasons. A finding cleared by any reason has its `hasIssue` set to `false` and receives an explanatory `message`:
+
+| Reason | Condition | Message summary |
+|---|---|---|
+| `self_employed_1099_payer` | The current employer is marked self-employed **and** the document is classified as `1099_nec` or `1099_misc` | The address is the payer's address, not the borrower's business address |
+| `borrower_home_address` | The document's address matches the borrower's own mailing or former addresses **and** the `EmployerName` check did not flag a different employer on the same page | The document shows the borrower's home address, not their employer's |
+| `same_employer` | The page passed the `EmployerName` check (names the current employer) **or** carries the same EIN as a page that passed or matched the 1003 address | A different office or payroll address for the same employer is not an inconsistency |
+
+EIN evidence is conservative: a page that prints two EINs (e.g. a 1040 with two W-2s) cannot say which is the employer's, so it yields no EIN evidence. The node logs `pii.employer_address_reconciled` with the cleared count and whether the field-level finding still holds. If the result reducer's `replace` update removes all set-aside rows, the `setAsideMismatches` working field is stripped from persisted results.
 
 ## Known non-subject address suppression
 

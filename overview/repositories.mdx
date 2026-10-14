@@ -25,9 +25,10 @@ The NestJS (Fastify) monorepo that hosts the AUS backend and the lender portal.
 
 | Package | What it is | Tech |
 |---|---|---|
-| `packages/api` | The AUS backend: audit orchestration, LangGraph agents, Partner API, portal API, internal API. | NestJS, Fastify, Drizzle ORM, LangGraph |
-| `packages/app` | The lender portal: a stateless Backend-For-Frontend that proxies to the backend under `/api/v1/portal/*`. | Next.js 15 App Router |
-| `packages/auth` | Auth helpers used by the portal and backend. | TypeScript |
+|| `packages/api` | The AUS backend: audit orchestration, LangGraph agents, Partner API, portal API, internal API. | NestJS, Fastify, Drizzle ORM, LangGraph |
+|| `packages/app` | The lender portal: a stateless Backend-For-Frontend that proxies to the backend under `/api/v1/portal/*`. | Next.js 15 App Router |
+|| `packages/auth` | Auth helpers used by the portal and backend. | TypeScript |
+|| `packages/shared-ui` | Shared React UI components, primitives, and design tokens — a **private workspace package** consumed by the portal directly. Not published to GitHub Packages; not the same artifact as the deprecated `@loanlight-engineering/shared-ui` published from `loanlight-shared` (LOA-3084). | TypeScript, React, Tailwind |
 
 Frontmatter detail lives in [portal architecture](/portal/architecture-bff) and the [data model](/data-model/overview). The backend Datadog service is `loanlight-api`; the portal RUM service is `PortalFrontend`.
 
@@ -50,17 +51,20 @@ A pnpm-workspace monorepo that publishes versioned, scoped npm packages (`@loanl
 
 | Package | Purpose |
 |---|---|
-| `shared-types` | Cross-repo TypeScript contracts (audit/finding response shapes, the Octy bug-report contract, `Role`). |
-| `shared-cdk` | Reusable AWS CDK L2/L3 constructs (API Gateway, Fargate + Datadog, NLB + VPC link, SQS, bastion). |
-| `shared-local` | LocalStack dev tooling (queues, buckets, EventBridge bus). |
-| `shared-auth` | WorkOS AuthKit wrapper for Next.js apps (published only). |
-| `shared-api-auth` | NestJS WorkOS auth module (published only). `ApiAuthService` also exposes WorkOS Connect M2M methods (applications + client secrets) for per-lender EPC credentials. See [identity and auth](/concepts/identity-and-auth#workos-connect-m2m-per-lender-epc-credentials). |
-| `shared-lambda-auth` | API Gateway authorizer handler (published only). |
-| `shared-ui` | Shared React UI components, primitives, and design tokens (published only). |
+|| `shared-types` | Cross-repo TypeScript contracts (audit/finding response shapes, the Octy bug-report contract, `Role`). |
+|| `shared-cdk` | Reusable AWS CDK L2/L3 constructs (API Gateway, Fargate + Datadog, NLB + VPC link, SQS, bastion). |
+|| `shared-local` | LocalStack dev tooling (queues, buckets, EventBridge bus). |
+|| `shared-auth` | WorkOS AuthKit wrapper for Next.js apps (published only). |
+|| `shared-api-auth` | NestJS WorkOS auth module (published only). `ApiAuthService` also exposes WorkOS Connect M2M methods (applications + client secrets) for per-lender EPC credentials. See [identity and auth](/concepts/identity-and-auth#workos-connect-m2m-per-lender-epc-credentials). |
+|| `shared-lambda-auth` | API Gateway authorizer handler (published only). |
 
 <Warning>
-The on-disk checkout of `loanlight-shared` is significantly behind what is actually published and consumed. The local checkout contains only `shared-types` (1.3.3), `shared-cdk` (1.9.2), and `shared-local` (0.1.0); the published repo also includes `shared-auth`, `shared-api-auth`, `shared-ui`, and `shared-lambda-auth`, and the published `shared-types`/`shared-cdk` are at much higher versions (consumers pin `shared-types@^1.12.0`). Types such as `RelatedTrace`, `BugReportPayload`, and `Role` exist only in the published artifact, not in the on-disk source. Read published `node_modules` copies, not the on-disk source, when in doubt.
+The on-disk checkout of `loanlight-shared` is significantly behind what is actually published and consumed. The local checkout contains only `shared-types` (1.3.3), `shared-cdk` (1.9.2), and `shared-local` (0.1.0); the published repo also includes `shared-auth`, `shared-api-auth`, and `shared-lambda-auth`, and the published `shared-types`/`shared-cdk` are at much higher versions (consumers pin `shared-types@^1.12.0`). Types such as `RelatedTrace`, `BugReportPayload`, and `Role` exist only in the published artifact, not in the on-disk source. Read published `node_modules` copies, not the on-disk source, when in doubt.
 </Warning>
+
+<Note>
+`shared-ui` (`packages/ui/` in this repo) is no longer published or maintained here as of LOA-3084. The portal now consumes it as `packages/shared-ui` — a private workspace package inside `loanlight-api`. The Encompass plug-in frontend (`loanlight-integrations/packages/frontend`) was also decoupled from it in the same change. See [Shared packages](/ops/shared-packages).
+</Note>
 
 See [shared packages](/ops/shared-packages) for the full contract and construct reference.
 

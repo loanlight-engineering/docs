@@ -1,0 +1,123 @@
+---
+title: EPC findings
+description: The LoanLight finding codes delivered to Encompass via EPC, their families, activation, and registration status.
+icon: flag
+---
+
+After a completed audit, the `loanlight-epc-integration` service evaluates the audit results against a set of finding definitions and delivers matching finding codes back to Encompass via the EPC Partner API. Each finding appears as an Encompass condition or internal task, depending on how the lender has mapped it.
+
+Source: `loanlight-integrations/packages/encompass/src/findings/`.
+
+## Finding families and codes
+
+Findings are grouped into families. Each family is activated per lender by a `lender_feature` row in the integrations database (see [Feature flags admin](/integrations/feature-flags-admin)). A family can be on (`auto`) or off (`off`); individual codes within a family cannot be toggled separately.
+
+| Code | Family key | `lender_feature` flag | Registered on Int | Registered on prod |
+|---|---|---|---|---|
+| `LL-Docs-01` | `documents` | `findings_documents` | yes | yes |
+| `LL-Docs-02` | `documents` | `findings_documents` | yes | yes |
+| `LL-Docs-03` | `documents` | `findings_documents` | yes | yes |
+| `LL-Docs-04` | `documents` | `findings_documents` | yes | yes |
+| `LL-Docs-05` | `documents` | `findings_documents` | yes | yes |
+| `LL-1003-01` | `1003` | `findings_1003` | yes | yes |
+| `LL-Appraisal-01` | `appraisal` | `findings_appraisal` | yes | yes |
+| `LL-Credit-01` | `credit` | `findings_credit` | yes | yes |
+| `LL-Property-01` | `property` | `findings_property` | yes | yes |
+| `LL-Data-01` | `data_consistency` | `findings_data_consistency` | yes | not requested |
+| `LL-PII-01` | `data_consistency` | `findings_data_consistency` | yes | not requested |
+| `LL-Integrity-01` | `integrity` | `findings_integrity` | yes | not requested |
+
+Each code is delivered at most once per audit run. Codes that produce no content for a given run are not delivered.
+
+<Warning>
+`LL-Data-01`, `LL-PII-01`, and `LL-Integrity-01` are registered on the Int EPC product but not on production as of 2026-10-13. A separate request to EPC is required to register them on the production product. See the `packages/encompass/docs/findings-registration.md` in `loanlight-integrations` for the registration procedure.
+</Warning>
+
+## LL-Data-01 — data discrepancies
+
+**Registered name:** Data Discrepancies Between Loan File and Documents
+
+Fires when the `data_consistency` section of the audit results contains rows with `hasIssue === true` whose field does not classify as an identity field (name, SSN/ITIN, mailing address, undisclosed property). For identity fields, use `LL-PII-01` instead — the two findings partition the section's rows so each mismatch row appears in exactly one.
+
+Map to an internal task or condition template, never to a borrower-facing one. The finding's lines carry loan-file values as read from the documents, including employer and property names, addresses, and identifier last fours.
+
+`LL-Data-01` shares the `findings_data_consistency` flag with `LL-PII-01`. Enabling the flag for a lender without mapping both codes causes identity rows to go undelivered.
+
+## LL-PII-01 — borrower identity verification issues (LOA-2830)
+
+**Registered name:** Borrower Identity Verification Issues — Review Required
+
+Fires when the `data_consistency` section contains rows with `hasIssue === true` for identity fields: Full Name, Social Security Number, ITIN, Mailing Address, and Undisclosed Property.
+
+**Identity field matching** (`identity-fields.ts::isIdentityField`) normalises field labels to letters only (the API's `formatFieldName` spaces every capital, so `SSN` arrives as `S S N`) and tests against a fixed set of synonyms. A synonym the API adds later stays in `LL-Data-01` until it is added here too; the file header documents this.
+
+**Undisclosed property** gets its own line that reads: `"raises a possible undisclosed property condition: X. It could not be matched to a property on the 1003."` `X` is the condition code rather than an address because the API's matcher records the code when no address survives extraction.
+
+**SSN and ITIN masking.** The SSN and ITIN values in the finding description are masked — only the last four digits are shown. The finding title counts the affected identity fields.
+
+**Map this finding to an internal task for the processor, never borrower-facing.** Its lines carry borrower names, addresses, and SSN or ITIN last fours. The Ad-hoc template in Encompass copies the finding description into the external field; a borrower-facing template would expose PII to the borrower.
+
+## LL-Integrity-01 — document integrity concerns (LOA-2831)
+
+**Registered name:** Document Integrity Concerns — Review Required
+
+Fires when the `bank_statement_income` agent's fraud detection produces at least one signal: embedded JavaScript, overlay-capable annotations, or font-consistency deviations across statements. These signals are the same ones that drive `fraud_pdf_integrity` and `fraud_font_consistency` findings in the portal.
+
+**Signal types:**
+
+| Signal kind | Encompass line prefix | Severity |
+|---|---|---|
+| `embedded_javascript` | `FAIL — Embedded JavaScript, <statement>: the PDF contains N script(s).` | Critical |
+| `overlay_annotations` | `FAIL — Overlay annotations, <statement>: page N has N annotation(s) of type X.` | Critical |
+| `font_deviation` | `WARNING — Font consistency, <statements>: the fonts differ from the institution's other statements.` | Warning |
+
+Statement labels use the format `<Bank> ••<last 4> (Mon YYYY)`. When multiple months from one bank appear in a font deviation, they are collapsed: `Chase ••6177 (Jan, Feb, Mar 2026)`.
+
+Unverified checks (checks that threw instead of completing) and unreadable signals (signals the serializer could not parse) are noted as separate counts at the bottom of the finding description. `integrity_check_unverified` rows in the portal are not counts of the failing checks; they indicate that a check could not be run at all.
+
+**Map to an internal task.** The finding identifies bank statements for processor review before contacting the borrower.
+
+## LL-1003-01 — 1003 completeness
+
+See [URLA Completeness rules engine](/agents/urla-completeness#ll-1003-01-encompass-finding-loa-2827) for full details. Fires when the URLA Completeness rules engine produces `FAIL` outcomes. One finding per audit run; lines are grouped by borrower. Activated by `findings_1003`.
+
+## Activation and lender setup
+
+<Steps>
+<Step title="Register the code on the EPC product">
+  Each code must be registered on the EPC product (Int and prod separately) before any lender can receive it. Registered codes are visible in the EPC product's `findings.types[]` array. See `packages/encompass/docs/findings-registration.md` for the registration procedure and current status.
+</Step>
+<Step title="Map the code to a condition template">
+  In Encompass, create a condition template for the finding code and map it in the lender's EPC setup (§5 of the findings-registration runbook). Borrower-facing templates must not be used for `LL-Data-01`, `LL-PII-01`, or `LL-Integrity-01`.
+</Step>
+<Step title="Enable the family flag for the lender">
+  Insert a `lender_feature` row in the integrations database with the appropriate family key and `feature_value` of `auto`. Without this row the family defaults to `off` and no findings are delivered regardless of registration.
+
+  | Family key | Covers |
+  |---|---|
+  | `findings_appraisal` | `LL-Appraisal-01` |
+  | `findings_credit` | `LL-Credit-01` |
+  | `findings_documents` | `LL-Docs-01` to `LL-Docs-05` |
+  | `findings_1003` | `LL-1003-01` |
+  | `findings_data_consistency` | `LL-Data-01` and `LL-PII-01` |
+  | `findings_property` | `LL-Property-01` |
+  | `findings_integrity` | `LL-Integrity-01` |
+</Step>
+</Steps>
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Results access" href="/integrations/results-access" icon="link">
+    How the Encompass plug-in opens the full portal audit view for a completed audit.
+  </Card>
+  <Card title="Feature flags admin" href="/integrations/feature-flags-admin" icon="toggle-right">
+    How to insert and manage `lender_feature` rows in the integrations database.
+  </Card>
+  <Card title="URLA Completeness" href="/agents/urla-completeness" icon="list-checks">
+    The rules engine behind LL-1003-01.
+  </Card>
+  <Card title="Bank-Statement-Income agent" href="/agents/bank-statement-income" icon="landmark">
+    The fraud detection that drives LL-Integrity-01.
+  </Card>
+</Columns>

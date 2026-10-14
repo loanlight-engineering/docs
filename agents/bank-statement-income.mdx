@@ -101,6 +101,17 @@ The `bank_statements` write-plan rows now carry `source_page_start` and `source_
 
 The worker's `writeResults` persists the same five table families: `borrower_files`, `bank_statements`, `transactions`, `income_filters`, and `findings`. The graph replaces the deleted `postProcess` function; everything after `writeResults` is unchanged.
 
+## Large-PDF presigned upload (LOA-3232)
+
+Bank statement PDFs submitted through the portal are forwarded to Reducto for structured extraction. PDFs **over 100,000,000 bytes** (~95 MiB) now use Reducto's presigned-upload flow rather than direct upload, which previously failed with an HTTP 413 error and caused those statements to disappear from income analysis silently.
+
+The presigned-upload flow:
+1. Requests a presigned `PUT` target URL from Reducto.
+2. Streams the PDF from a private temporary file as a file-backed `Blob` — never copies the full buffer into the fetch request body.
+3. Sends the presigned `PUT` and then calls the Reducto extraction endpoint referencing the already-uploaded file.
+
+Safety constraints on the presigned target URL: the hostname must be HTTPS; IP literals, local/metadata hostnames (`localhost`, `169.254.*`, `10.*`, etc.), URL credentials, and HTTP redirects are rejected before any bytes are sent. The presigned `PUT` and the extraction call share a ten-minute deadline. A file that is too large to extract is persisted as a `file_too_large` finding — split/compress guidance is rendered in the portal — and that file is not eligible for a size-only reprocess (only actionable errors are reprocessable).
+
 ## Reducto extraction checkpoint (LOA-2517)
 
 Each file's validated `ExtractionResult` is persisted to Redis keyed by `(borrowerFileId, sourceFileHash, EXTRACTION_CONTRACT_VERSION)` before `writeResults` runs. On a BullMQ retry, a checkpoint hit serves the cached result and skips the paid `structureWithReducto` call; only the not-yet-checkpointed file(s) re-extract. The TTL is bounded: at least `BANK_STATEMENT_LEDGER_DEADLINE_MS` (120 min) and at most `PII_BOUND_MS` (3 h). Keys are deleted after `writeResults` succeeds to tighten the PII window; TTL self-expiry is the backstop.
@@ -254,6 +265,16 @@ The income export moves reviewer-included secondary statements off the **Second 
 - A reference deposit list showing only the statements still held out.
 
 The cross-account decision is recorded as an `account_selection` finding type (migrations `0047`/`0048` — expand/contract pair widening `finding_type_check`). The `account_selection` finding's notice and reason lines read `reviewer_included_statement_count` so they no longer say a second account is "not added" once statements from it are included.
+
+**Self/Family exclusion match evidence (LOA-2963).** When a credit is excluded as **Transfers: Self / Family**, the portal's transactions table now shows which name matched and how. The match is recorded at exclusion time (inside `applyFamilyDepositExclusion` and `applyP2pSelfTransfer`) as `income_excluded_match` on the `transactions` row, stored under `evidence.self_family_match` in the existing JSONB column, and served as `self_family_match` on the transaction response (no migration — the column has no CHECK constraint on this field). The shape is `{ sender, matched, kind }`:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `sender` | string | The name (or reconstructed name) that the detector excluded on. For `exact_reconstructed`, this is the reconstructed form, not the printed text. |
+| `matched` | `borrower` / `co_borrower` / `account_holder` | Which party's name this matched. |
+| `kind` | `exact` / `surname` / `exact_reconstructed` | How the match was made. `exact_reconstructed` means the middle word was dropped before comparing; the portal says "after dropping a middle word". |
+
+The match line renders as muted text under the category select in the portal transactions table (`selfFamilyMatchLabel`). It is shown only when the served `effective_category` is Self / Family **and** the stored source is `name_match` — a reviewer's override or a category change resets the source to `null`, retiring the evidence without touching the JSONB. Existing rows carry no evidence; only rows categorized or reprocessed after this ships show the line.
 
 **P2P sender names without "from" (LOA-2683):** `extractP2pSenderName` previously anchored on `/\bfrom\b/` only, so banks that print the sender directly after the rail (`ZELLE <NAME> <phone>`) produced no sender name and the family/self exclusion never fired. A rail-anchored parse (Zelle, Venmo, Cash App, PayPal, Popmoney, QuickPay) is now applied alongside the existing `from` parse, with a newline-tolerant anchor and middle-name reconstruction. The new parse is gated to `direction === "inbound"` — the outbound and `descriptionFirst` expense paths are unchanged.
 
