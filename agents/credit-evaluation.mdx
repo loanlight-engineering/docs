@@ -272,9 +272,9 @@ path (`/admin/staged-credit-rules`) before any lender can adopt it. CRED_028 (Pu
 FAIL-Default) is registered shared but adopted only by First Colony.
 </Note>
 
-**CRED_022 — First-Time Homebuyer Program Eligibility (LOA-2739)**
+**CRED_022 — First-Time Homebuyer Program Eligibility (LOA-2739 / LOA-3223)**
 
-CRED_022 is now scoped to DSCR loans only. Previously it could fire on non-DSCR Purchase/PrimaryResidence loans when MISMO carried `<HomeownerPastThreeYearsType>No</HomeownerPastThreeYearsType>`, causing `deriveIsFirstTimeHomebuyer("NO") === true` and a false `FAIL`. The defect was scope, not derivation logic: the first-time homebuyer eligibility signal is an underwriting consideration only on DSCR programs. A non-DSCR loan where the borrower self-declares non-ownership yields `SKIPPED`.
+CRED_022 is scoped to DSCR loans only. Previously it could fire on non-DSCR Purchase/PrimaryResidence loans when MISMO carried `<HomeownerPastThreeYearsType>No</HomeownerPastThreeYearsType>`, causing `deriveIsFirstTimeHomebuyer("NO") === true` and a false `FAIL`. The defect was scope, not derivation logic: the first-time homebuyer eligibility signal is an underwriting consideration only on DSCR programs. A non-DSCR loan where the borrower self-declares non-ownership yields `SKIPPED`.
 
 **FTHB rebuttal from housing tradelines (LOA-2723).** `mergeCandidates` now runs a second
 pass — `rebutFirstTimeHomebuyerFromHousingTradelines()` (`lib/credit-pipeline/derivations/first-time-homebuyer.ts`) — after the URLA ownership-interest declaration check. When the borrower has at
@@ -290,8 +290,39 @@ The rebuttal abstains — preserving the current FTHB value — in three cases:
   to reconcile bureau `borrower_id`s against URLA ordinals.
 - The borrower has no open housing tradelines.
 
-`applicationBorrowerPartyCount` is a new graph state field, seeded by `urla-extraction-graph-runner.ts::
+`applicationBorrowerPartyCount` is a graph state field, seeded by `urla-extraction-graph-runner.ts::
 buildUrlaHandoff` from the URLA extraction result and threaded into `mergeCandidates`.
+
+**Configurable lookback (LOA-3223).** CRED_022 rows can carry an optional `fthb_lookback_months`
+threshold (integer 36–60). At the default of 36 (or absent), the rule grades on the persisted
+`borrower.is_first_time_homebuyer` flag from `mergeCandidates`, matching today's behavior.
+When set above 36, the rule computes an *effective* per-subject FTHB flag at evaluate time
+without mutating the persisted flag — CRED_025 and every other rule that reads
+`borrower.is_first_time_homebuyer` are unaffected.
+
+A subject is cleared (FTHB → not FTHB) by either of two evidence sources:
+
+- **A — credit report.** A mortgage, HELOC, or co-op tradeline attributed to that subject and
+  dated inside the extended window. Single-subject reports attribute tradelines only when nothing
+  suggests a second person was collapsed into the report. Two-subject reports use the
+  `WHOSE` designator (`B`/`C`/`J`) to assign rows: `B` → first subject, `C` → second subject,
+  `J` (joint) → both.
+- **B — public property records (ATTOM).** For subjects path A could not clear, `evaluateRules`
+  fetches ATTOM sales history (`AttomService.fetchSalesHistoryOnce`, one 15-second budget per
+  graph) and checks for a recorded conveyance deed naming the subject as a whole party at one of
+  their own addresses, dated inside the window. Only the match itself is persisted to
+  `facts.ownership_records` (borrower id, owner label, URLA extraction id, basis, deed date):
+  no names, addresses, or raw payloads.
+
+Clearing is blocked when a subject's §5 answer is "No" and any evidence (tradelines or deed)
+shows ownership within 36 months — CRED_022 stays `FAIL` regardless of the extended window.
+A subject whose FTHB flag an underwriter corrected is never cleared by evidence.
+
+Correction replay never calls ATTOM. It re-checks each persisted `ownership_records` entry
+against the current window, the veto, and the corrections, without a new vendor call. The
+`fthb_lookback_months` threshold on CRED_022 is editable from the portal's credit rules table:
+a **CRED_022-only** "Edit Rule" dialog accepts whole months between 36 and 60 (the only rule
+with a working per-row editor — no generic rule editor exists).
 
 **CRED_017 — Housing Payment History (LOA-2722)**
 

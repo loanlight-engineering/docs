@@ -64,14 +64,14 @@ subject-only.
 </Step>
 
 <Step title="fetchProperty — Zillow + HasData + ATTOM">
-`zillowUrlFinder.findPropertyUrl(...)` resolves a Zillow detail URL via SerpApi;
+`zillowUrlFinder.findPropertyUrl(...)` resolves a Zillow detail URL (direct Zillow search first, SerpApi fallback — see the SerpApi accordion under External providers);
 `hasData.getPropertyDetails(...)` scrapes the listing, photos, and zestimate; `attom.getPropertyData(...)`
 fetches official records. The borrower fetch is gated by `shouldFetchBorrower(state)`, and there is
 a REO loop per `reoAddresses`.
 
-When `listing_screenshot_enabled` is on for the lender, a subject-only Zillow listing screenshot
-is captured here via `ListingScreenshotService.captureIfMissing` and stored on the
-`subjectZillowScreenshot` state channel.
+A subject-only Zillow listing screenshot is captured here via `ListingScreenshotService.captureIfMissing`
+and stored on the `subjectZillowScreenshot` state channel whenever a `ListingScreenshotService` is
+injected and the subject Zillow URL passes the unit gate.
 </Step>
 
 <Step title="fetchHazard">
@@ -82,10 +82,9 @@ channels, disjoint from the instrumentation channel.
 <Step title="fetchRedfin (enabled in int + prod)">
 Gated by `ENABLE_REDFIN_SOURCE === "true"`. Since LOA-2091 this variable is set `"true"` in integration and production environments — the step is no longer off by default. When active, it resolves a redfin.com URL via the site-aware SerpApi finder, then calls `hasData.getRedfinPropertyDetails(url)`. A null result degrades to a no-op merge. The Redfin merge is additive-only: `mergeRedfin()` never overwrites a non-null incumbent from HasData/Zillow or ATTOM.
 
-When `listing_screenshot_enabled` is on for the lender, a subject-only Redfin listing screenshot
-is captured here via `ListingScreenshotService.captureIfMissing` and stored on the
-`subjectRedfinScreenshot` state channel. Zillow and Redfin screenshots are captured independently
-because these two nodes run as parallel siblings in the same super-step.
+A subject-only Redfin listing screenshot is captured here via `ListingScreenshotService.captureIfMissing`
+and stored on the `subjectRedfinScreenshot` state channel. Zillow and Redfin screenshots are
+captured independently because these two nodes run as parallel siblings in the same super-step.
 </Step>
 
 <Step title="consolidate">
@@ -108,17 +107,12 @@ as audit and compliance evidence. It is **not** a data source — it records wha
 Redfin listing showed at audit time, separate from the structured property data `HasDataService`
 scrapes.
 
-**Enablement.** The feature is opt-in per lender via the `listing_screenshot_enabled` feature flag
-(`lender_feature_flags.feature_key`). An absent row defaults off. Enable a lender with an
-`enabled = true` row from the Octy admin Flags tab. Flag-off is a strict no-op: zero HasData
-`/scrape/web` calls for either source.
+**Enablement.** Listing screenshots run automatically for every lender (LOA-3256 removed the per-lender `listing_screenshot_enabled` opt-in flag). The Zillow screenshot fires whenever a `ListingScreenshotService` is injected into the graph and the Zillow URL resolves a valid unit-gate. The Redfin screenshot is gated by `ENABLE_REDFIN_SOURCE` — a killswitched lender skips the Redfin node entirely and receives no Redfin screenshot.
 
 **One per (loanId, source), reused across audit runs.** The S3 key is deterministic:
 `property-data/{loanId}/subject-{source}-listing` (no file extension; `ContentType` at PutObject
 time is the authoritative format). `captureIfMissing` does a `HeadObject` check first. A cache
-hit returns `{ s3Key, sourceUrl, capturedAt, reused: true }` with no new HasData call. The flag
-is resolved once in `property-data-graph-runner.ts` and injected as a boolean into the graph — the graph
-itself carries no lender context.
+hit returns `{ s3Key, sourceUrl, capturedAt, reused: true }` with no new HasData call.
 
 **Two channels.** `subjectZillowScreenshot` and `subjectRedfinScreenshot` are disjoint graph-state
 channels for the same reason `redfinSubject` is a separate channel from `property`: the Zillow
@@ -169,11 +163,34 @@ longer populates `currentListPrice` with its monthly rent; rent routes through `
 
 <Accordion title="SerpApi / Zillow URL finder (ZillowUrlFinderService)">
 Env `SERPAPI_KEY`, `serpApiUrl = https://serpapi.com/search`.
-`findPropertyUrl(input, site = "zillow" | "redfin")` runs a Google search via SerpApi, filters to
-`site:zillow.com/homedetails` (or `site:redfin.com`), and matches street-number + city (+ unit) in
-result titles. Returns null on no exact match. Since LOA-1745 (#2695), when the subject address
-includes a unit, the unit is included in the SerpApi query so the specific unit's zpid is ranked
-above the building-level record.
+`findPropertyUrl(input, site = "zillow" | "redfin")` resolves a Zillow or Redfin detail URL via
+a two-stage discovery path for Zillow, and the existing SerpApi path for Redfin.
+
+**Zillow URL discovery (LOA-3243)** runs inside `resolveZillowProperty`, which is the common
+helper for subject, borrower, and every REO lookup. On each lookup it first attempts the direct
+Zillow address-search path, then falls back to SerpApi:
+
+1. **Direct Zillow search (primary).** `buildZillowSearchUrl` constructs
+   `https://www.zillow.com/homes/<street>[-UNIT-<unit>],-<city>,-<ST>-<zip>_rb/`.
+   `HasDataService.getPropertyDetailsForDiscovery` makes one no-retry request and validates
+   the response strictly — checking street number, street name (`compareStreetIdentity`),
+   unit match, and locality (ZIP5 first, then city+state). A mismatch or
+   unrecognized shape falls through to SerpApi. The direct path is skipped for unit
+   formats the search cannot reliably handle (e.g. `1/4`, `3-B`, `Lot 5`, `bldg 2 apt 5`,
+   or a unit after a comma) and when the budget is exhausted (max 6 attempts and 120 s
+   cumulative per run, each attempt cut off at 45 s).
+2. **SerpApi fallback.** When the direct path returns nothing or is skipped, the existing
+   Google search runs: filters to `site:zillow.com/homedetails`, matches street-number +
+   city + unit in titles. Returns `null` on no exact match.
+
+Each lookup emits one `property_data_url_discovery` INFO event. A `serpapi_error` reason
+distinguishes an HTTP error or timeout from a genuine miss. There is no per-lender flag —
+direct search runs for every lender.
+
+**Redfin URL discovery** uses the SerpApi path only (`site = "redfin"`), unchanged.
+
+Since LOA-1745 (#2695), when the subject address includes a unit, the unit is included in the
+SerpApi query so the specific unit's zpid is ranked above the building-level record.
 </Accordion>
 <Accordion title="Mashvisor (MashvisorService) — rental market data">
 Env `MASHVISOR_API_KEY`. Provides short-term rental (STR) and long-term rental (LTR) market data for the subject property via three endpoints defined in `mashvisor-request.ts` (LOA-1579):

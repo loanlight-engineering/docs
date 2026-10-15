@@ -84,6 +84,15 @@ operational consequence is that Priority Financial's integration must send `agen
 
 `PortalAppraisalPayload` now includes `marketComps: AppraisalMarketComps | null` (LOA-2324, `shared-types@1.21.0`) alongside the existing `rentalData` field. The EPC embedded portal renders market comps — Zillow for-sale listings and ATTOM recently-sold sales from the `marketCompsFetch` graph node — in the appraisal comparables table via `AppraisalComparablesTable` (`shared-ui@0.15.0`). A `CompSourcePill` distinguishes "Appraisal" (extracted from the PDF), "SSR" (submission support), and "LoanLight Data" (market-enrichment) rows. The `marketComps` field is `null` when `ENABLE_ZILLOW_COMPS` is off or the subject is ineligible.
 
+**Sales comparables table changes (loanlight-shared#139 / loanlight-shared#197, ported as #4868).** The `AppraisalComparablesTable` in `shared-ui` now includes:
+- **DOM column** — days on market, sourced from `AppraisalComparable.days_on_market` (`shared-types@5.1.1`). The field has been present on the wire from the XML mapper (`comparable.mapper.ts`, `DaysOnMarketCount`) and is now declared on the type and shown in the table. Active listings carry `days_on_market` even when they have no `sale_date`.
+- **Column headings** — renamed to "Sale/List Price" and "Adj./Appraised" to reflect both sold and active-listing rows.
+- **Live-first subject row** — the subject's cells read live extractor fields before the legacy `sales_comparison.subject_*` keys, matching the staff portal table.
+- **Subject appraised value** — appears in the subject's Adj./Appraised cell.
+- **HOA fee** — the subject's `hoa_fee` is converted to a monthly equivalent before display (`monthlyHoaAssessment`, new helper in `shared-ui`): quarterly fees are divided by 3, annual by 12. A fee with an unrecognised or absent frequency falls back to the legacy monthly assessment field rather than being displayed as-is, so a `$1,200/year` fee no longer appears as `$1,200/month`. The subject data card still shows the fee as stated (e.g. `$1,200 / per year`).
+
+**Rent Comparables table** — the staff portal's Rent Comparables table (Mashvisor LTR comps) no longer shows the **Adj. Rent** and **Comparison** columns (#4868). The underlying data is still extracted and stored; only the display columns were removed.
+
 `PortalAppraisalPayload` includes `rentalData: AppraisalRentalData | null` (LOA-1954). The EPC/partner
 surface gets the **display subset only**: `AppraisalAuditProjectionService` pipes rental data through
 `toAppraisalRentalData()` before returning, stripping the `_`-prefixed internal diagnostic fields

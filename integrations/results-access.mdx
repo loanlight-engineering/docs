@@ -57,10 +57,20 @@ sourceIp, expiresAt`).
 
 <Note>
 The **EPC-source predicate** (only EPC-originated audits may be opened this way) is enforced
-**upstream** in `ResultsAccessService.mintExternalUrl` via `getAuditDetailScopedByClient` in
-`loanlight-integrations`, not in this controller. LOA-1075 removed a dead
-`encompass_document_id` null-check that had blocked all EPC requests since that column lost its
-writers on 2025-08-05.
+**upstream** in `ResultsAccessService.mintExternalUrl` in `loanlight-integrations` (LOA-2935).
+`AuditDetailsRepository.getMintScope` resolves the mint identity from the owning transaction
+record. The service selects a branch in this order:
+- No scope row → 404.
+- `foreignClaim` (audit belongs to another client) → 404.
+- Requestor header matches the lender’s `workos_org_id` → **WorkOS branch**: forwards the
+  caller’s bearer to loanlight-api with no `X-Requestor-ID` upstream and no FusionAuth mint.
+- Requestor header matches the client’s `provider_client_id` → **FusionAuth branch**: mints
+  for `provider_client_id`, as before LOA-2935.
+- Otherwise → 404.
+
+Every mint log line carries `requestorHeader`; failure lines carry a `reason` from the closed
+`MINT_REASONS` set (`mint-reasons.ts`). LOA-1075 removed a dead `encompass_document_id`
+null-check that had blocked all EPC requests since that column lost its writers on 2025-08-05.
 </Note>
 
 <ResponseField name="url" type="string">

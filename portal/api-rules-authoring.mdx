@@ -359,12 +359,24 @@ LOA-2180 builds a portable rule-state representation:
 - **Canonical encoding and diff.** Each service produces a canonical byte representation of a lender's active rule set that is stable across database replicas and time. A canonical diff (`RuleChangeRecord[]`) between two snapshots shows exactly which rules, severities, and thresholds changed. This is the same `RuleChangeRecord` shape used by apply preview; the canonical diff is a library without a production consumer until a later ticket wires it.
 - **Dev-only import.** An authenticated HTTP endpoint accepts a serialized export envelope and atomically replaces the destination service's active rule sets. Import admission runs before body parsing and validates envelope shape, content, destination lender/program identity, byte limits, and row counts. For appraisal, the import is refused over an existing current-version export gap. **Production startup rejects an enabled import flag** — imports are a development/test-only capability and cannot run in a live environment.
 
+### Catalog built-in automatic delivery (LOA-3248)
+
+`APPRAISAL_BUILTIN_RELEASES` (in `modules/portal-appraisal-rules/appraisal-rule-catalog.ts`) is the declaration for automatic delivery of selected built-in appraisal rules. Each entry names a rule id, the rule codes it supplies, the target population (`"all-lenders-all-active-appraisal-sets"`), a genesis type (`"selected-rules-only"`), and the permitted changes (`"insert-missing-selected-rules"`). The reconcile task supplies declared entries as insert-only templates and delivers them to every lender via the existing RuleOps engine — preserving lender edits and deletions, with atomic history/change/snapshot and no-op handling.
+
+Migration `0156` adds template provenance to the rules tables so the reconciler can identify which rules it supplied and which the lender owns.
+
+<Note>
+`APPRAISAL_BUILTIN_RELEASES` ships empty (LOA-3248 is infrastructure only). The first production entry (CONDO_004) will be declared in a subsequent PR. Until then the reconciler runs and exits with nothing to deliver for this mechanism.
+</Note>
+
 ### Datadog monitors
 
-Three monitors ship with the reconciler (`observability/datadog/`):
-- `ruleops-reconcile-failed` — fires on `reconcile_incomplete` events.
-- `ruleops-reconcile-startup-failed` — fires when the CDK reconciler task fails to start (separate from a reconcile that starts but does not converge).
-- `ruleops-rule-export-lost` — fires when an S3 export does not land within the expected window.
+Monitors ship with the reconciler (`observability/datadog/`), covering both production and INT (LOA-3234 added INT twins):
+- `ruleops-reconcile-failed` / `ruleops-reconcile-failed-int` — fires on `reconcile_incomplete` events.
+- `ruleops-reconcile-startup-failed` / `ruleops-reconcile-startup-failed-int` — fires when the reconciler task dies before resolving its environment (no heartbeat emitted).
+- `ruleops-reconcile-launch-failed-int` — fires when the reconcile task never starts after an INT deploy.
+- `ruleops-rule-export-lost` / `ruleops-rule-export-lost-int` — fires when an S3 export does not land within the expected window.
+- `ruleops-export-gap-recovery-broken` / `ruleops-export-gap-recovery-broken-int` — fires when a gap-recovery repair attempt fails.
 
 ## portal-income-rules
 
