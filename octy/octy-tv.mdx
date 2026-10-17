@@ -35,9 +35,50 @@ The player (`ExplainerPlayer`) assembles the clip sequence from the manifest and
 
 ## The catalog
 
-`CATALOG` in `src/lib/explainers/generated/index.ts` is the built list of explainer entries. Each entry carries `slug`, `title`, `tagline`, `kind`, `agentType?`, `chapters`, and `duration`. The `ExplainersLibrary` component reads it client-side; no API call is needed.
+`CATALOG` in `src/lib/explainers/generated/index.ts` is the built list of explainer entries. Each entry carries `slug`, `title`, `tagline`, `kind`, `audience`, `agentType?`, `chapters`, and `duration`. The `ExplainersLibrary` component reads it client-side; no API call is needed.
 
-Current catalog covers: `loanlight-overview`, `pre-audit-classification`, `document-health`, `pii-validation`, `urla-extraction`, `property-data`, `red-flags`, `credit-evaluation`, `appraisal-evaluation`, `bank-statement-income`, and `iris`.
+Each explainer carries an `audience` field:
+
+| Audience | Meaning |
+|---|---|
+| `"team"` | Internal, for LoanLight engineers and Octy. Shown in the Octy TV library. |
+| `"customer"` | For underwriters and lender users; can be published to the portal's Training page. |
+
+Current catalog covers:
+- **Team explainers:** `loanlight-overview`, `pre-audit-classification`, `document-health`, `pii-validation`, `urla-extraction`, `property-data`, `red-flags`, `credit-evaluation`, `appraisal-evaluation`, `bank-statement-income`, `iris`.
+- **Customer training videos:** `urla-1003-check-training`, `data-consistency-training`, `document-health-training`, `properties-check-training`, `credit-training`, `appraisal-training`, `bank-statement-income-training`.
+
+## Publishing to the portal
+
+Customer-audience explainers (`audience: "customer"`) can be published to the lender portal's **Training** page. Publishing delivers the explainer as data (manifest + narration clips + PDF page images), not a video file; the portal renders it with the `@loanlight-engineering/explainer-renderer` package.
+
+The publishing workflow lives in `src/lib/portal-training/`:
+
+- **`publishToPortal(slug)`** — checks for blockers (`audience !== "customer"`, draft, unvoiced cues), uploads missing narration clips and assets to the API in batches, then calls `trainingVideos.publish(slug, publication)` to store the manifest. A `content_hash` (SHA-256 of the published manifest) changes on every republish so the portal can tell revisions apart.
+- **`portalStatus()`** — returns every customer video's portal standing: `not_published`, `current`, `out_of_date` (content hash mismatch), or `hidden`.
+- **`customerVideoFreshness(check?)`** — checks GitHub commit history against each story's `sources[]` list. Only called when the **Check for updates** button is pressed.
+
+### PortalPublishPanel
+
+Each customer-audience explainer in Octy TV includes a **Portal** panel below the player. The panel is the `PortalPublishPanel` component (`src/components/explainers/PortalPublishPanel.tsx`) and exposes:
+
+- **Status badge** — `Published · current`, `Published · out of date`, `Hidden in the portal`, or `Not in the portal`.
+- **Check for updates** — queries GitHub for commits touching the story's `sources[]` since the last publish; shows which files changed. Updates the `freshness` state for all customer videos at once (uses `GET /api/explainers/portal?check=1`).
+- **Publish** — uploads missing clips/assets and commits the manifest (`POST /api/explainers/portal/:slug`). Disabled with an explanation when a blocker exists (draft, unvoiced cues, wrong audience).
+- **Hide / Show** — toggles the video's `status` between `hidden` and `published` without re-uploading (`PATCH /api/explainers/portal/:slug`).
+
+When the connected LoanLight API predates the `training_videos` routes (migration `0158`), the panel shows a "feature unavailable" notice instead of erroring.
+
+### Portal API routes
+
+Octy's Next.js route handlers that back `PortalPublishPanel`:
+
+| Handler | Purpose |
+|---|---|
+| `GET /api/explainers/portal[?check=1]` | Returns each customer video's `publishing` status and optionally its GitHub `freshness` report. The two halves fail independently. |
+| `POST /api/explainers/portal/:slug` | Publish (or republish) a video. |
+| `PATCH /api/explainers/portal/:slug` | Toggle `hidden` / `published` status. |
+| `GET /api/explainers/portal/:slug` | Return one video's manifest and presigned clip URLs for playback in the portal. |
 
 ## Authoring and refresh
 

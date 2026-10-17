@@ -75,8 +75,10 @@ The Collateral Review section surfaces the automated AVM → CDA escalation stat
 The section shows:
 - **Badge** — the decision outcome (`avm_only`, `avm_then_cda`, `below_threshold`, `skipped_*`, `shadow_would_order_avm`, etc.) as a labeled badge with live/shadow mode distinction.
 - **Score and threshold** — the firing collateral score, agency (`fannie_mae` or `freddie_mac`), and the lender's configured threshold.
-- **AVM order state** — status, requested/resolved timestamps.
-- **CDA order state** — order status, the lender's turn-time setting (24 or 48 hours), and an "Open report" link once the CDA document is delivered.
+- **AVM order state** — status, requested/resolved timestamps, and the Clear Capital AVM order ID (`avmClearCapitalOrderId`) when the order reached Clear Capital.
+- **CDA order state** — order status, the lender's turn-time setting (24 or 48 hours), the Clear Capital CDA order ID (`cdaClearCapitalOrderId`) when applicable, and an "Open report" link once the CDA document is delivered.
+
+`orderIdsResolved` is set to `true` once the vendor IDs have been fetched from loanlight-api. The View link that was previously shown next to the order is removed; order IDs are now the primary reference for tracking orders in Clear Capital's system (octy #189, #191).
 
 The section is hidden when the loan has no live activity (`active: false`). Shadow-mode rows include an eye-slash badge. Vendor-opinion fields (e.g. `cdaRiskScore`, `cda_review_recommended`) are redacted and never shown.
 

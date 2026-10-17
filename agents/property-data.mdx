@@ -80,7 +80,14 @@ channels, disjoint from the instrumentation channel.
 </Step>
 
 <Step title="fetchRedfin (enabled in int + prod)">
-Gated by `ENABLE_REDFIN_SOURCE === "true"`. Since LOA-2091 this variable is set `"true"` in integration and production environments — the step is no longer off by default. When active, it resolves a redfin.com URL via the site-aware SerpApi finder, then calls `hasData.getRedfinPropertyDetails(url)`. A null result degrades to a no-op merge. The Redfin merge is additive-only: `mergeRedfin()` never overwrites a non-null incumbent from HasData/Zillow or ATTOM.
+Gated by `ENABLE_REDFIN_SOURCE === "true"`. Since LOA-2091 this variable is set `"true"` in integration and production environments — the step is no longer off by default.
+
+Redfin URL discovery uses a two-stage path (LOA-3270): a HasData direct listing search runs first, and SerpApi is the fallback.
+
+1. **HasData direct listing search (primary).** `buildRedfinListingKeyword` constructs a search keyword from the address. `HasDataService.getRedfinListingDetails` requests HasData's Redfin listing-search endpoint with unit and locality validation (street number, street name, unit match, ZIP5 or city+state). A mismatch or shape rejection falls through to SerpApi. The direct path is subject to the same shared per-run budget as the Zillow direct path (max 6 attempts, 120 s cumulative, 45 s per attempt).
+2. **SerpApi fallback.** When the direct path returns nothing or is skipped, `ZillowUrlFinderService.findPropertyUrl(input, "redfin")` searches Google (`site:redfin.com`, detail path `/home/`) and scrapes the resolved URL via `HasDataService.getRedfinPropertyDetails`.
+
+Each lookup emits one `property_data_url_discovery` INFO event with `site: "redfin"`. A null result from either path degrades to a no-op merge. The Redfin merge is additive-only: `mergeRedfin()` never overwrites a non-null incumbent from HasData/Zillow or ATTOM.
 
 A subject-only Redfin listing screenshot is captured here via `ListingScreenshotService.captureIfMissing`
 and stored on the `subjectRedfinScreenshot` state channel. Zillow and Redfin screenshots are
@@ -187,7 +194,7 @@ Each lookup emits one `property_data_url_discovery` INFO event. A `serpapi_error
 distinguishes an HTTP error or timeout from a genuine miss. There is no per-lender flag —
 direct search runs for every lender.
 
-**Redfin URL discovery** uses the SerpApi path only (`site = "redfin"`), unchanged.
+**Redfin URL discovery (LOA-3270)** now runs a HasData direct listing search first, with SerpApi as fallback. `HasDataService.getRedfinListingDetails` executes a Redfin listing-search endpoint call and validates the top result by address (street number, street name, unit, ZIP5 or city+state). When the direct path is skipped or returns nothing, `findPropertyUrl(input, "redfin")` falls back to a Google search (`site:redfin.com`, detail path `/home/`) and scrapes the URL via `getRedfinPropertyDetails`. The Redfin direct path shares the same per-run budget as the Zillow direct path.
 
 Since LOA-1745 (#2695), when the subject address includes a unit, the unit is included in the
 SerpApi query so the specific unit's zpid is ranked above the building-level record.
@@ -284,14 +291,18 @@ The runner (`property-data-graph-runner.ts`), not the graph, writes these tables
 Full JSONB payloads: HasData/listing/valuation/rent/proximity, `consolidated_subject`,
 `consolidated_borrower`, `consolidated_reo`, Zillow URLs, and ATTOM payloads. The consolidated blobs
 carry `naturalHazard` as a discriminated union that is never omitted (`{coverage:true,...}` or a
-`{coverage:false, fetchedAt}` sentinel).
+`{coverage:false, fetchedAt}` sentinel). `hasdata_responses` (JSONB, migration `0157`) stores every
+raw HasData API response for the run, keyed by operation (`zillow/property`, `redfin/listing`,
+`redfin/property`, etc.) with `accepted: true` on the response the run ultimately used.
 </ResponseField>
 
 <ResponseField name="property_data_results" type="table">
 One row per property, with a `property_type` CHECK of `subject | current_home | investment`. Carries
 the consolidated facts (address, coordinates, beds/baths, AVM, last sale, owner,
 photos), coverage metrics (`subject_coverage_percent`, `borrower_coverage_percent`,
-`*_missing_buckets`), and `county_fips` as TEXT (leading-zero-safe).
+`*_missing_buckets`), and `county_fips` as TEXT (leading-zero-safe). `estimate_source` (TEXT,
+migration `0157`) records which data source produced the property's valuation estimate
+(`zillow`, `redfin`, `attom`, or `null` when no estimate resolved).
 </ResponseField>
 
 <Warning>

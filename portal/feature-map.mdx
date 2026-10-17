@@ -28,6 +28,10 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/dscr-agent` | DSCR calculator; gated on `flags.dscrAgent`. |
     | `/statement-analyzer` (+ `/[runId]`) | Qualifying-assets review; gated on `flags.statementAnalyzer`. Renders a "not enabled" message when off. See [statement analyzer](/portal/statement-analyzer). |
     | `/classification` | Document classification (upload zone + results table). |
+    | `/training` | Customer training videos catalog; gated on the lender's `training_videos` feature flag or LoanLight staff in their own org. The API returns 403 `FEATURE_DISABLED` for lenders without the flag. Videos that require a newer renderer schema version than the portal ships are silently excluded; they appear once the portal upgrades its `@loanlight-engineering/explainer-renderer` package. Backed by `GET /api/v1/portal/training-videos` (catalog) and `GET /api/v1/portal/training-videos/:slug` (manifest + presigned clip/asset URLs). |
+    | `/training/[slug]` | Single training video player. Presigned narration clip URLs expire at `expiresAt`; the page re-fetches them on expiry. |
+
+    **`training_videos` table (migration `0158`).** The LoanLight API stores published training videos in a `training_videos` table (PK `slug`). Columns: `title`, `description`, `agent_type` (nullable — null for non-agent videos), `sort_order`, `status` (`published | hidden`), `schema_version` (the explainer renderer version the video was built for), `manifest` (JSONB — the full story manifest), `content_hash` (SHA-256 of the published manifest, changes on every republish), `duration_seconds`, `published_by`, `published_at`, `created_at`. An index on `(status, sort_order)` drives the catalog listing.
   </Tab>
   <Tab title="settings">
     Tenant settings (`SectionTabNav` of visible tabs). `/settings` redirects to the first visible tab.
@@ -92,13 +96,21 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
   </Tab>
 </Tabs>
 
-The `(auth)` group (`/login`, `/invite`, `/reset-password`) is unauthenticated and forces light theme via `AuthThemeGuard`. The `results` group is documented separately in the [partner results viewer](/portal/partner-results-viewer).
+    The `(auth)` group (`/login`, `/invite`, `/reset-password`) is unauthenticated and forces light theme via `AuthThemeGuard`. The `results` group is documented separately in the [partner results viewer](/portal/partner-results-viewer).
+
+    **Credit section improvements (LOA-3246, LOA-3285):** The `CreditSectionPage` renders `CreditLiabilitiesView` from `@loanlight-engineering/shared-ui`. Recent changes:
+    - **DTI tile hidden (LOA-3246).** The credit overview no longer shows a DTI tile. `toCreditOverview` sets `dti: null` and `dtiShown: false` unconditionally. The DTI ratio is still computed and persisted in `credit_runs`; only the UI tile is suppressed.
+    - **Inquiry counting (LOA-3285).** Every listed credit inquiry is counted as a hard pull unless its `inquiry_type` is explicitly `"soft"`. Previously untyped (`"unknown"`) inquiries were excluded, undercounting hard pulls on some vendor reports.
+    - **Report filtering (LOA-3285).** The overview cards and sidebar badge now show only the current (non-superseded) credit reports per borrower.
+    - **Needs Info and Pending rules (LOA-3285).** The credit findings table includes `NEEDS_INFO` and `PENDING` rule results with their status and messages. Pending rules contribute to the per-report needs-review count.
 
 ## Feature flags
 
 The `FeatureFlags` object (`src/lib/feature-flags.ts`) has these keys:
 
 `classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`.
+
+The `training_videos` flag is **not** in this object. It is a per-lender flag resolved server-side when the portal calls the API catalog endpoint. A 403 `FEATURE_DISABLED` response causes `TrainingNotice` to render an "unavailable" state rather than an empty list.
 
 <Note>
 The **eligibility card** is **not** in this `FeatureFlags` object. Its visibility depends on both the lender's `eligibility_card` flag (a tri-state `off` / `internal` / `on` stored in `feature_value` on `lender_feature_flags`) and the viewer's super-admin status. It is resolved server-side via `GET /api/eligibility-card-access`, separate from the env-default `FeatureFlags` flow. See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements).
