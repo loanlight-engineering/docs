@@ -138,20 +138,41 @@ The sink defaults to a no-op and is wired once at app bootstrap by `PipelineMetr
 There are two entry paths, both ending in the same tables (see [URLA data model](/data-model/urla-data-model)):
 
 1. **Inline during extraction** — the extraction graph runs this subgraph per borrower and returns `rulesEngineSummaries: [{ borrowerLabel, summary }]`. `persistUrlaExtractionResults` writes `urla_extraction_results`, then `persistUrlaRulesFindings` runs per borrower.
-2. **Cached extraction re-evaluation** — `runRulesEngineForCachedExtraction` instantiates a `RulesExecutor` directly (skipping the LLM extraction entirely), picks each borrower's country via `pickCountryOfCitizenshipForBorrower`, runs `executor.execute(...)`, and persists per borrower.
+2. **Cached extraction re-evaluation** — `runRulesEngineForCachedExtraction` instantiates a `RulesExecutor` directly, picks each borrower's country via `pickCountryOfCitizenshipForBorrower`, runs `executor.execute(...)`, and persists per borrower.
 
-`persistUrlaRulesFindings(auditRunId, loanId, extractionResultId, borrowerLabel, rulesSummary)` inserts one parent `urla_rules_engine_results` row, then one `urla_rules_findings` row per finding (`rule_id`, `rule_name`, `rule_category`, `finding_type`, `message`, `field_path`, `expected_value`, `actual_value`, `metadata`).
+`persistUrlaRulesFindings(auditRunId, loanId, extractionResultId, borrowerLabel, rulesSummary)` inserts one parent `urla_rules_engine_results` row, then one `urla_rules_findings` row per persistable finding (`PASS`, `FAIL`, `INFO` only — the non-persisted `NOT_ENOUGH_DATA` and `DEFERRED` tags are recorded in the check list instead but never stored in this table). Returns the inserted ids aligned one-to-one with the summary's findings.
+
+**Check list recording (LOA-3289).** The URLA rules executor now records one outcome per rule it considered, per borrower. `deriveOutcome` maps findings to a `UrlaOutcome` by first-match-wins order:
+
+| Rule state | Outcome |
+|---|---|
+| Evaluator threw | `error` |
+| Any `FAIL` finding | `failed` |
+| Any `INFO` finding | `warning` |
+| `NOT_ENOUGH_DATA` tag (evaluator ran on empty data) | `not_enough_data` |
+| All `DEFERRED` tags and no other findings | `not_applicable` (rendered as "Deferred") |
+| Lender-disabled rule | `not_applicable` (with reason `lender_disabled`) |
+| Rule's own `notApplicable` gate fires | `not_applicable` (with a rule-specific reason) |
+| Otherwise | `passed` |
+
+Both the fresh and the cached paths build the borrower's check list from these outcomes and the inserted finding ids, merge all borrowers sorted by `checkId`, and hand the result back through `runUrla` so `owned()` stamps it onto `agent_runs.check_list` in the same UPDATE that completes the run. No migration is needed; the column was added by LOA-3287.
+
+A lender with every rule disabled records `{ recorded: true, ran: 0 }` — a list of `not_applicable` entries, one per rule. The `runRulesEngine=false` path records no list and reads `saved_before_coverage`.
+
+Stored `urla_rules_engine_results` and `urla_rules_findings` rows are byte-identical to pre-LOA-3289 rows — only the check list is new.
 
 ### Tables
 
 - **`urla_rules_engine_results`** — `audit_run_id` (FK → `audit_runs` cascade), `loan_id`, `urla_extraction_result_id` (FK), `borrower_label` (default `BORROWER_1`). Unique `(audit_run_id, borrower_label)` — one row per borrower.
-- **`urla_rules_findings`** — `rules_engine_result_id` (FK), `rule_id` (`ruleIdEnum`), `rule_name`, `rule_category` (`ruleCategoryEnum`), `finding_type` (`findingTypeEnum`), `message`, `field_path`, `expected_value` (jsonb), `actual_value` (jsonb), `metadata` (jsonb).
+- **`urla_rules_findings`** — `rules_engine_result_id` (FK), `rule_id` (`ruleIdEnum`), `rule_name`, `rule_category` (`ruleCategoryEnum`), `finding_type` (`findingTypeEnum`), `message`, `field_path`, `expected_value` (jsonb), `actual_value` (jsonb), `metadata` (jsonb). Only `PASS`, `FAIL`, and `INFO` findings are persisted here; `NOT_ENOUGH_DATA` and `DEFERRED` tags are reflected in the check list only.
 
 The Postgres enums (`database/schema/enums.ts`): `finding_type` = `['PASS','FAIL','INFO']`, `rule_category` = the 16 `SECTION_*` values, `rule_id` = the 32 rule IDs. See [enums reference](/data-model/enums-reference).
 
 ## Read API
 
 `UrlaCompletenessService.getLastUrlaCompletenessByAuditRun(auditRunId)` loads the latest `urla_extraction_results` (404 if none), the `urla_rules_engine_results` ordered by `borrower_label ASC` LIMIT 1, and the findings ordered by `(rule_category, rule_id, id)`. It computes `UrlaRulesEngineSummary { total_rules, passed_count, failed_count, info_count }`.
+
+Both `GET /api/v1/audit_runs/:id/urla_completeness` and the portal `urla_completeness` endpoint now return a `checks` array (LOA-3289) alongside `coverage`. Each entry in `checks` carries the rule's `name`, its `label` (from the check-labels vocabulary), a `reason` code, the referenced findings' `messages`, and — for a passed check — a `verified` description of what was checked. Only trusted entries (those whose coverage is recorded and whose stamp matches `completed_at`) are served. The Swagger DTO documents `checks` with `label` as an open string; `coverage` is not yet in the Swagger response but is returned.
 
 <Note>
 The `urla_completeness` API response includes both `rules_engine_result` (BORROWER_1 only, the `LIMIT 1` field) and `rules_engine_results` (all borrowers, plural). The EPC app and the audit PDF 1003 Check section now read `rules_engine_results` when present, so all borrowers' findings are shown (LOA-3020, LOA-2827). The shared-types `UrlaCompletenessData` type does not expose `rules_engine_results`; integrations consumers cast to `UrlaCompletenessWithBorrowers` (`packages/frontend/src/utils/urlaBorrowerResults.ts`) to access it.

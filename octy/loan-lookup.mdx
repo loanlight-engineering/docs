@@ -103,9 +103,22 @@ loan at `/lookup` to jump to its audit-run modal Collateral Review section; open
 page at `/lenders/[id]?tab=collateral-review` for the cross-loan lender-scope list.
 </Note>
 
-### Credit section (octy #103)
+### Credit section (octy #103, #192)
 
-The Credit section was previously missing from Octy: the data arrived in the results payload but was dropped at the type boundary. The section reports Credit-Evaluation rule outcomes, including rules overridden by a human reviewer (purple pill). Its contribution to the Overview rollup uses the canonical override-excluding count.
+The Credit section reports Credit-Evaluation rule outcomes, including rules overridden by a human reviewer (purple pill). Its contribution to the Overview rollup uses the canonical override-excluding count.
+
+**Per-report view (default, LOA-3284 #192).** When `data.creditRoster` is present, reports are grouped by borrower and sorted borrower-first, current-report-first within each group:
+
+- Each report block shows a header with the file name, a **Current** or **Superseded by &lt;date&gt;** label, the run status, and a metadata line (`Report <M/D/YYYY> · Evaluated <local time> · credit run <id>`). The date order is: report date, then pull date, then run completion, then run start.
+- The block contains that report's own metrics, AI summary and counts. Flagged rules are listed worst-first; passed, skipped and pending rules are collapsed. Superseded blocks are dimmed.
+- When a flagged rule's outcome differs on another report for the **same borrower**, the rule carries a cross-report note (for example "Pass on the 10/1/2026 report"). The note checks the borrower's current report first. A same-day or undated report is named by file name, with the run id appended when file names match.
+- A report not placed with any borrower appears in a final "Not matched to a borrower" group and is labelled **Current**.
+
+When `creditRoster` is absent (older API), Octy falls back to a list of report blocks sorted newest-first, with the newest labelled **Latest**. The merged `auditResults.credit` block is the fallback when there are no individual report blocks.
+
+**Compare view** (two or more reports). A **Compare** toggle renders a table of rules flagged on any report against the columns of reports. Each column shows the file name, the borrower, the evaluation time, Current/Superseded label, and the flagged count. A rule a report did not evaluate shows "Not evaluated". Rules that passed or were skipped everywhere are hidden, with a count. Clicking a cell opens that rule in its report.
+
+The section badge and the Overview credit count still come from the merged `auditResults.credit` block and equal `audit_runs.finding_count`.
 
 Credit's issue predicate (`outcome NOT IN PASS/SKIPPED`) differs from appraisal's (`FAIL` outcomes only). This divergence is an open design question tracked in LOA-2113.
 

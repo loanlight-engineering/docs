@@ -70,23 +70,46 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/admin/release-notes` | "What's New" authoring UI. Create, edit, and manage the release-notes lifecycle. Requires `super_admin` + `requireInternal`. See [release notes](/portal/release-notes). |
   </Tab>
   <Tab title="(detail) — audit viewer">
-    Staff loan-audit detail viewer (`ChromeShell mode="fixed"`). `/loan-audits/[auditRunId]` with an `AuditSidebar`:
+    Staff loan-audit detail viewer (`ChromeShell mode="fixed"`). `/loan-audits/[auditRunId]` with an `AuditSidebar` (LOA-3287, #4974).
 
-    - Overview (base)
-    - Document Health (`/document-health`)
-    - Data Consistency (`/data-consistency`)
-    - Properties Check (`/properties-check`)
-    - 1003 Check (`/1003-check`)
-    - Credit Results (`/credit-results`)
-    - linked per-agent runs: Appraisal (`/appraisal/[runId]`), Income (`/income/[runId]`)
+    **Sidebar layout.** `SECTION_TITLES` is the one source for every section name. Top-level order:
+
+    - **Issue Summary** (base — was "Overview")
+    - **Pre-Underwriting** (collapsible group containing, in order):
+      - 1003 Check (`/1003-check`)
+      - Document Health (`/document-health`)
+      - Data Consistency (`/data-consistency`)
+      - Properties Check (`/properties-check`)
+      - Credit Review (`/credit-results` — was "Credit Results")
+    - Income Analysis (`/income/[runId]` — was "Income")
+    - Appraisal Review (`/appraisal/[runId]` — was "Appraisal")
+
+    The top nav also renames **Credit** to **Credit Review**. The Pre-Underwriting rows have no icons. Only **Issue Summary** shows a red issue count, using the `issueSummaryOf` rule that backs the page's "N issues found" banner; it shows ✓ only when every section has really run. If any section is still pending, the hero reads "No issues found yet" rather than giving a false all-clear.
+
+    The collapse toggle sits inside the dark-blue sidebar column. The narrow-width bar and drawer are dark.
+
+    **Per-section layout changes (#4974).**
+    - **Properties Check**: "Rules Flagged" renamed to **Program Rules**. High-severity findings count as Fail and every other severity as Warning; the two pills add up to the rows in the table. Price History shows the six most recent changes with a collapsed "Show more" toggle. The other tiles no longer have icons.
+    - **Document Health**: Estimated closing sits inside the "N of M clean" card, on both Issue Summary and `/document-health`.
+    - **Data Consistency**: every severity group is open by default.
+    - **Income Analysis**: Issues Found is at the top; trend and monthly charts sit in cards.
+    - **Credit Review**: tiles and program-rules table sit in one card; borrower selector uses the Appraisal tab style inside that card on every tab. Account Health is its own card next to Credit Scores. Inquiries has its own row below Tradeline Summary.
+
+    Table and card headers on audit agent pages use one unified style (`.audit-catalyst-theme` CSS). Dialogs render outside that theme and keep their own header style.
 
     Sidebar and overview issue counts must come from the v2 `useResultsData()` projections (`dataConsistency.issueCount`, `documentHealth.issueCount`, `propertyData.redFlags.length`, `urlaCompleteness.rules_engine_result.summary.failed_count`). The "Errors" card/route was removed.
 
-    **Eligibility card (LOA-2032):** mounted as the first card on the overview, behind an access gate. The gate combines the lender's `eligibility_card` flag state with whether the viewer is a super-admin (`canSeeEligibilityCard`). It is resolved server-side by `GET /api/eligibility-card-access` (a Next.js route handler that reads the lender's feature flag and the viewer's WorkOS session) and fails closed — the card is hidden on any error or missing session.
+    **Eligibility card (LOA-2032):** mounted as the first card on Issue Summary (the base overview), behind an access gate. The gate combines the lender's `eligibility_card` flag state with the viewer's role; it is resolved server-side by `GET /api/eligibility-card-access` and fails closed — the card is hidden on any error or missing session.
 
-    The `eligibility_card` flag is a tri-state stored in `feature_value` on `lender_feature_flags`: `"off"` | `"internal"` | `"on"`. A lender with no row defaults to `"internal"` (LOA-1996, changed from `"off"` on 2026-08-25), so the card is visible to internal super-admins on every lender without any row being seeded.
+    The `eligibility_card` flag is a tri-state stored in `feature_value` on `lender_feature_flags`: `"off"` | `"internal"` | `"on"`. A lender with no row defaults to `"internal"`. The rule after LOA-3311 is:
 
-    Super-admin impersonation is handled as follows: `viewerIsSuperAdmin` is true when `me.role === "super_admin" && (me.isInternal || me.realLenderIsInternal === true)`. This means an internal super-admin who impersonates another lender’s tenant retains super-admin status for the gate (LOA-1996). The result: the eligibility card is now visible to internal super-admins on all lenders, including lenders with no eligibility engine configured. An ungraded lender returns zero findings, which the card renders as a neutral “Not resolved” state. An explicit `"off"` row remains the kill switch without a deploy. The `"on"` flag value exposes the card to the lender’s own users and is the GA milestone (not yet reached).
+    | Flag value | LoanLight super-admin | Lender users | Encompass / partner links |
+    |---|---|---|---|
+    | `on` | shown | shown | shown |
+    | `internal`, or no row | shown | hidden | hidden |
+    | `off`, or an unrecognized value | **hidden** | hidden | hidden |
+
+    Before LOA-3311, `off` and `internal` behaved identically for super-admins. Now `off` is a true kill switch — it hides the card from LoanLight staff as well. On any lender whose row is explicitly `off` or holds an unrecognized `feature_value`, super-admins stop seeing the card. Lenders with no row default to `internal`, so super-admins keep seeing the card there. Impersonation is handled as in LOA-1996: `viewerIsSuperAdmin` is `true` when `me.role === "super_admin" && (me.isInternal || me.realLenderIsInternal === true)`, so an internal super-admin impersonating another lender retains super-admin status for this gate.
 
     The card reads verdict fields from `GET /api/v2/audits/:auditRunId/eligibility`; see [audit results API](/portal/api-audit-results).
 

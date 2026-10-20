@@ -76,12 +76,38 @@ See [Partner API results and access URLs](/partner-api/results-and-access-urls).
 - `GET /api/v1/audit_runs/:id/appraisal` — `PortalAppraisalPayload` or `{ data: null }` (never 404); thin projection from `appraisal_runs` via `AppraisalAuditProjectionService`. Added in LOA-1675 to surface the EPC-triggered appraisal run on the audit sidebar. Manual-override overlay is applied (LOA-1685).
 - `GET /api/v1/audit_runs/by-loan/:encompassLoanId/latest-completed`
 
+**Check labels, coverage, and checks (LOA-3287, "Show the Work" epic).** Seven portal section endpoints and five `audit_runs` routes now return additive fields on their rule/finding rows:
+
+- `label` — a `CheckLabel` string (`passed` | `failed` | `missing` | `incomplete` | `warning` | `not_applicable`) or `null` when labelling does not apply (for example a rule the lender has disabled). `label: null` is distinct from `label: "not_applicable"`.
+- `coverage` — a `Coverage` object at the section level. When the agent recorded a check list (`recorded: true`) it contains `ran` (count of checks the label maps to a non-`null` label), `needsReview` (count whose label is `failed`, `missing`, `incomplete`, or `warning`), and `counts` (a map of every `CheckLabel` to its count). When it did not (`recorded: false`) it carries a `reason`:
+
+| `reason` | Meaning |
+|---|---|
+| `not_run` | The agent did not run (skipped or absent). |
+| `not_complete` | The agent has not finished yet. |
+| `stale` | The run was re-opened and completed again without a new check list, so the old stamp no longer matches `completed_at`. |
+| `saved_before_coverage` | The agent completed before check-list recording shipped (or no list was produced). |
+| `not_evaluated` | Coverage cannot be computed without additional data (used by the credit agent when compliance results are absent). |
+| `unreadable` | The ledger row could not be read; the rest of the response is unaffected. |
+
+- `checks` — where the PRD defines a shape, an array of per-check rows with `label`, `name`, and related fields. Present on the Data Consistency and 1003 Check endpoints today.
+
+The shared projection services (`AppraisalAuditProjectionService`, `CreditReportProjectionService`, `buildAuditRunResults`) are unchanged, so the partner `/results` and `/appraisal` routes, the internal audit-results route, `checks-completed`, and the audit PDF do not receive these fields. The additive fields are attached in the portal controller / portal-section layer only.
+
+**Agents that record check lists today:** `piiValidation` (Data Consistency, LOA-3288) and `urlaExtraction` (1003 Check, LOA-3289). All other agents report `saved_before_coverage` until their own check-list tickets ship.
+
 See [Portal audit results API](/portal/api-audit-results).
 
 ## Internal aggregated results
 
 `InternalAuditResultsController` (`internal/internal-audit-results.controller.ts`, base `internal/v1/audit-results`, guarded by `InternalApiKeyGuard`):
 
-- `GET /internal/v1/audit-results/:auditRunId` — fans out (`Promise.allSettled`) over `auditDataMapper.buildAuditRunResults`, property data and red flags, URLA completeness, classifications, and credit projection bundles. Returns `{ success, data: { auditRunId, auditResults, propertyData, redFlags, urlaCompleteness, classifications, credits } }`. `documentsAnalyzedCount` comes from `llamaClient.listPipelineDocuments(loan.llc_pipeline_id)`.
+- `GET /internal/v1/audit-results/:auditRunId` — fans out (`Promise.allSettled`) over `auditDataMapper.buildAuditRunResults`, property data and red flags, URLA completeness, classifications, and credit projection bundles. Returns `{ success, data: { auditRunId, auditResults, propertyData, redFlags, urlaCompleteness, classifications, credits, creditRoster } }`. `documentsAnalyzedCount` comes from `llamaClient.listPipelineDocuments(loan.llc_pipeline_id)`.
+
+**`creditRoster` (LOA-3284).** An additive field that groups credit reports by borrower, using the same logic as the portal's `GET /api/v1/portal/audits/:auditId/credit/loan`. Shape:
+- `creditGroups[]` — each group has `id`, `personIds`, `currentReportId`, and `supersededReportIds`. Report ids match `credit_runs.id` and the ids in `credits[]`.
+- `people[]` — each person has `id`, `displayName`, `role`, and `creditGroupId`.
+
+`creditRoster` is `null` when there are no credit runs, or when the URLA read or roster build fails (fails soft; the rest of the response is unaffected). Octy uses this field to label each report **Current** or **Superseded by &lt;date&gt;** in its loan-lookup Credit section.
 
 This endpoint feeds the audit-PDF generator in `loanlight-integrations`. See [Audit PDF](/integrations/audit-pdf).

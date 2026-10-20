@@ -29,6 +29,8 @@ The YAML file is the source of truth. The in-memory cache survives a DB failure,
     | `missing` | Field present in MISMO but absent in the supporting doc |
     | `inconsistent` | Value mismatch between MISMO and the supporting doc |
     | `identity_mismatch` | Doc belongs to a different person than the MISMO borrower (potential fraud) |
+    | `not_compared` | Field was never compared — no eligible document type, zero retrieval, or every retrieved document refused (LOA-3288). Stored without `has_issue`; displayed as Missing. |
+    | `error` | Validation error during the validate-field step (LOA-3288). Replaces what was previously stored as `missing` for errors; treated as a critical finding. |
   </Accordion>
   <Accordion title="Validation">
     | Code | Meaning |

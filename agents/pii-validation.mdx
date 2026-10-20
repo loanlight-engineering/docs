@@ -196,8 +196,12 @@ The core prompt's `issueKind` taxonomy:
 || Found but inconsistent | true | `inconsistent` |
 || Document belongs to the wrong person | true | `identity_mismatch` |
 || Cannot verify (classify-split incomplete, entity-vested) | false | `unverifiable` |
+| Field never compared (no eligible doc type, zero retrieval, or every retrieved document refused) | false | `not_compared` |
+| Validation error during the validate-field step | true | `error` |
 
 The `unverifiable` kind is emitted only by `VestingEntityName` on a whole-index fallback path (when `searchFilters` is undefined) under an incomplete classify-split status. A scoped transient retrieval miss and a `complete` classify run both remain silent (no finding).
+
+`not_compared` (LOA-3288) is stored on the parent `pii_validation_results` row, the placeholder child, and every refused document row, without setting `has_issue`. It distinguishes a field the agent could not attempt (no eligible documents) from one it attempted and found missing. `error` replaces what was previously stored as `missing` when a validation error occurred; it joins `CRITICAL_ISSUE_KINDS` in the partner results service so the critical-issues count is unchanged.
 
 **Deterministic safety nets** then override the LLM verdict where appropriate:
 
@@ -255,7 +259,11 @@ The orchestrator's `persistMultiDocumentValidationResults` resolves per-field se
 - **`pii_validation_results`** — one parent row per field: `field`, `mismo_value`, `borrower_index`, `has_issue`, `issue_kind`, `severity`, `overall_message`, `lang_smith_trace_url`.
 - **`pii_document_validations`** — one child row per document validation: `document_name`, `document_source`, `doc_value`, `page_ref`, `page_number`, `has_issue`, `issue_kind`, `severity`, `message`, `chunk_reference` (jsonb), `document_ref` (=`file_id`), `snippet_id`, `start_char_idx`, `end_char_idx`.
 
-Both tables enforce a DB CHECK on `issue_kind` (NULL | `missing` | `inconsistent` | `identity_mismatch`) and on `severity` (`high` | `medium` | `low`). Default severities (`PiiSeverityService.DEFAULT_PII_SEVERITY`): FullName, SSN, ITIN, PropertyAddress, EmployerName, EmployerAddress = `high`; DateOfBirth, MailingAddress, MaritalStatus, CitizenshipResidency = `medium`. Lender overrides come from `lenderPiiSeverityOverrides` and are frozen on the row at audit time.
+Both tables enforce a DB CHECK on `issue_kind` (NULL | `missing` | `inconsistent` | `identity_mismatch` | `not_compared` | `error`) and on `severity` (`high` | `medium` | `low`). Default severities (`PiiSeverityService.DEFAULT_PII_SEVERITY`): FullName, SSN, ITIN, PropertyAddress, EmployerName, EmployerAddress = `high`; DateOfBirth, MailingAddress, MaritalStatus, CitizenshipResidency = `medium`. Lender overrides come from `lenderPiiSeverityOverrides` and are frozen on the row at audit time.
+
+**piiApplicability and Not applicable entries (LOA-3288).** The URLA handoff now carries `piiApplicability` — each borrower's raw marital status and citizenship answers (indexed 1-based by `borrowerIndex`) and whether a legal-entity party resolved by name or EIN (`entityVested`). The orchestrator calls `resolvePiiNotApplicable(fields, borrowers, piiApplicability)` to derive Not applicable entries for fields that the registry defines as conditionally applicable (for example, `MaritalStatus` and `CitizenshipResidency` when the borrower's own answers indicate the field does not apply). These entries are returned alongside the stored check list so `owned()` can stamp them together with `completed_at`.
+
+**Check list and coverage (LOA-3288).** When `piiValidation` completes, `owned()` stamps `agent_runs.check_list` with one `CheckListEntry` per inserted child row (carrying its id, stored `issue_kind` or `consistent`, and parent field), plus the Not applicable entries. The `dataConsistency` portal section recomputes `ran`/`needsReview`/`counts` via `countChecks` over the displayed findings' labels plus those Not applicable entries, so the card's "X of Y" total equals the table beneath it.
 
 Migration `0086_pii_ssn_card_and_insurance_policy_doc_type_rules` (LOA-2842) adds three new scoping rows to `pii_field_doc_type_rules` without widening the `field_key` CHECK (both keys were already present):
 
