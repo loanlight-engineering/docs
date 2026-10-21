@@ -208,6 +208,81 @@ PK `(experiment_id, audit_run_id, agent_type)`. A partial unique index `uq_llm_e
 
 `octy_runs.issue_id` is now nullable. A new `experiment_id` column (FK → `llm_model_experiments`, ON DELETE CASCADE) was added. A CHECK constraint enforces exactly one parent: `(issue_id IS NOT NULL AND experiment_id IS NULL) OR (issue_id IS NULL AND experiment_id IS NOT NULL)`. An Oz run hangs off either a bug report or a promotion experiment — never both, never neither.
 
+## Octy MCP tables (migrations 0164–0165)
+
+Two migrations shipped as part of Octy's MCP platform ([octy#187](https://github.com/loanlight-engineering/octy/pull/187), loanlight-api#4910):
+
+- `0164_octy_audit_observations` — `octy_audit_observations` and `octy_issues.report_kind`, with a work-log backfill.
+- `0165_octy_runner_metadata_and_octylink_actions` — `octy_runs.runner_*` columns and `octylink_actions`.
+
+### octy_audit_observations
+
+Octy's durable record of data-quality issues it noticed while working in production — impossible values, contradictions between sources, agent results that don't match evidence, and similar. A row is written only after the engineer confirms; Octy reads them back before flagging the next issue so dismissed ones and their notes inform future observations.
+
+**Anchors.** At least one of `loan_id`, `audit_run_id`, or `agent_run_id` must be non-null (`ck_octy_audit_observations_anchor`). Octy derives `lender_id` and `agent_type` from whichever anchors are set. The three anchor FKs are `ON DELETE CASCADE` (an observation follows its subject). `lender_id`, `issue_id`, and `api_key_id` are `ON DELETE SET NULL`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | Default `gen_random_uuid()`. |
+| `loan_id` | `uuid` | FK `loans(id)` ON DELETE CASCADE. |
+| `audit_run_id` | `uuid` | FK `audit_runs(id)` ON DELETE CASCADE. |
+| `agent_run_id` | `uuid` | FK `agent_runs(id)` ON DELETE CASCADE. |
+| `lender_id` | `uuid` | FK `lenders(id)` ON DELETE SET NULL. Derived from anchors. |
+| `agent_type` | `text` | Derived from anchors. |
+| `category` | `text` NOT NULL | CHECK: `impossible_value \| contradiction \| missing_data \| duplicate \| outlier \| agent_mismatch \| stale_data \| other`. |
+| `severity` | `text` NOT NULL | Default `medium`. CHECK: `low \| medium \| high`. |
+| `title` | `text` NOT NULL | 1–200 characters (CHECK). |
+| `detail` | `text` NOT NULL | Markdown body. |
+| `evidence` | `jsonb` NOT NULL | Default `[]`. Tool + args + specific values. Writers must not store secrets; not enforced by the column. |
+| `status` | `text` NOT NULL | Default `open`. CHECK: `open \| confirmed \| dismissed \| resolved`. |
+| `resolution_note` | `text` | |
+| `issue_id` | `uuid` | FK `octy_issues(id)` ON DELETE SET NULL. Optional link to a bug report filed about this observation. |
+| `recorded_by` | `text` NOT NULL | Operator (key owner email or key name). |
+| `recorded_via` | `text` NOT NULL | CHECK: `mcp \| web`. |
+| `api_key_id` | `uuid` | FK `octy_api_keys(id)` ON DELETE SET NULL. |
+| `session_id` | `text` | |
+| `created_at` | `timestamptz` NOT NULL | Default `now()`. |
+| `updated_at` | `timestamptz` NOT NULL | Default `now()`. |
+| `status_changed_at` | `timestamptz` | |
+| `status_changed_by` | `text` | |
+
+Indexes: each anchor, `(status, created_at)`, `category`, `issue_id`, `api_key_id`.
+
+### octy_issues.report_kind
+
+`text NOT NULL DEFAULT 'bug'`, CHECK in `('bug', 'work')`. A `work` row is an ad-hoc work log for a requested change Octy carries out (so the run, its evidence, and its PR have a home), as opposed to a `bug` report. The migration backfills existing rows whose `description` starts with `Work log: ` to `work`; all others default to `bug`.
+
+### octy_runs.runner_* columns
+
+Five nullable `text` columns added to `octy_runs` by migration `0165`:
+
+| Column | Notes |
+|---|---|
+| `runner_provider` | Identifies the runner backend. NULL means Oz (Warp). |
+| `runner_run_id` | The runner's own run identifier. |
+| `runner_status` | Latest status from the runner. |
+| `runner_session_url` | Deep link into the runner's session. |
+| `runner_error` | Error message when the runner failed. |
+
+All five columns are NULL for Oz runs. The `oz_run_status` enum and other Oz columns are unchanged, so an older Octy that does not know these columns keeps working. Octy's `hasRunnerSchema()` turns the Hermes runner on only when all five exist.
+
+### octylink_actions
+
+Audit trail of admin changes Octy makes to Octylink's Hermes agents. One row per action; Octy writes it best-effort and operates without the table.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | Default `gen_random_uuid()`. |
+| `at` | `timestamptz` NOT NULL | Default `now()`. |
+| `actor` | `text` NOT NULL | Operator who initiated the change. |
+| `action` | `text` NOT NULL | What was done (e.g. create, revoke). |
+| `profile` | `text` | The agent profile name, when applicable. |
+| `details` | `jsonb` NOT NULL | Default `{}`. Names only — never a secret value. |
+| `outcome` | `text` NOT NULL | Default `ok`. Writer convention: `ok \| denied \| failed`. No CHECK. |
+| `message` | `text` | |
+
+Indexes: `(at DESC)`, `(profile, at DESC)`, `(actor, at DESC)` — matching the Activity page's query patterns.
+
 ## Octy MCP tables (migration 0142)
 
 Two tables added by migration `0142_octy_api_keys_and_run_events.sql` (LOA-3149) back the per-caller API key model and the activity trail for the Octy MCP server. See [Octy MCP server](/octy/mcp-server) for the full feature description.

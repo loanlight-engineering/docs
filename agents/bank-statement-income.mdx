@@ -222,6 +222,55 @@ generation itself is never rewritten.
 enabled. The gate is gated by the audit-bound evidence path — it is off for
 audit runs where evidence is not enabled.
 
+<Note>
+A linked file (see below) is kept out of gate scope (`income-gate-eligibility.ts::isFileInGateScope`). On an Encompass or partner audit for an evidence-enabled lender, a linked file's per-account figures read as final rather than gated. Per-analysis gating requires a per-analysis emission shape and has been raised with the EDU-07 owner (LOA-3312).
+</Note>
+
+## Linked analyses (LOA-3312)
+
+A bank-statement upload that carries more than one **material account** is split at processing time into one income analysis per account. Each analysis has its own statements, months, divisor, findings, qualified income, income trend, AI summary, and settings. No surface totals them.
+
+**Materiality rule.** An account is material when its deposits represent at least 10% of the shared-window total across all concurrently covered accounts, excluding money the borrower moved in from another uploaded account. An account with deposits in fewer than one of every three shared months is treated as a one-off windfall and stays out. Sequential accounts (a bank switch — one starts where the other ends) stay one analysis. An under-10% account remains held out of the primary analysis but can still be manually included by a reviewer.
+
+**Data model.** Migration `0163_left_hiroim` adds:
+
+| Object | Change | Notes |
+|---|---|---|
+| `bank_statement_analyses` | New table | One row per analysis. PK `uuid`. Nullable setting overrides that inherit the file's value. Per-analysis status. |
+| `bank_statements.analysis_id` | New nullable FK | FK `bank_statement_analyses(id)` ON DELETE SET NULL. NULL means pre-launch or single-analysis file. |
+| `findings.analysis_id` | New nullable FK | FK `bank_statement_analyses(id)` ON DELETE SET NULL. A finding persists through a re-split. |
+| `ai_summaries.analysis_id` | New nullable FK | FK `bank_statement_analyses(id)` ON DELETE CASCADE. A summary describes one analysis. |
+
+All new columns are nullable with no default so files processed before launch keep today's behavior until they are reprocessed or have statements appended.
+
+**Split at processing time only.** `BankStatementFindingsRecomputeService.persistAccountSplitForFile` runs after the whole-file sweep on every job (initial, reprocess, add statements) and freezes the cross-account verdict onto the analysis rows. Reviewer edits read the frozen verdict and never re-run the split rule, so recategorizing a deposit cannot create or remove an analysis.
+
+**Analysis scope.** `analysis-scope.ts` is an `AsyncLocalStorage` scope entered once per request (`?analysis_id=` query param via `AnalysisScopeInterceptor`) or per processor pass. Every income read composes through the exclusion service, so all income reads scope automatically without new parameters. A linked file read without a scope reads its primary analysis (ordinal 0), never a union.
+
+**Own-account transfers.** After the split, a transfer is excluded from the receiving analysis only when its source account belongs to a different linked analysis (`income_excluded_reason_source = linked_analysis_transfer`). Merging two analyses back into one clears those stamps. Files that do not split keep today's per-file account rule.
+
+**Settings.** A settings PATCH on a linked file applies to the scoped analysis only. Program length (`income_qualification`) is editable per analysis. Business type stays file-wide.
+
+**API and partner wire.** On a linked file:
+
+- `findings`, `findingsTotal`, and `findings_truncated` cover every analysis.
+- `detail`, `incomeQualification`, `expenseFactor`, and `ownershipPercentage` reflect the primary analysis.
+- `summary.qualifiedIncomeMonthly` and `qualifiedIncomeAnnual` are `null`.
+- New optional `summary.linkedAnalyses[]` — one entry per analysis with qualified income and account identifiers (no total).
+- New `GET /bank-statements/:id/linked-analyses` endpoint returns the per-analysis list.
+- Portal detail gains `linked_analyses` and `analysis_id`. The income list gains `linkedAnalyses` and `statusDetail: "partially_failed"` (when one analysis fails).
+
+**Portal UI.** Account cards appear above the stat cards and switch the whole results page to the selected analysis. The hero reads "Qualified Income · ••••NNNN" (masked last four). The income list shows a collapsed expander per linked file with sub-rows per analysis and an amber **Partially Failed** badge when any analysis failed. The audit-results sidebar Income Analysis entry becomes a group with one entry per account.
+
+**Export.** One PDF: a cover listing every analysis (no total), then each analysis's own calculation pages. The same PDF goes to the eFolder. Excel carries each analysis's sheets in place of "Second Acct".
+
+**Known limits (accepted, not ticketed):**
+- Files processed before launch keep today's behavior until they are reprocessed or have statements appended. There is no backfill.
+- The income evidence gate (EDU-07) does not scope per analysis; linked-file income reads as final on gate-enabled audits.
+- A write naming an analysis the file does not have (a stale tab after a re-split) returns 404; reads fall back to the primary analysis.
+- The unused `GET :id/export` JSON dump still reads the whole file.
+- Fraud continuity findings (balance-gap, no statement or transaction anchor) appear under the primary analysis's card and export.
+
 ## Parity with the legacy pipeline
 
 The port restores several extraction-time finding categories that the legacy hard-swap (T11) had dropped:
@@ -275,6 +324,8 @@ The cross-account decision is recorded as an `account_selection` finding type (m
 | `kind` | `exact` / `surname` / `exact_reconstructed` | How the match was made. `exact_reconstructed` means the middle word was dropped before comparing; the portal says "after dropping a middle word". |
 
 The match line renders as muted text under the category select in the portal transactions table (`selfFamilyMatchLabel`). It is shown only when the served `effective_category` is Self / Family **and** the stored source is `name_match` — a reviewer's override or a category change resets the source to `null`, retiring the evidence without touching the JSONB. Existing rows carry no evidence; only rows categorized or reprocessed after this ships show the line.
+
+**Wallet cashouts as Account Transfer (LOA-3016).** Venmo, Cash App, and PayPal credits whose descriptor indicates the borrower is cashing out their own wallet — rather than receiving a payment from another party — are now categorized as `Account Transfer` rather than `P2P Payment`. The wallet-cashout rung (`wallet-cashout.ts`) runs above R16 (the P2P rung) and recognizes three shape types per wallet: cashout shapes that print no sender (e.g. `Venmo Cashout`, `PAYPAL/TRANSFER`, `FUNDS RECVD PAYPAL`), named shapes where the name matches the account holder (`VENMO*<name>`, `CASH APP*<name>`, Cash App ACH `DES:<name>`), and account-verification micro-deposits. A named shape that prints another person's name stays `P2P Payment`. On a business file, a wallet cashout becomes `Account Transfer` and is excluded from income; the reviewer can flip a row back to income with the existing override.
 
 **P2P sender names without "from" (LOA-2683):** `extractP2pSenderName` previously anchored on `/\bfrom\b/` only, so banks that print the sender directly after the rail (`ZELLE <NAME> <phone>`) produced no sender name and the family/self exclusion never fired. A rail-anchored parse (Zelle, Venmo, Cash App, PayPal, Popmoney, QuickPay) is now applied alongside the existing `from` parse, with a newline-tolerant anchor and middle-name reconstruction. The new parse is gated to `direction === "inbound"` — the outbound and `descriptionFirst` expense paths are unchanged.
 

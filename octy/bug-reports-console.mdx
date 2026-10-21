@@ -12,6 +12,8 @@ The page lives in `src/app/(app)/bug-reports/page.tsx` plus its panel components
 
 The left side is a single, unified paginated table of `octy_issues` rows backed by `GET /api/bug-reports`. All reports — whether filed manually by engineers or filed autonomously by Oz/Octy runs — appear in the same list. Oz-filed rows are distinguished by a **tentacle indicator** in the first cell that sways on hover (`OctyIcons.tsx`, `BugReportPanelBody.tsx`). The earlier separate "Bug reports" / "Octy reports" tab split was removed in favor of this unified view.
 
+Issues carry a `report_kind` column (`bug | work`, default `bug`). A `work` issue is an ad-hoc work log for a change Octy was asked to carry out — the run, evidence, and PR live on the issue rather than in a separate bug thread. The list renders `work` rows with a distinct badge so engineers can distinguish investigations from work logs at a glance.
+
 Each issue carries aggregate counts (run count, latest run status, PR count, comment count). The anchor model is a three-tier ladder:
 
 | Tier | `audit_run_id` | `loan_id` | Example |
@@ -94,6 +96,9 @@ A free-text run name, max 80 characters. If you set it, the agent cannot overwri
 </Step>
 <Step title="Review MCP servers">
 LangSmith CLI access and the LangChain Docs MCP are shown as read-only checked. The Datadog MCP attaches automatically when the Datadog keys are configured (see [Environment variables](/octy/environment-variables)).
+</Step>
+<Step title="Pick a runner">
+`RunnerPicker` lets you choose between Oz (the default Warp cloud runner) and any Hermes runner agents managed by Octylink. Hermes runner agents appear only when Octylink is deployed and the selected lender has an entitled runner profile. Each runner entry shows its profile name and status.
 </Step>
 <Step title="Pick a model">
 `ModelPicker` is a cascading provider menu. The default is **`gemini-3.8-flash`** (Gemini 3.8 Flash). The chosen `modelId` is passed straight through to Warp's `config.model_id`. The Gemini group includes 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.5 Flash, and 3.1 Pro. The GLM group includes GLM 5.3 Flash (Fireworks) and GLM 5.2 (Fireworks); GLM 5.1 was removed when Warp dropped it from its model catalog. Claude, OpenAI, Grok, and other groups remain available. All IDs are Oz slugs verified against `oz model list` and Warp's "Agent model choice" docs (2026-09-09).

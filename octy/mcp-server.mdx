@@ -1,21 +1,37 @@
 ---
 title: Octy MCP server
-description: Work Octy bug reports from a local coding agent (Claude Code, Codex) over the Model Context Protocol. Each engineer authenticates with their own API key.
+description: Read loan and audit data and record observations from a coding agent (Claude Code, Codex) over the Model Context Protocol. Each caller authenticates with their own API key.
 icon: plug
 ---
 
-The Octy MCP server lets a coding agent running on an engineer's machine work an Octy bug report the same way a cloud Oz run does: it reads the same data tools under the same per-run token, receives the same server-built instructions, posts its results back into Octy where they appear in the bug-reports UI next to cloud runs, and every call lands on the report's activity trail under the caller's own API key.
+The Octy MCP server gives a coding agent read access to the full LoanLight data set — loans, audit runs, agent findings, lenders, taxonomy, IRIS, consolidation, routing, LLM experiments, costs, and more — plus two write surfaces: **bug reports** (investigations, runs, comments, status) and **audit observations** (durable data-quality records recorded with engineer confirmation). Every tool runs through the same operations layer as the web app, so authorization, audit, and PII masking apply identically on both surfaces.
 
-Use it when you want to drive an investigation yourself or when the cloud runtime is unavailable.
+For investigation runs specifically, the server builds the same instructions an Oz cloud run receives and lets you work a report locally at your own pace.
 
 <Note>
-This is a **local-agent** interface. The MCP endpoint is not used by Octy's own cloud (Oz/Warp) runs — Oz uses a token-authenticated HTTP tool API instead. See [the Oz tool API](/octy/oz-tool-api).
+The MCP endpoint is not used by Octy's own cloud (Oz/Warp) runs — Oz uses a token-authenticated HTTP tool API instead. See [the Oz tool API](/octy/oz-tool-api).
 </Note>
 
-## How it works
+## Architecture: operations layer
+
+Every capability in Octy is an **operation** (op) defined once in `src/lib/ops/domains/<domain>/`. An op declares its id, domain, summary, Zod input schema, scope, effect, PII paths, guides, and handler. Adapters turn it into a server action, route handler, or MCP tool:
 
 ```
-teammate files a bug report ──► Octy /bug-reports ──► copy Report ID
+web page ─► server action ─┬─► adapter ─► runOp(op, actor, input) ─► op.handler(ctx, input)
+web page ─► route.ts ────┤           validate · authorize · confirm · mask PII
+MCP ─────► /api/mcp ──┘
+```
+
+- **Web adapter** passes the op value through unchanged; web sessions hold every scope.
+- **MCP adapter** applies `present()`: trims the result, adds deep links and guide pointers, and masks PII for keys without `pii:read`.
+- **Handlers** receive `ctx.actor` and the input. They never touch the HTTP request. `OpError(code, message)` is the only error surface.
+
+Toolsets group related tools and are filterable via `?toolsets=<id>,...` on the `/api/mcp` endpoint. The **Who am I** page at `/whoami` is a visual reference for all tools, resources, guides, scopes, and errors, viewable as any API key or preset.
+
+## How investigation runs work
+
+```
+teammate files a bug report —► Octy /bug-reports —► copy Report ID
                                                           │
 engineer: /ll:octy-rca <id>  (Claude Code)                ▼
           $octy-rca <id>     (Codex)    POST /api/mcp  (Bearer octy_… — your own API key)
@@ -28,28 +44,77 @@ engineer: /ll:octy-rca <id>  (Claude Code)                ▼
                                        a PR opened later ─► octy_record_run ─► follow-up record on the report
 ```
 
-`octy_start_run` builds the investigation instructions on the server from the same sections an Oz run receives — ground rules, architecture, skill prompt, Linear protocol, and so on (`src/lib/oz-skills/`). An edit to the RCA prompt therefore reaches every local agent on its next run, with no skill update required. Only the tool mechanics differ: MCP tools instead of HTTP endpoints, the run token as a tool argument instead of a header, and completion split out as the operator's own step.
+`octy_start_run` builds the investigation instructions server-side from the same sections an Oz run receives. An edit to the RCA prompt therefore reaches every local agent on its next run, with no skill update required. Only the tool mechanics differ: MCP tools instead of HTTP endpoints, the run token as a tool argument instead of a header, and completion split out as the operator's own step.
 
-## Three gates
+## Authentication and authorization
 
 Every tool call passes up to three checks, in order:
 
 1. **The API key** (`src/lib/mcp/auth.ts`). `Authorization: Bearer octy_…`, a key created on Octy's **API Keys** page. The key is the identity: its row in `octy_api_keys` names the key, its kind, its optional owner (name, email), and its scopes. No header names the caller.
-2. **The key's scopes** (`src/lib/api-keys/scopes.ts`). Each tool needs one scope (`TOOL_SCOPES`). `tools/list` advertises only the tools the key may call; calling another returns a `SCOPE_DENIED` tool error.
-3. **The run token** (`src/lib/oz-token.ts`), for the tools that act for a run — presented by the run's own operator. A local run belongs to the operator whose key started it (`oz_run_id = "mcp:<operator>"`); a token alone does not let another key act for it (`NOT_YOUR_RUN`).
+2. **The key's scopes** (`src/lib/ops/scopes.ts`). The adapter derives each tool's required scope from the op; `tools/list` advertises only the tools the key may call. Calling another returns `SCOPE_DENIED`.
+3. **The run token** (`src/lib/oz-token.ts`), for investigation tools that act for a specific run.
 
 ### Scopes
 
-| Scope | Tools |
-|---|---|
-| `reports:read` | `octy_get_issue`, `octy_get_run`, `octy_list_datasets` |
-| `runs:start` | `octy_start_run` |
-| `runs:work` | `octy_query_dataset`, `octy_fetch_instructions`, `octy_refresh_token`, `octy_attach_linear_ticket` (still need the run token) |
-| `runs:complete` | `octy_complete_run` |
-| `runs:renew` | `octy_renew_run` |
-| `runs:record` | `octy_record_run` |
+Scopes are grouped by domain. Every scope comes with a label and preset membership (`API_KEY_KINDS`).
 
-A key's **kind** is a label plus a scope preset, editable afterwards: **Local engineer** (every scope), **Warp** and **Hermes** (`reports:read`, `runs:work`, `runs:complete` — for when cloud runners reach Octy over MCP), **Other** (`reports:read`, `runs:record`).
+**Investigation and run lifecycle**
+
+| Scope | What it unlocks |
+|---|---|
+| `reports:read` | Read issues, runs, and dataset registry |
+| `runs:start` | Start an investigation run |
+| `runs:work` | Dataset queries, instructions, token refresh, Linear ticket (run token required) |
+| `runs:complete` | Complete a run |
+| `runs:renew` | Renew a lapsed run's token pair |
+| `runs:record` | Record a follow-up on a closed run |
+
+**Data reads (toolsets)**
+
+| Scope | What it unlocks |
+|---|---|
+| `loans:read` | Loan lookup and per-loan audit history |
+| `audits:read` | Audit run detail, agent status, timeline |
+| `findings:read` | Agent finding detail across runs |
+| `lenders:read` | Lender config, YAML, flags, entitlements |
+| `pii:read` | Unmask PII fields (borrower names, SSN fragments, addresses). Without it, those fields are replaced with `[redacted]` and listed under `redacted`. |
+| `taxonomy:read` | Classify-split taxonomy (categories, rules) |
+| `consolidation:read` | Consolidation versions and drafts |
+| `routing:read` | Routing config versions |
+| `iris:read` | IRIS taxonomy, rules, concepts, and appraisal run data |
+| `llm:read` | LLM experiments |
+| `costs:read` | Token and billing cost data |
+| `ops:read` | Ops layer registry (tool and guide catalog introspection) |
+| `knowledge:read` | Explainers, glossary, and the developer guide |
+| `observations:read` | Read audit observations for a loan/run/agent |
+
+**Write surfaces (confirmation required)**
+
+| Scope | What it unlocks |
+|---|---|
+| `observations:write` | Record and update audit observations (confirmation round-trip required) |
+
+**Key kinds and presets**
+
+A key's **kind** is a label plus a scope preset, editable afterwards:
+
+| Kind | Default scopes |
+|---|---|
+| Local engineer | All scopes |
+| Warp / cloud runner | `reports:read`, `runs:work`, `runs:complete` |
+| Other | `reports:read`, `runs:record` |
+
+## Confirmation round-trip
+
+Ops that spend or cannot be undone (currently `observations:write`) require a confirmation from the engineer. The first call returns a `status: "confirmation_required"` result with a `preview` (summary + details) and a `confirm_token`; the agent shows the preview, waits for the engineer's yes, then calls again with the same arguments plus the token.
+
+- The token (`oc1.<payload>.<mac>`) is HMAC-bound to the key, the op, the normalized arguments, and the target's version stamp. It expires after 10 minutes and is single-use.
+- Web sessions skip the round-trip: the button click is the confirmation.
+- Both calls are audited: the preview as `confirmation_required`, the action with `confirmed: true`.
+
+## Guides: change guides for web writes
+
+Every web write in each domain has a **change guide** — a machine-readable description of where to go in Octy, what to click, and what to enter. When a key lacks a write scope, the MCP server returns a `change` guide pointer instead of executing the action. Guides are also attached to read results as `guides` pointers so an agent always knows the next human-actionable step. The `/whoami` page renders every guide for reference.
 
 ## API keys — the /api-keys page
 
@@ -62,23 +127,47 @@ Everyone signed into Octy sees and manages every key: they are team infrastructu
 
 The owner email matters: it is the operator recorded on runs and events, and — when it is on the team roster (`src/lib/github/team.ts`) — the `x-acting-user` sent to loanlight-api for the IRIS datasets. A key without a rostered owner acts as `system`.
 
-## Tools
+## Tools and toolsets
 
-| Tool | Needs | What it does |
+Tools are organized into toolsets. `tools/list` returns only the tools your key's scopes cover. You can narrow further with `?toolsets=<id>,...`.
+
+**Investigation and run lifecycle (no toolset filter required)**
+
+| Tool | Scope | What it does |
 |---|---|---|
-| `octy_get_issue` | `reports:read` + report ID | Load one report: anchor, traces, Linear ticket, comments, every run (with token expiries for open local runs), and the `playbook` |
-| `octy_get_run` | `reports:read` + run ID | A run's status, runner, summary, and (optionally) a local run's instructions again |
+| `octy_get_issue` | `reports:read` | Load one report: anchor, traces, Linear ticket, comments, every run (with token expiries for open local runs), and the playbook |
+| `octy_get_run` | `reports:read` | A run's status, runner, summary, and optionally a local run's instructions again |
 | `octy_start_run` | `runs:start` | Start a run (`root-cause-analysis`, `rca-fix-and-pr`, `ad-hoc`) → full instructions + `access_token` + `refresh_token` |
 | `octy_list_datasets` | `reports:read` | The datasets `octy_query_dataset` can read (static registry metadata) |
-| `octy_query_dataset` | `runs:work` + run token | The Oz data tools, scoped to the run's own bug report |
-| `octy_fetch_instructions` | `runs:work` + run token | On-demand methodology (`prompt-tuning`, …) and the run's `completion` instructions |
+| `octy_query_dataset` | `runs:work` + run token | Oz data tools, scoped to the run's bug report |
+| `octy_fetch_instructions` | `runs:work` + run token | On-demand methodology instructions and the run's `completion` instructions |
 | `octy_attach_linear_ticket` | `runs:work` + run token | Record the report's one Linear ticket |
 | `octy_refresh_token` | `runs:work` + refresh token | New access token (60 min) while the 4 h refresh window is open |
-| `octy_renew_run` | `runs:renew`, own run | New token pair for an open run whose window lapsed, or from a new session |
+| `octy_renew_run` | `runs:renew` | New token pair for an open run whose window lapsed, or from a new session |
 | `octy_complete_run` | `runs:complete` + run token | Post the summary + PR links and close the run for good |
-| `octy_record_run` | `runs:record` | Add a **follow-up record** (summary + PRs) to a report after its run closed |
+| `octy_record_run` | `runs:record` | Add a follow-up record (summary + PRs) to a report after its run closed |
 
-IDs can be bare UUIDs or pasted Octy links (`/bug-reports?issue=<id>`). There is **no browsing**: you need the report's ID. A key can read a report it knows the ID of and start a run; a report's data needs a run token.
+**Data toolsets**
+
+Each toolset corresponds to a domain in `src/lib/mcp/toolsets/`. The toolset's `description` and `flows` on `/whoami` (Tools tab) give the agent a one-paragraph orientation and typical call sequences.
+
+| Toolset id | Scope | What it covers |
+|---|---|---|
+| `loans` | `loans:read` | Loan lookup, per-loan audit list |
+| `audits` | `audits:read` | Audit run detail, agent status, issue timeline, evidence gate status |
+| `findings` | `findings:read` | Finding detail for loans, audit runs, and agents |
+| `lenders` | `lenders:read` | Lender config, YAML sections, feature flags, agent entitlements |
+| `taxonomy` | `taxonomy:read` | Classify-split category tree, PII doc-type rules |
+| `consolidation` | `consolidation:read` | Consolidation version list and active version |
+| `routing` | `routing:read` | Integrations routing config versions |
+| `iris` | `iris:read` | IRIS taxonomy, relevance rules, concepts, and appraisal run data |
+| `llm` | `llm:read` | LLM model experiments |
+| `costs` | `costs:read` | Token and billing costs by run and lender |
+| `ops` | `ops:read` | Ops registry — tool catalog, guide catalog, scope list |
+| `knowledge` | `knowledge:read` | Explainers, glossary, and developer guide |
+| `observations` | `observations:read` / `observations:write` | Read and record audit observations |
+
+IDs can be bare UUIDs or pasted Octy links (`/bug-reports?issue=<id>`). Investigation tools (**no browsing**): you need the report's ID; data needs a run token.
 
 ## The run token — same mechanism as Oz
 
@@ -118,6 +207,15 @@ octy_record_run({ issue_id, summary, pr_urls?, parent_run_id?, run_name? })
 - **PR checks.** Every URL must be `https://github.com/<GITHUB_ORG>/<repo>/pull/<n>`. When the key has **Verify PRs on GitHub** on, each PR is looked up with the GitHub App first; a miss fails the call with `PR_NOT_FOUND` and nothing is written.
 - **One record per PR.** If the report already has a follow-up carrying any of these PRs, the call returns that record (`already_recorded: true`) instead of writing a second one.
 - The server instructs agents to use it: the `playbook`, the run instructions' closing section, and the completion instructions all direct agents to record later PRs with `octy_record_run`, never by starting a new run just to carry it.
+
+## Writes: bug reports and audit observations
+
+Over MCP, writes are allowed in two domains only:
+
+1. **Bug reports** (`reports` + `runs` domains) — create, comment, status, anchor, Linear edits, dispatching and controlling investigation arms. This is the investigation-run surface documented above.
+2. **Audit observations** (`observations` domain) — record a durable note about production loan, audit-run, or agent data that Octy noticed. Every observation write requires the confirmation round-trip (the engineer sees a preview and confirms before anything is written). Observations degrade gracefully: if `octy_audit_observations` does not yet exist in the database, the tool answers `FEATURE_UNAVAILABLE` and investigation continues unaffected.
+
+Every other change — lender flags, YAML, entitlements, routing config, IRIS taxonomy, and so on — is answered with a **change guide**: the Octy link, the steps in the UI's own words, and what to verify afterwards.
 
 ## The activity trail — `octy_run_events`
 
@@ -217,10 +315,17 @@ npx @modelcontextprotocol/inspector --cli http://localhost:7873/api/mcp \
 
 ## Deploying
 
-`octy_api_keys` and `octy_run_events` arrive by a loanlight-api migration (0142) that may not be deployed yet:
+`octy_api_keys` and `octy_run_events` arrive by a loanlight-api migration (0142):
 
 - Without `octy_api_keys`, only the legacy shared key works, and the **API Keys** page shows a feature-unavailable notice.
 - Without `octy_run_events`, events go to the `[run-event]` log line only, and the Activity timeline says the log is not available here (not "no activity").
+
+Migration `0164` adds `octy_audit_observations` and `octy_issues.report_kind`; migration `0165` adds `octy_runs.runner_*` and `octylink_actions`. Each degrades gracefully on an older database — see [agent platform schema](/data-model/agent-platform-schema) for per-table details.
+
+Two secrets are opt-in through CDK context:
+
+- `OCTY_MCP_CONFIRM_SECRET` — required for the confirmation round-trip on `observations:write`. Set `octyMcpConfirmSecretName` in CDK context. Without it, confirmable actions are refused.
+- `GITHUB_WEBHOOK_SECRET` — required for the automated code-review webhook. Set `githubWebhookSecretName`. Without it, the webhook answers 503.
 
 The ECS task still reads the legacy `Octy/McpApiKey` secret. It must exist in each account or the task will not start:
 
@@ -238,6 +343,16 @@ Streamable HTTP, stateless, JSON responses only (`src/lib/mcp/protocol.ts`, `src
 
 Being stateless matters because Octy runs several ECS tasks behind one ALB; the run token lives in the database, so any task can validate it. Supported protocol versions: `2025-06-18`, `2025-03-26`, and `2024-11-05`.
 
+## Octylink
+
+Octylink hosts the Hermes runner agents that power Octy's non-Oz bug runners. The **Octylink** page (`/octylink`) in Octy is the admin surface for managing those agents: creating keys with the correct scopes, revoking an agent's keys on deletion, and checking skill-name validity. All admin changes are recorded in `octylink_actions` — see [agent platform schema](/data-model/agent-platform-schema).
+
+Octylink is not yet deployed to int or prod. Until it is and `octylinkUrl` / `octylinkPublicUrl` / `octylinkApiKeySecretName` are set in the CDK context, every `/api/hermes/*` call and the side panel return 503 `hermes_not_configured`.
+
+<Note>
+Octylink is an internal infrastructure name. Agent-facing text in tools, guides, errors, and the side panel says "Octy" — never "Hermes" or "Octylink". A test enforces this in the octy repo.
+</Note>
+
 ## Related
 
 <Columns cols={2}>
@@ -251,6 +366,6 @@ Being stateless matters because Octy runs several ECS tasks behind one ALB; the 
     Where you find and triage the issues MCP runs work.
   </Card>
   <Card title="Agent platform schema" href="/data-model/agent-platform-schema" icon="boxes">
-    `octy_api_keys` and `octy_run_events` table definitions.
+    `octy_api_keys`, `octy_run_events`, `octy_audit_observations`, and `octylink_actions` table definitions.
   </Card>
 </Columns>

@@ -8,6 +8,8 @@ Octy is LoanLight's internal self-healing AI command center. It is a Next.js 16 
 
 When an underwriter or engineer finds something wrong with an audit run — a misclassified document, a missing URLA field, a PII mismatch — they file an issue against that `audit_run_id`. Octy hands the issue to **Oz**, an autonomous coding agent running on Warp's Oz Agent SDK. Oz reads LangSmith traces, the loanlight-api codebase, and the loan's audit data, then reports a root cause and (optionally) opens a fix PR. Engineers review the result back in Octy.
 
+**One agent, one operations layer.** Every LoanLight capability is an operation (op) defined once in `src/lib/ops/`; server actions, route handlers, and MCP tools are adapters over the same op handler. This means the MCP server and the web app run the same code and apply the same authorization, audit, and PII-masking rules regardless of surface. See the [MCP server](/octy/mcp-server) page for the architecture and the developer guide (`docs/ops-layer.md` in the `octy` repo) for how to extend it.
+
 <Note>
 Octy is internal-only. Every protected route requires a WorkOS-authenticated user whose email ends in `@loanlight.com` (`isAllowedDomain` in `src/lib/auth-domain.ts`). The only routes that bypass WorkOS middleware are `/api/health` (public health check) and `/api/oz/tools/*` (protected by per-run bearer token instead). See [auth and access](/octy/auth-and-access).
 </Note>
@@ -40,6 +42,9 @@ Beyond the Oz loop, Octy gives engineers a set of read-and-configure surfaces ov
   <Card title="Bug reports console" href="/octy/bug-reports-console" icon="bug">
     Triage the issue queue, delegate runs, pick a skill and model, and review summaries and PRs.
   </Card>
+  <Card title="Activity" href="/octy/mcp-server" icon="activity">
+    Live view of MCP server connections and their active toolsets, plus the Octylink admin change log.
+  </Card>
   <Card title="DB Studio" href="/octy/db-studio" icon="database">
     Read-only Postgres explorer with an ER diagram. Disabled in production (404).
   </Card>
@@ -71,9 +76,16 @@ Beyond the Oz loop, Octy gives engineers a set of read-and-configure surfaces ov
     The ledger of nightly documentation-refresh runs reported by the Oz `octy-docs-refresh` skill.
   </Card>
   <Card title="MCP server" href="/octy/mcp-server" icon="plug">
-    Work bug reports from a local coding agent (Claude Code, Codex) over the Model Context Protocol.
+    Read loan, audit, and agent data from a coding agent (Claude Code, Codex) over the Model Context Protocol — and record audit observations.
+  </Card>
+  <Card title="Octylink" href="/octy/mcp-server#octylink" icon="link">
+    Manage the Hermes runner agents that power Octy's non-Oz bug runners. Curated API key minting with per-agent revocation.
   </Card>
 </Columns>
+
+Issues carry a `report_kind` column (`bug | work`, default `bug`). A `work` report is an ad-hoc work log for a requested change Octy carries out — the run, evidence, and PR live there rather than in a bug thread.
+
+Octy now surfaces **audit observations** — a durable, shared record of data-quality issues Octy noticed while working in production (impossible values, contradictions, agent mismatches, and similar). Observations are anchored on a loan, audit run, or agent run; they are written only after the engineer confirms, and Octy reads them back before flagging the next issue. The observation tables are documented in [agent platform schema](/data-model/agent-platform-schema).
 
 There is also a Dashboard (issue and run aggregates), **Lookup** (`/lookup` — by loan or lender), **Audit Runs** (`/audit-runs` — a paginated ledger of every `audit_runs` row with finding count, agent status chips, and a **UAD 3.6 only** filter that narrows to runs where `appraisal_runs.uad_version = 'redesigned'`; see [`uad_version` in the agent platform schema](/data-model/agent-platform-schema)), and a **Lenders** config editor. The Lenders editor now carries per-lender **Agent Entitlements** (which catalog agents a lender runs), **Feature Flags**, and **YAML config** tabs; entitlements proxy to loanlight-api's agent-platform API (`/api/lenders/[id]/agent-entitlements`, backed by the `agents` and `lender_agent_entitlements` read-mirrors). See [environment variables](/octy/environment-variables) and [infrastructure](/octy/infrastructure) for how Octy is wired and deployed.
 
@@ -83,11 +95,12 @@ There is also a Dashboard (issue and run aggregates), **Lookup** (`/lookup` — 
 |---|---|
 | LoanLight Aurora/Postgres | Reads app data; owns and writes its own `octy_*` tables |
 | Warp / Oz Agent SDK | Launches and polls autonomous agent runs |
+| Octylink | External service that hosts Hermes runner agents; Octy's side panel and `/api/hermes/*` proxy to it. Answers 503 `hermes_not_configured` when not deployed. |
 | LangSmith | Trace project `loanlight-aus`; surfaced in the UI and queried by the agent |
 | Datadog | MCP server attached to runs, env-scoped, when keys are present |
 | loanlight-api | Internal API for classify-split dry-runs, audit results, and the agent-platform graph/entitlements, via shared secret |
 | Integrations service | Internal routing-config admin API for the [routing config](/octy/routing-config) editor, via a separate base URL + shared secret |
-| GitHub | A GitHub App installation backing [GitOps](/octy/gitops) — deploy triggers and the PR dashboard, over an allowlist of repos |
+| GitHub | A GitHub App installation backing [GitOps](/octy/gitops) — deploy triggers and the PR dashboard, and a webhook for automated code review |
 | Anthropic | `claude-sonnet-5` model for Ask Octy in-app chat (key from Secrets Manager `LLApi/ANTHROPIC_API_KEY`) |
 | Slack | Best-effort relay of [Doc Refreshes](/octy/doc-refreshes) records (bot token), one channel + thread |
 | S3 | Three allowlisted buckets the agent can list and read (fail-closed) |
