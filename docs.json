@@ -93,7 +93,8 @@
               "agents/statement-analyzer",
               "agents/appraisal-evaluation",
               "agents/liabilities-assessment",
-              "agents/bank-statement-income"
+              "agents/bank-statement-income",
+              "agents/business-verification"
             ]
           }
         ]

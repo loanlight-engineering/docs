@@ -152,6 +152,40 @@ PK `id`, `audit_run_id` → `audit_runs` (ON DELETE CASCADE), `lender_id` → `l
 `check_kind`, never `check` — `CHECK` is a PostgreSQL reserved word. An unquoted reference in hand-written SQL is a syntax error, not a warning.
 </Note>
 
+## Business verification
+
+Written by the [Business Verification agent](/agents/business-verification). Two tables (migration `0166_milky_snowbird`).
+
+### business_verification_lookups
+
+One row per Secretary of State lookup; a completed lookup is reused across audits of the same loan for 120 days. PK `id`, `lender_id` NOT NULL, `loan_id` nullable.
+
+<ParamField path="origin_audit_run_id" type="uuid NOT NULL">The audit that created the lookup. FK → `audit_runs` (cascade).</ParamField>
+<ParamField path="subject_kind" type="text NOT NULL">CHECK: `self_employed | vesting_entity`.</ParamField>
+<ParamField path="lookup_key" type="text NOT NULL">Canonical `kind|name|state|street_number|zip5` key.</ParamField>
+<ParamField path="status" type="text NOT NULL">CHECK: `pending | complete | failed`.</ParamField>
+<ParamField path="outcome" type="text">Set on completion: `matched`, `not_found`, or `low_confidence`.</ParamField>
+<ParamField path="record" type="jsonb">The matched `StateRecord` payload; null when outcome ≠ `matched`.</ParamField>
+<ParamField path="served_from_saved_copy" type="boolean NOT NULL">True when the result came from a prior lookup's cached files.</ParamField>
+<ParamField path="retired_at" type="timestamptz">Set when this lookup is superseded by a newer one for the same key.</ParamField>
+
+Other columns: `query_name`, `query_state`, `failure_reason`, `search_path` jsonb, `raw_responses` jsonb, `candidates` jsonb, `effective_date`, `screenshot` jsonb, `filings` jsonb, `lease_token`, `lease_expires_at`, `paid_call_sent_at`, `next_poll_at`, `first_called_at`, `paid_call_count`, `retry_id`, `pending_call` jsonb, `created_at`, `completed_at`.
+
+Unique partial index `bv_lookups_loan_key_live_unique` on `(loan_id, lookup_key)` where `status IN ('pending', 'complete') AND NOT served_from_saved_copy AND retired_at IS NULL`.
+
+### business_verification_subjects
+
+One row per subject per audit run. Stable position: unique index `bv_subjects_audit_position_unique` on `(audit_run_id, position)`. PK `id`, `audit_run_id` NOT NULL → `audit_runs` (cascade).
+
+<ParamField path="lookup_id" type="uuid">FK → `business_verification_lookups`; null for unusable subjects.</ParamField>
+<ParamField path="subject_kind" type="text NOT NULL">CHECK: `self_employed | vesting_entity`.</ParamField>
+<ParamField path="borrower_label" type="text">Which borrower; null for the vesting entity.</ParamField>
+<ParamField path="unusable_reason" type="text">CHECK: `name_too_short | state_unresolved`; null when usable.</ParamField>
+<ParamField path="reused" type="boolean NOT NULL">True when this subject was answered from a prior lookup (lookup `served_from_saved_copy`).</ParamField>
+<ParamField path="position" type="integer NOT NULL">Stable ordinal within the audit run.</ParamField>
+
+Other columns: `declared_name`, `declared_address` jsonb, `declared_start_date`, `search_state`, `property_state`, `created_at`.
+
 ## audit_errors
 
 Per-agent failure ledger (`audit-runs.ts`). PK `id`, `audit_run_id` → `audit_runs` (cascade, NOT NULL).

@@ -366,8 +366,42 @@ LOA-2180 builds a portable rule-state representation:
 Migration `0156` adds template provenance to the rules tables so the reconciler can identify which rules it supplied and which the lender owns.
 
 <Note>
-`APPRAISAL_BUILTIN_RELEASES` ships empty (LOA-3248 is infrastructure only). The first production entry (CONDO_004) will be declared in a subsequent PR. Until then the reconciler runs and exits with nothing to deliver for this mechanism.
+`APPRAISAL_BUILTIN_RELEASES` now carries its first production entry: `condo-004-v1` (LOA-3140, `CONDO_004` — In-Project Comparable Sale). The reconciler delivers it to all active appraisal rule sets automatically after each deploy. See [CONDO_004](/agents/appraisal-evaluation#appraisal-rules) in the Appraisal-Evaluation agent docs.
 </Note>
+
+### RuleOps approved-mirror runtime (LOA-3048)
+
+The **approved-mirror runtime** keeps a read-only copy of each lender's approved rule state in S3, synchronized every 15 minutes by a scheduled ECS Fargate task. A Lambda freshness checker (scheduled every 5 minutes) verifies that the mirror is current and records the result so Datadog can alert on stale data.
+
+The mirror covers three services: `appraisal`, `credit`, and `income`. For each service it writes the current approved rule snapshot to `{service}/*/mirror/current/*` in the rule-export S3 bucket. Archive copies land at `{service}/*/mirror/archive/*` (if-none-match, so each version is immutable).
+
+Two tables track the runtime (migration `0168_ruleops_mirror_runtime`):
+
+**`ruleops_mirror_runs`** — one row per mirror execution attempt.
+
+| Column | Notes |
+|---|---|
+| `run_id` | uuid PK (caller-assigned) |
+| `status` | `running`, `complete`, `partial`, `refused`, `timed_out`, `overlap_skipped`, `unknown` |
+| `started_at` / `ended_at` | `ended_at` is null while running |
+| `manifest_key` / `manifest_version_id` / `manifest_sha256` | S3 coordinates of the runtime manifest (null on non-complete runs) |
+
+**`ruleops_mirror_state`** — one row per `(environment, operation)` pair. Tracks the active lease and the last complete run for each operation.
+
+| Column | Notes |
+|---|---|
+| `(environment, operation)` | PK; environment: `int` or `prod`; operation: `mirror` or `freshness` |
+| `activation_at` | When this environment's mirror was enabled |
+| `lease_generation` / `lease_owner_run_id` / `lease_expires_at` | Concurrency fence — only one mirror run holds the lease at a time |
+| `continuation_key / _version_id / _sha256` | Cursor for incremental mirror runs |
+| `last_complete_run_id / _at / _key / _version_id / _sha256` | The last successful full run |
+
+**Datadog monitors** (in `packages/api/observability/datadog/`):
+
+- `ruleops-mirror-checker-silent` / `ruleops-mirror-checker-silent-int` — fires when the freshness checker stops emitting (Lambda not running). The prod monitor ships muted; un-mute it after the first prod deploy.
+- `ruleops-mirror-incomplete` / `ruleops-mirror-incomplete-int` — fires when a mirror run ends `partial` rather than `complete`.
+
+**Observation limit:** a single mirror run captures at most 10,000 observations. A run that reaches the limit ends `partial` with reason `observation_limit`. Past 64 MiB of retained evidence the run ends `partial` with `evidence_bytes_limit`. At current fleet size (~830–1,100 rule sets at 9–12 observations each) neither limit is expected in normal operation.
 
 ### Datadog monitors
 

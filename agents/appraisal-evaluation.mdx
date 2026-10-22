@@ -659,11 +659,21 @@ the field maps, and `cross_doc_validation`.
 ### Appraisal rules
 
 The rule definitions live in `lib/appraisal-pipeline/rules/definitions` (registry
-`rule-registry.ts`) and span **67 rules** across these prefixes: `SUBJ_` (14), `SITE_` (8),
-`EXH_` (6), `NEIGH_` (6), `COMP_` (6), `CONT_` (6), `IMP_` (6), `APPR_` (3), `CONDO_` (3),
+`rule-registry.ts`) and span **68 rules** across these prefixes: `SUBJ_` (14), `SITE_` (8),
+`EXH_` (6), `NEIGH_` (6), `COMP_` (6), `CONT_` (6), `IMP_` (6), `APPR_` (3), `CONDO_` (4),
 `REC_` (3), `INCOME_` (2), `RENT_` (2), `GEN_` (1), `UNIT_` (1). The rules are agency-aware
 (`AgencySource`: `fannie_mae`, `freddie_mac`), support compound conditions (`compound-walker`,
 `condition-schema`), and use `feature-gates`.
+
+<Note>
+**CONDO_004 — In-Project Comparable Sale (LOA-3140):** Applies to condo and co-op appraisals (Form 1073, Form 1075, and the co-op form; UAD 2.6 and UAD 3.6). Every other form is `SKIPPED`.
+
+- **PASS:** at least one comparable is `CLOSED` and is in the subject's project.
+- **WARNING:** no comparable is both `CLOSED` and in the project, and every comparable that could count is confirmed outside the project. When the appraiser wrote an explanation matching the ruling table, the first qualifying sentence (capped at 300 code points) is quoted in the message.
+- **NEEDS_INFO:** no closed in-project comparable, and project membership or sale state is unknown for at least one comparable. A grid with no evidence comps, or only non-closed comps, is also `NEEDS_INFO`.
+
+Sale-date state per comparable is `CLOSED`, `NOT_CLOSED`, or `UNKNOWN`. A not-closed signal always wins; a UAD 2.6 contract-only date (e.g. `c04/25`) is `NOT_CLOSED`. Project membership on UAD 3.6 uses the existing `is_in_subject_subdivision` leaf; UAD 2.6 PDF uses the Reducto schema; UAD 2.6 XML uses normalized project-name equality. Default severity is `WARNING`; lenders may raise it to `FAIL`. Delivered to all lenders via `APPRAISAL_BUILTIN_RELEASES` (`condo-004-v1`), seeded by the post-deploy RuleOps reconcile — no manual step.
+</Note>
 
 <Note>
 **SITE_005 gas-unreported behavior (LOA-2188, migrations `0304`/`0305`):** Gas reported as `"None"` now returns `NEEDS_INFO` rather than `FAIL`. The rule previously could not distinguish an all-electric property from an unreadable checkbox, so a `FAIL` on `"None"` was misleading. All other utilities with `"None"` remain a hard `FAIL`, with a per-utility message. The `CONDO_003` owner-occupancy threshold was corrected from `< 51%` to `<= 50%` to match Fannie Mae's established-project standard (strictly greater than 50% owner-occupied is required to pass). Both changes were also published to adopted lender rules via the guarded migrations, so already-adopted lenders received the corrected descriptions and thresholds automatically.

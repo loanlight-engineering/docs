@@ -1,0 +1,175 @@
+---
+title: Business Verification agent
+description: Secretary of State lookup via Cobalt Intelligence for self-employed borrowers and vesting entities.
+icon: building-2
+---
+
+The Business Verification agent (`businessVerification`) checks whether each self-employed borrower and the loan's vesting entity are registered and active with their state's Secretary of State, using the Cobalt Intelligence provider.
+
+<Note>
+This agent is **entitlement-gated**: it runs only for lenders holding an explicit `enabled=true` entitlement row. The router's zero-rows fallback (all active agents for an un-seeded lender) does not grant it. See `requiresExplicitGrant` in [Agent catalog and pipeline](/agents/catalog-and-dependencies).
+</Note>
+
+## What it checks
+
+The agent finds each subject in the Secretary of State database and runs three checks:
+
+| Check key | What it answers |
+|---|---|
+| `found` | Was a state record matched with at least medium confidence? |
+| `active` | Does the record show the entity is currently active? |
+| `formation` | Was the entity formed before or by the declared start date? |
+
+`formation` is `not_applicable` for vesting entities — there is no declared start date to compare.
+
+Check results follow a closed vocabulary: `passed`, `failed`, `warning`, `missing`, `incomplete`, or `not_applicable`.
+
+### Match confidence
+
+After a record is found, the agent scores the match:
+
+| Confidence | Condition |
+|---|---|
+| `high` | Both name and address agree |
+| `medium` | Either name or address agrees |
+| `low` | Neither agrees — treated as not found; all checks report `missing` |
+
+Name agreement uses normalized name matching (NAME-0). Address agreement checks the street number and ZIP5 of the declared business address against the state record.
+
+### Delaware special case
+
+Delaware publishes no normalized entity status. For a Delaware record without a `normalizedStatus`, the agent reads the franchise-tax line as a proxy:
+
+- `"Franchise tax is in good standing"` (trimmed, case-insensitive) → treated as `active`
+- Any other value, or none → treated as `unknown`, which yields `incomplete`, never `failed`
+
+Records stored before the franchise-tax line was captured also read as `unknown`.
+
+## Subjects
+
+The agent identifies subjects from the URLA extraction result and the loan's MISMO vesting entity.
+
+**Self-employed borrowers.** For each borrower, the agent reads only the *current* self-employment (`section1BorrowerInfo.currentEmployment`). Previous and additional jobs are deliberately not checked. A borrower with no `isOwnBusinessOrSelfEmployed` flag, or with a blank employer name, contributes no subject.
+
+**Vesting entity.** The MISMO vesting entity produces one subject unless its cleaned name matches a self-employed borrower's business — in which case it is covered by that borrower's lookup and not checked separately.
+
+### Deduplication
+
+Two self-employed subjects are the same business when their cleaned names and search states match, and their street number and ZIP agree wherever both borrowers declared them. Co-borrowers naming the same business produce one lookup, not two. The kept subject carries the most complete address across all its members.
+
+A subject is **unusable** (and all its checks report `missing`) when:
+- the business name normalizes to fewer than 3 characters, or
+- the business address carries no resolvable two-letter state code.
+
+## How a lookup works
+
+For each usable subject the agent acquires or reuses a `business_verification_lookups` row.
+
+### Lookup key and 120-day reuse
+
+The lookup key is `kind|name|state|street_number|zip5` (cleaned). Vesting entities append the property state. A lookup completed within the past **120 days** (Fannie Mae standard) is reused; an older lookup is retired (`retired_at`) and a new one is created.
+
+The partial unique index `bv_lookups_loan_key_live_unique` ensures at most one live (pending or complete, un-retired, not served from a saved copy) lookup per loan and key. When two audits for the same loan need the same lookup simultaneously, one picks up the other's result.
+
+### Search strategy
+
+The search planner decides provider calls per subject type:
+
+- **Self-employed:** name search in the business-address state.
+- **Vesting entity:** Cobalt typeahead search (stateless), then an ID lookup on the typeahead result. If typeahead fails, falls back to a name search in the property state.
+
+### Concurrency and lease
+
+The worker uses a lease (`lease_token` + `lease_expires_at`) on each lookup to serialize rounds across parallel workers. A lease expires if the holder stalls; a stranded lookup can be claimed by another run. The `paid_call_sent_at` column marks the first paid provider call; the `next_poll_at` column schedules the worker's next round.
+
+A lookup that receives no result within 5 minutes of its first provider call is sealed `timed_out` (`status: failed`, `failure_reason: timed_out`).
+
+## Triggering
+
+| Channel | How triggered |
+|---|---|
+| EPC | Pre-enrolled in the agent ledger before phase 0; dispatched after phase 0 completes (when URLA extraction is available). |
+| Partner API | Runs by default when `agents[]` is empty and the lender is entitled. Holds the audit open until lookups finish, the same as `appraisalEvaluation`. Pass a non-empty `agents[]` to run only those agents instead. |
+
+<Note>
+Business Verification results are **not exposed on the Partner API results surface** — only `summary.agentStatuses` includes its status. Lender-facing access to findings is through the audit viewer.
+</Note>
+
+## Data model
+
+Migration `0166_milky_snowbird` adds two tables. Both FK to `audit_runs` with `ON DELETE CASCADE`.
+
+### business_verification_lookups
+
+One row per Secretary of State lookup. A completed lookup is reused by later audits of the same loan within 120 days.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `lender_id` | uuid NOT NULL | FK → `lenders` |
+| `loan_id` | uuid | FK → `loans`; nullable when the audit has no loan |
+| `origin_audit_run_id` | uuid NOT NULL | FK → `audit_runs` (cascade) — the audit that created the lookup |
+| `subject_kind` | text NOT NULL | `self_employed` or `vesting_entity` |
+| `lookup_key` | text NOT NULL | Canonical `kind\|name\|state\|street_number\|zip5` key |
+| `query_name` | text NOT NULL | The name string sent to the provider |
+| `query_state` | text | Two-letter state code sent to the provider |
+| `status` | text NOT NULL | `pending`, `complete`, or `failed` |
+| `failure_reason` | text | Set on `failed` rows |
+| `outcome` | text | `matched`, `not_found`, or `low_confidence` |
+| `search_path` | jsonb | Sequence of provider calls planned and executed |
+| `raw_responses` | jsonb | Provider response payloads |
+| `record` | jsonb | The matched `StateRecord` (null when outcome ≠ `matched`) |
+| `candidates` | jsonb | Near-match candidates when outcome ≠ `matched` |
+| `served_from_saved_copy` | boolean NOT NULL | True when the result came from a prior lookup's file cache |
+| `effective_date` | date | Date the record was effective |
+| `screenshot` | jsonb | Captured screenshot reference |
+| `filings` | jsonb | Captured filing documents |
+| `lease_token` | uuid | Concurrency fence: the current holder's token |
+| `lease_expires_at` | timestamptz | When the current lease expires |
+| `paid_call_sent_at` | timestamptz | Time of the first paid provider call (starts the 5-minute timeout) |
+| `retired_at` | timestamptz | Set when the lookup is superseded by a newer one for the same key |
+| `completed_at` | timestamptz | When the lookup reached terminal status |
+
+Unique partial index `bv_lookups_loan_key_live_unique` on `(loan_id, lookup_key)` where `status IN ('pending', 'complete') AND NOT served_from_saved_copy AND retired_at IS NULL`.
+
+### business_verification_subjects
+
+One row per subject an audit checks. Position is stable (`bv_subjects_audit_position_unique` on `(audit_run_id, position)`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `audit_run_id` | uuid NOT NULL | FK → `audit_runs` (cascade) |
+| `lookup_id` | uuid | FK → `business_verification_lookups`; null for unusable subjects |
+| `subject_kind` | text NOT NULL | `self_employed` or `vesting_entity` |
+| `borrower_label` | text | Which borrower (null for the vesting entity) |
+| `declared_name` | text NOT NULL | Name from the 1003 / MISMO |
+| `declared_address` | jsonb | Street, city, state, postal code |
+| `declared_start_date` | text | `YYYY-MM` or `YYYY-MM-DD` from the 1003 |
+| `search_state` | text | Two-letter state searched first |
+| `property_state` | text | Subject property state (vesting entity's fallback search state) |
+| `unusable_reason` | text | `name_too_short` or `state_unresolved` |
+| `reused` | boolean NOT NULL | True when this subject was answered from a prior lookup |
+| `position` | integer NOT NULL | Stable ordinal within the audit run |
+
+## Portal API
+
+Two endpoints under `PortalAuditsBusinessVerificationController` (`api/v1/portal/audits/:auditId/business-verification`), scoped to the caller's lender via `PortalAuditsAuthGuard`:
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/v1/portal/audits/:auditId/business-verification` | `BusinessVerificationResponse` |
+| GET | `/api/v1/portal/audits/:auditId/business-verification/screenshots` | Screenshot images (base64) for all matched lookups |
+
+`BusinessVerificationResponse` shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `auditRunId` | string | |
+| `status` | string | `complete`, `not_applicable`, `failed`, `pending`, `skipped`, or `absent` |
+| `businesses` | `BusinessVerificationBusiness[]` | One entry per subject |
+| `counts` | `CheckCounts` | Aggregate `ran`, `passed`, `failed`, `couldntCheck`, `warnings`, `notApplicable`, `needsReview` |
+
+`not_applicable` is returned when the loan has no self-employment or vesting entity to check (`no_current_self_employment_or_vesting_entity`). `absent` is returned when the agent was not included in the audit's plan.
+
+Portal routes: `/loan-audits/[auditRunId]/business-verification` (staff viewer) and the next.js App Router BFF at `api/v2/audits/[auditRunId]/business-verification`.

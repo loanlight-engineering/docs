@@ -54,6 +54,7 @@ This is the current `AGENT_PIPELINE`. `requiresIndexing` agents are the ones who
 | `redFlags` | 2 | `propertyData`, `urlaExtraction` | `inproc_graph` | `false` |
 | `appraisalEvaluation` | standalone | — | `queue_worker` | `false` |
 | `liabilitiesAssessment` | standalone | — | `inproc_graph` | `false` |
+| `businessVerification` | standalone | — | `queue_worker` | `false` |
 
 <Note>
 `preAuditClassification` carries `requiresIndexing` because classify drives the LlamaCloud upload of the raw documents. `creditEvaluation` loads its document bytes from S3 (not the indexed pipeline), and `redFlags` consumes `propertyData` output — so neither reads the index. The catalog keys here are the identity that flows into `agent_runs.agent_type`; the LangSmith run-name labels are a separate presentation form (e.g. `piiValidation` → `PII-Validation`) — see [observability](/agents/observability).
@@ -68,15 +69,15 @@ This is the current `AGENT_PIPELINE`. `requiresIndexing` agents are the ones who
   <Accordion title="urlaCompletenessRulesEngine is NOT a catalog agent">
     The URLA completeness rules engine is deliberately absent from the catalog and `AGENT_PIPELINE`. It is an embedded subgraph of `urlaExtraction` and is never scheduled or billed independently. See [URLA completeness](/agents/urla-completeness).
   </Accordion>
-  <Accordion title="appraisalEvaluation is the only queue_worker agent">
-    `appraisalEvaluation` runs as a `queue_worker`: the dispatcher enqueues a BullMQ job and the background worker owns the `agent_runs` lifecycle. It is standalone (no phase, no edges). See [Appraisal evaluation](/agents/appraisal-evaluation).
+  <Accordion title="queue_worker agents: appraisalEvaluation and businessVerification">
+    Both `appraisalEvaluation` and `businessVerification` run as `queue_worker` agents: the dispatcher enqueues a BullMQ job and the background worker owns the `agent_runs` lifecycle. Both are standalone (no phase, no edges). `businessVerification` additionally carries `requiresExplicitGrant: true` — it is never granted via the zero-rows fallback. See [Appraisal evaluation](/agents/appraisal-evaluation) and [Business Verification](/agents/business-verification).
   </Accordion>
   <Accordion title="creditEvaluation is fully implemented">
     Despite older descriptions calling it a stub, `creditEvaluation` is a fully-implemented agent, seeded active and billable. See [Credit evaluation](/agents/credit-evaluation).
   </Accordion>
 </AccordionGroup>
 
-The per-agent reference pages document each agent's behavior: [Pre-audit classification](/agents/pre-audit-classification), [URLA extraction](/agents/urla-extraction), [PII validation](/agents/pii-validation), [Property data](/agents/property-data), [Property red flags](/agents/property-red-flags), [Credit evaluation](/agents/credit-evaluation), [Document health](/agents/document-health), [Appraisal evaluation](/agents/appraisal-evaluation), [Income analysis](/agents/income-analysis).
+The per-agent reference pages document each agent's behavior: [Pre-audit classification](/agents/pre-audit-classification), [URLA extraction](/agents/urla-extraction), [PII validation](/agents/pii-validation), [Property data](/agents/property-data), [Property red flags](/agents/property-red-flags), [Credit evaluation](/agents/credit-evaluation), [Document health](/agents/document-health), [Appraisal evaluation](/agents/appraisal-evaluation), [Income analysis](/agents/income-analysis), [Business Verification](/agents/business-verification).
 
 ## Boot-time loading and validation
 

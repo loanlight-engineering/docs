@@ -70,6 +70,20 @@ Key behaviors documented by LOA-2765:
 
 The application runs as an **ECS Fargate** service. The prod image is built from the **workspace root** with `-f packages/encompass/Dockerfile.prod` (the build context needs `pnpm-workspace.yaml`, the lockfile, the root `package.json`, and `packages/encompass`).
 
+The prod container (and the `DbInit`/`DbMigrate` Lambda functions) run on **Node 24** (LOA-2783). The dev image for the frontend plugin is also served by Node 24 rather than Bun.
+
+## Aurora TLS
+
+The ECS app and both database Lambdas (`DbInit`, `DbMigrate`) connect to the Aurora cluster over TLS with certificate verification (LOA-98). The CA bundle is the AWS RDS global CA (`rds-ca-bundle.pem`), downloaded by curl during the Docker build and the Lambda bundling step.
+
+The app reads the bundle from `/etc/ssl/certs/rds-ca-bundle.pem` (or `DB_SSL_CA` when set) and probes the certificate once per process on boot. A certificate verification failure exits the process (ECS rolls the deploy back via the circuit breaker); any other connection failure only warns. Local Docker leaves `DB_SSL` unset and connects plain text.
+
+`DB_CUSTOM_RESOURCE_BOOTSTRAP_VERSION` was bumped from `'1'` to `'2'` to trigger a CloudFormation re-run of `DbInit` and `DbMigrate` so their first TLS run happened while Aurora still accepted plain-text connections.
+
+<Note>
+`rds.force_ssl` remains `0` — the second PR that enables it (rejecting plain-text connections) ships after TLS is verified in INT and prod.
+</Note>
+
 ## Database access
 
 DB roles: `db_readonly` (all envs) and `db_readwrite` (int only). The bastion is shared with the API DB; tunnel to local port 5433 (the `db:connect:int:read` / `db:connect:int:write` scripts do an SSM port-forward with IAM auth) to avoid the 5432 conflict.
