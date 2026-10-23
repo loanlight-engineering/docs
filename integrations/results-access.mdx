@@ -152,6 +152,40 @@ for the audit PDF's Loan Details card. `incomeType` is sourced from `CX.LOANLIGH
 `noteRate` from MISMO. See [audit-pdf library](/integrations/audit-pdf) and
 [Integration audit request schema](/integrations/audit-request-schema).
 
+## Delivered-report snapshots (EDU-14, LOA-2939)
+
+`packages/encompass/src/delivered-artifacts/` adds an ownership model for reports delivered into
+Encompass. When a transaction delivers an audit PDF, the integrations service will record an
+ownership entry (S1 — "who owns this artifact") and eventually support guarded intake reads of a
+prior snapshot (S2 — "read the version we actually delivered before re-delivering").
+
+This feature is **feature-gated dark**. The code is present and tested but no call site opens
+the gate in production yet. Two key modules:
+
+- `owns-source.ts` / `resolve-source.ts` — S1 ownership model: determines which lender owns a
+  delivered artifact by its ID pattern.
+- `guarded-read-handler.ts` / `retrieve-delivered.ts` — S2 guarded intake read: authorisation
+  before resolution, returns the stored artifact bytes. Authorization precedence: ownership check
+  before scope resolution.
+
+Artifact IDs follow the pattern defined in `delivered-artifact.types.ts`. The S2 `intake-read.types.ts`
+controls which read operations are permitted on which ownership states.
+
+## Revision-aware evidence refetch (EDU-13, LOA-2938)
+
+`packages/encompass/src/evidence-revision/` adds the infrastructure for refetching prior evidence
+revisions when a re-delivery requires a snapshot of what was sent before. Built mocked; no provider,
+database, or queue integration is wired.
+
+- `revision-refetch.adapter.ts` — S1 adapter: fetches a specific evidence revision from upstream;
+  accepts only HTTP 200 (other 2xx responses become `refetch_malformed`).
+- `revision-refetch.validate.ts` — validates the fetched payload against the wire contract defined
+  in `evidence-revision.types.ts`.
+- `revision-envelope.ts` — wraps a validated revision in a delivery envelope.
+
+This feature also requires EDU-12 to be deployed in the target environment before the adapter
+becomes live.
+
 ## Related
 
 <Columns cols={2}>

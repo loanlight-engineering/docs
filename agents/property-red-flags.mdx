@@ -161,6 +161,37 @@ Name matching (`utils/name-matching.ts`) returns a `MatchSeverity` of `HIGH | ME
 where `null` is an exact match (a pass that emits no flag). An exact match on any owner suppresses
 the flag.
 
+## Checks coverage (LOA-3290)
+
+On completion, the agent records one outcome per enabled rule and stores the list on the agent-run row. The stored list is then served as `checks[]` on `GET /api/v1/portal/audits/:auditId/property-data`.
+
+Each `PropertyCheckRow` in the response carries:
+
+| Field | Description |
+|---|---|
+| `checkId` | Unique identifier for the check-list entry |
+| `ruleId` | The rule's ID from the catalog |
+| `ruleName` | Human-readable name from `PROPERTY_CHECK_DISPLAY` |
+| `label` | Outcome label (`failed`, `passed`, `missing`, `incomplete`, `not_applicable`) |
+| `classification` | Always `null` on property checks |
+| `reasonCode` | Coded reason (nullable) |
+| `reason` | Narrative reason (nullable) |
+| `message` | `passedMessage` when `passed`; `null` when `flagged`; `reason` for other outcomes |
+| `propertyRole` | `subject` or `current_home` |
+
+Outcome label mapping:
+
+| Recorded outcome | Served label |
+|---|---|
+| `flagged` | `failed` |
+| `passed` | `passed` |
+| `could_not_evaluate`, `insufficient_data`, `error` | `incomplete` |
+| `not_applicable` | `not_applicable` |
+
+A stored `red_flag_results` flag outranks the recorded check list. A recovery re-run can insert new flags after completion but cannot restamp the list; if it flagged a rule, that rule is served as `failed` regardless of what the check list recorded.
+
+When check-list persistence fails, the endpoint returns no entries and the coverage indicates `recorded: false` with the failure reason. A completed run predating LOA-3290 (no stored check list) returns `saved_before_coverage` in the coverage field.
+
 ## Persistence
 
 The runner (`property-red-flags-runner.ts` `persistRedFlagResults`), not the graph, writes

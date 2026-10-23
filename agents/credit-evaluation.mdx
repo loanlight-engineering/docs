@@ -443,10 +443,17 @@ One row per run. Carries `status` (`pending | running | completed | failed | rev
 `extractedData` (facts), `complianceResults`, `aiSummary`, `isScanned`, `coveragePercent`,
 `overallRisk`, `dtiRatio` (real), `grossMonthlyIncome` (real), `ruleSetId`/`ruleSetVersion`,
 `auditRunId`, `selectedRuleSources[]`, `layersUsed[]`, `auditedCreditDocumentId`, recovery
-columns (`lastHeartbeatAt`, `claimToken`, `recoveryAttempts`, `errorCategory`), and `deletedAt`
-(soft delete). Two partial unique indexes — `(auditRunId, auditedCreditDocumentId)` and
-`(auditRunId)` where the document id is null — both gated on `deleted_at IS NULL`.
-`buildCreditRunsConflictArgs()` chooses the upsert target.
+columns (`lastHeartbeatAt`, `claimToken`, `recoveryAttempts`, `errorCategory`), `deletedAt`
+(soft delete), and `summary_reconciliation` (jsonb, nullable — see below). Two partial unique
+indexes — `(auditRunId, auditedCreditDocumentId)` and `(auditRunId)` where the document id is
+null — both gated on `deleted_at IS NULL`. `buildCreditRunsConflictArgs()` chooses the upsert target.
+
+**`summary_reconciliation` (LOA-3320).** After extraction, the agent extracts the credit report's
+own summary tables and compares them against totals computed from the extracted tradelines. Proven
+discrepancies are stored here as `CREDIT_SUMMARY_TABLE_MISMATCH` findings. This field is internal:
+it does not affect credit rule outcomes (`complianceResults`), risk values, or any lender-facing
+payload. Uncertain comparisons (where an LLM judge is needed) are resolved before storage except on
+shadow runs, where judge calls are skipped.
 </ResponseField>
 
 <ResponseField name="credit_rule_sets" type="table">

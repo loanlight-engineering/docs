@@ -39,7 +39,7 @@ interface GenerateAuditPdfV2Input {
 
 `hasAccompanyingAppraisalReport` is set when both delivery paths (split and combined) successfully fetch the Appraisal Review Summary PDF bytes before generating this report. When `true`, the body all-clear banner and the `auditSubtitle` scope their claims to the checks this report covers and direct the reader at the companion document — the AUS report has no appraisal input, so an unqualified "all validations passed" would contradict an accompanying appraisal PDF that carries findings. When `false` or absent the wording is byte-identical to before LOA-2094. The flag keys on fetched bytes, not file presence — a post-fetch streaming drop in Encompass can leave the banner referencing an unfiled document, alarmed via `appraisal_banner_orphaned`.
 
-`AuditSectionsInput` carries the six report sections:
+`AuditSectionsInput` carries the six core report sections:
 
 ```ts
 interface AuditSectionsInput {
@@ -52,6 +52,8 @@ interface AuditSectionsInput {
 }
 ```
 
+Business Verification data is fetched separately (see below) and is not part of this interface.
+
 The render order (exceptions-first) is:
 
 1. Loan Details
@@ -62,6 +64,7 @@ The render order (exceptions-first) is:
 6. Data Consistency
 7. Credit Review
 8. Property Review
+9. Business Verification (when the agent ran and results are present — see [Business Verification section](#business-verification-section-loa-3276))
 
 When the audit state is not `Complete`, or sections are missing, the encompass service passes the data through so the library renders a status / NULL_SECTIONS PDF rather than a full report.
 
@@ -140,6 +143,38 @@ All values are pre-formatted display strings resolved by loanlight-api; an absen
 <Note>
 `LTV / CLTV` was removed from the Loan Details card in the grouped-Document-Health redesign (#516). The fields (`ltv`, `combinedLtv`) still exist in `LoanDetails` and the API type, but the card no longer renders them.
 </Note>
+
+## Business Verification section (LOA-3276)
+
+When the Business-Verification agent ran for a loan, `AuditReportPdfService` fetches results from
+`GET /api/v1/audit_runs/:id/business_verification` and passes them to `buildAuditContent` as a
+separate argument. The section is omitted when the agent did not run or its run was absent or skipped.
+
+For each business in the result, the section lists:
+
+- Business name and state of registration.
+- Whether the lookup is for a borrower or for a vesting entity.
+- Match confidence (the portal result labels and confidence level).
+- When no match is found: the search details used (SOS query parameters).
+- When a match is found: per-check results (verified, unverified, or could not verify) with
+  short explanations.
+
+State-record screenshots are included **only when the checks identify a matched record**. Rejected
+or unmatched records do not include screenshots. Screenshots are rendered with a caption identifying
+the source and capture timestamp.
+
+When the run is `failed` or `pending`, the section states that nothing could be verified for that
+business. A run that is absent or skipped is simply not rendered.
+
+<Note>
+The Coverage Appendix (a full per-check grid for every run) is not yet included in the PDF. It
+depends on LOA-3145 and will be added in a later slice.
+</Note>
+
+The section is built by `audit/sections/business-verification.ts` in `packages/audit-pdf` and is
+consumed by `AuditReportPdfService` in `packages/encompass`. Optional data fetching is gracefully
+degraded: a fetch failure logs a warning and the section is omitted rather than failing the PDF
+render.
 
 ## Subject listing screenshots (LOA-2989)
 

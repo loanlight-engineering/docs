@@ -127,6 +127,7 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     - **Inquiry counting (LOA-3285).** Every listed credit inquiry is counted as a hard pull unless its `inquiry_type` is explicitly `"soft"`. Previously untyped (`"unknown"`) inquiries were excluded, undercounting hard pulls on some vendor reports.
     - **Report filtering (LOA-3285).** The overview cards and sidebar badge now show only the current (non-superseded) credit reports per borrower.
     - **Needs Info and Pending rules (LOA-3285).** The credit findings table includes `NEEDS_INFO` and `PENDING` rule results with their status and messages. Pending rules contribute to the per-report needs-review count.
+    - **Tabless redesign, borrower and report info first (LOA-3331, behind `show_the_work`).** When `showTheWork` is `true`, the Credit Review section becomes one tabless, scrolling page: borrower info (`CreditBorrowersInfoCard`) and report info (`CreditReportsInfoCard`) appear first, followed by loan tiles and findings, then one collapsible `CreditReportBlock` per credit report (tradeline summary, score card, inquiries, written loan summary, report history). Joint reports show borrower data side by side. When `showTheWork` is `false`, the section renders the legacy tabbed view. The same `showTheWork` flag controls the standalone Credit product (`/credit-review/[runId]`).
 
 ## Feature flags
 
@@ -138,6 +139,10 @@ The `training_videos` flag is **not** in this object. It is a per-lender flag re
 
 <Note>
 The **eligibility card** is **not** in this `FeatureFlags` object. Its visibility depends on both the lender's `eligibility_card` flag (a tri-state `off` / `internal` / `on` stored in `feature_value` on `lender_feature_flags`) and the viewer's super-admin status. It is resolved server-side via `GET /api/eligibility-card-access`, separate from the env-default `FeatureFlags` flow. See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements).
+</Note>
+
+<Note>
+The **new results UI** (Data Consistency, Document Health, 1003 Check, Properties Check, Credit Review, and the standalone Credit product) is gated by `show_the_work`, a tri-state in `lender_feature_flags` — **not** in this `FeatureFlags` JavaScript object. It is resolved server-side and surfaced as `showTheWork` on the overview and credit-detail endpoints. See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements) for the tri-state semantics and rollout defaults.
 </Note>
 
 `getFeatureFlags(lenderId)` GETs the backend `/lenders/${lenderId}/feature-flags`, which returns `{ featureKey, enabled }[]`; the result is transformed via `KEY_MAP` onto an env-default base. An empty array or any failure falls back to `getEnvDefaults()`.
