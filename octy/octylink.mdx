@@ -1,0 +1,244 @@
+---
+title: Octylink
+description: The Hermes agent hosting platform behind Octy's non-Oz bug runners. Manage agents, providers, run queues, and automations from the /octylink page.
+icon: link
+---
+
+Octylink is the internal name for the platform that hosts Hermes runner agents on the `/octylink` page in Octy. Each agent is one Hermes root under `OCTYLINK_HOME` (`~/.octylink/<slug>`) with its own gateway and dashboard on loopback ports Octylink allocates. Octylink manages their lifecycle — install, run, queue, automate, reset.
+
+<Note>
+The name "Octylink" and "Hermes" are engineering-only terms. No text a user or agent receives names them: agent-facing tools, guides, errors, and the side panel say "Octy" throughout (`octy-identity.test.ts` enforces this).
+</Note>
+
+Octy's connection to Octylink is set in CDK context (`octylinkUrl`, `octylinkPublicUrl`, `octylinkApiKeySecretName`). When those are absent, every `/api/hermes/*` call and the Octy side panel return `503 hermes_not_configured`.
+
+## Architecture
+
+### The registry
+
+The host is the registry. Each agent's `octylink.json` on the Octylink host holds the agent record (slug, title, purpose, icon, mascot, ports, Octy operator + key scopes, created/updated by). `host.json` holds the host defaults and each automation's settings. Octy owns only the audit trail: one `octylink_actions` row per admin change (written by `logHermesAdmin`, read on `/activity`).
+
+### Two processes per agent
+
+Each agent runs two Hermes processes:
+
+- **Gateway** — the runtime: accepts runs, streams them live, handles steer/stop/approval, keeps sessions and transcripts, and ticks cron jobs every 60 s. Started at boot and supervised. Slack and cron reach the gateway directly; they are not routed through Octy and are never queued.
+- **Dashboard** — the admin API: providers, platforms, skills, cron edits, config schema, session search. Started on demand (not restarted). Has a **Stop** button. A stopped dashboard leaves runs, chats, Credentials, SOUL.md, and Config writes working; tabs that need it show a notice or a read-only fallback.
+
+### The Octy base template
+
+Every agent starts from the Octy base distribution (`distributions/octy-base`). The base sets what Hermes cannot configure itself: the Daytona sandbox policy (pinned by managed scope), the API server, the Octy MCP block, and the base credentials (Daytona, Octy MCP URL + key, GitHub token, GitHub Packages, LangSmith). Everything else is layered on top per agent through Hermes's own surfaces.
+
+The base is versioned by a digest of its files — nothing is bumped by hand. An update is a three-way merge that keeps operator config edits. SOUL.md belongs to the agent after creation (the agent tab's SOUL.md **Reset** puts the base's back).
+
+## Roles
+
+Roles are an optional job on top of the base, chosen once at creation (`features: ["roles"]` on Octylink enables the feature). The three options are:
+
+- **Plain** — no role; a general-purpose agent.
+- **PR reviewer** — runs the `pr-review` skill on each pull-request review request. Its automation is `pr-reviews`.
+- **Datadog monitor** — runs the `datadog-monitor` skill on each monitor alert. Its automation is `datadog-alerts`.
+
+A role is fixed for the agent's life; there is no switching. When an Octylink has no `roles` feature, the tab shows "not available" — never an error.
+
+### What a role installs
+
+When an agent is created with a role, Octylink adds to the Octy base:
+
+- The role's skill(s), written once from the template and owned by the agent afterwards (Skills tab → **Reset to template** undoes local edits).
+- A role-specific SOUL.md (the agent's own; Reset puts the role's default back).
+- MCP servers from Hermes's catalog. An OAuth server shows **sign in after creation** in the Roles & templates detail and needs a sign-in on the MCP tab before the agent is ready.
+- Extra credentials beyond the base's (shown in the Roles & templates detail under **Credentials beyond the base's**).
+- Its automation (see [Automations](#automations)).
+
+### Readiness bands
+
+Readiness has three bands, in order: `base` (the Octy base), `role` (what the agent's role needs), then `agent` (the agent's own checks). An agent is **Ready** only when no blocking base row fails. Octylink refuses `POST /v1/runs` to a non-ready agent (`409 not_ready`), and the runner picker greys it with the reason.
+
+### The Roles & templates page
+
+The **Roles & templates** tab (`?tab=roles`, `RolesTab.tsx`) shows the Octy base and every role side by side: what skills, MCP servers, and credentials each installs, the automation it runs, and which agents use it, with links to the tabs where each piece lives. A **Setup guide** link opens `docs/octylink-automations.md` in the repo.
+
+### Finish setup
+
+A role agent's Overview shows **Finish setup** until the steps in `finish-setup.ts` are all done:
+
+1. **Connect Slack** — create the Slack app from the manifest, paste both tokens.
+2. **Choose the channel** — set the agent on its automation (Host view → Automations).
+3. **Sign in to MCP servers** — OAuth MCP servers listed in the role; done on the MCP tab.
+4. **Connect the trigger** — paste the webhook from the Connect sheet; first delivery ticks this off.
+
+## Run queue
+
+The run queue is per agent, not per use case (`features: ["run_queue"]` on Octylink enables it; older Octylinks have no queue, behaviour is unchanged — at-capacity runs fail immediately).
+
+A run starts only when two conditions are met simultaneously:
+
+1. The agent's own `max_concurrent_runs` has a free slot.
+2. A free sandbox is available on the shared Daytona plan (counted across every agent in the organisation).
+
+**When-busy setting** (saved in the agent record; default is wait):
+
+- **Wait in line** — a run that does not fit gets an `olq_…` id in state `pending` with `queue { position, waiting_for, note }` (`waiting_for` is `agent`, `host`, or `line`). Every per-run route keeps answering for that id while it waits.
+- **Refuse** — the run fails immediately with `at_capacity`.
+
+The maximum number of waiting runs is configurable (5, 10, 25, 50, 100). A new agent's "Runs at once" defaults to what the Daytona plan holds of its sandbox size, capped at 5 (2 when no plan is read).
+
+### Where the queue shows up
+
+- **Overview** (`tabs/RunQueueTile.tsx`) — the **When busy** tile: runs at once, sandboxes (the shared Daytona plan count), the queue setting, and the list of waiting runs with position, submitted-by, time waiting, and why it is waiting.
+- **Host view agents table** — the **Runs** column: `X of Y` running and a **N waiting** chip when the queue is non-empty.
+- **Shared sandboxes strip** — above the agents table, Daytona plan usage across all agents.
+- **Run panel** — "Queued · position N" on a waiting run.
+- **Chats** — a toast when a run is queued.
+- **Automation recent runs** — a refused run is named, never silent.
+
+Slack-driven and cron-driven runs reach the gateway directly and are not subject to queuing.
+
+## Providers and models
+
+The **Providers & models** tab (`ProvidersTab.tsx`) shows every provider Hermes knows, broken into **Connected** (authenticated; runs can use these) and **Not connected** (available; sign in or add a key to use one).
+
+### Provider detail
+
+Selecting a provider shows everything the installed Hermes offers for it, read from the running dashboard:
+
+**Sign-in and keys** (`ProviderMethodsSections`):
+
+- **Sign-in methods** — device-code flows run from the browser; flows marked `external` require a CLI command on the host (the reason is shown inline).
+- **API key variables** — one row per variable (`env` name, set/not set, preview). Save validates against the provider before writing to the profile `.env`.
+- **Settings** — non-secret variables such as a base URL.
+- **Excluded methods** — sign-ins or keys Octylink blocks (e.g. Anthropic subscription tokens, barred by Anthropic's terms); shown with reason but not offered.
+
+**Credential pool** — what Hermes holds for this provider across all sign-ins and saved keys. Each entry shows its auth type, source, priority, and last status. A pool entry from the profile `.env` shows a **Remove** button that removes the variable; a pool entry from a sign-in shows a **Remove** button that disconnects it.
+
+An additional key can be added to the pool for providers that support it (`pool_add: true`).
+
+**Default for runs** — a model picker that sets the provider's default model via `POST /api/providers/set-active`. Switching the default provider asks Hermes first (it may want a confirmation); no gateway restart is needed either way.
+
+**Models** — every model the signed-in provider reports, each with its capabilities (`reasoning`, `fast`, `vision`, `tools`, `long_context`).
+
+### Custom endpoints
+
+Providers → **Custom endpoints** (the second rail row, present when Hermes supports it): OpenAI-compatible URLs in the agent's `config.yaml`. Add one with a name, base URL, API key, API mode (`auto-detect`, `chat_completions`, `codex_responses`, `anthropic_messages`), and a model. **Check** probes the URL before saving and populates the model list.
+
+### Dashboard reachability
+
+When the Hermes dashboard is not answering (dashboard not started, wrong port, or a dashboard restart in progress), the provider detail says "The ways to set this provider up are not known until the Hermes dashboard answers." Starting the dashboard from the Dashboard tab or the Overview restores it.
+
+### Subscription tokens
+
+Anthropic subscription OAuth tokens (`ANTHROPIC_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or any value Hermes classifies as a subscription token) are blocked by `SUBSCRIPTION_SIGN_IN_POLICY` in Octylink and again in Octy's Credentials route. Anthropic's terms bar subscription OAuth in third-party tools. Hermes's own Dashboard tab and a hand-edited `config.yaml` bypass this check, so it is a policy guard, not a technical one.
+
+## Automations
+
+Automations are Octylink's: each is a trigger → a role skill running on one agent → a status Octylink keeps until the run ends. Octylink is the only writer of that status. Octy is the front door (checks each source's secret) and the control panel (Host view → **Automations** tile).
+
+Two automations exist:
+
+| Automation | Role | Trigger | Status posted to |
+|---|---|---|---|
+| `pr-reviews` | PR reviewer | GitHub org webhook → `POST /api/github/webhook` | Stamp on the pull request (+ optional Slack message) |
+| `datadog-alerts` | Datadog monitor | Datadog webhook → `POST /api/automations/datadog` | Slack message, report in its thread |
+
+Older Octylink (no `features: ["automations"]`) shows "not available" on the Automations tile and in both relay routes. The relays answer 2xx and log the reason; when the forward itself fails they answer 502.
+
+### Automations tile (Host view)
+
+Each automation block shows:
+
+- **Agent** — only agents created with the automation's matching role are offered. The agent that is Octy (the host default) can never run an automation.
+- **Slack channel** — picked from the channels the agent's bot sees. For `pr-reviews` this is optional (the pull-request stamp is always posted).
+- **Skill** — the role's default; editable. The task method lives in the skill (edited on the agent's Skills tab).
+- **Task** — what is sent with each event. Check "Use the role's default" to follow the role's template.
+- **On/Off switch** — the switch reads the saved agent; it stays off until an agent is saved.
+- **Connect sheet** — everything to paste into GitHub or Datadog, in order.
+- **Test** — sends a sample event (Datadog: a sample alert; PR reviews: needs a repo and PR number). Runs for real; result appears under **Recent runs**.
+- **Recent runs** — the last N automation runs for this automation, with state, stamp, and destinations.
+
+Every write on the tile requires `hermes:admin` and is logged. A custom task is logged as "custom", never its text.
+
+### GitHub review relay
+
+`POST /api/github/webhook` (middleware-exempt, authenticated by `GITHUB_WEBHOOK_SECRET` HMAC over the raw body).
+
+Flow:
+
+1. Free checks (repo in `GITHUB_REPOS`, not a draft, not a fork, not the author's own PR).
+2. If the event could be a review for the configured reviewer, Octylink is queried for the `pr-reviews` automation's GitHub login (the agent's `GH_TOKEN` identity).
+3. A `review_requested` event for that login (or Octy's App bot, when `GITHUB_APP_SLUG` is set) becomes `github.review_requested` and is forwarded to `/v1/automations/pr-reviews/trigger`.
+4. A PR closed or merged (while a review may be running) becomes `github.pr_closed`.
+5. Opening a PR or pushing do not trigger a review.
+
+Response codes:
+
+- **2xx** — Octylink answered (including a refused or ignored run — those are Octylink's decision).
+- **502** — forward failed, 8 s timeout, or Octylink refused the run. GitHub's Recent Deliveries shows it and **Redeliver** replays it.
+- **503** — `GITHUB_WEBHOOK_SECRET` not set, or the reviewer's login could not be read from Octylink. GitHub's Recent Deliveries offers **Redeliver**.
+
+The `delivery_id` (GitHub's GUID) is forwarded to Octylink, making a retry a no-op if Octylink already took it.
+
+### Datadog alert relay
+
+`POST /api/automations/datadog` (middleware-exempt, authenticated by `X-Octy-Webhook-Secret` header checked timing-safely against `DATADOG_WEBHOOK_SECRET`; unset → 503 `not_configured`).
+
+The relay maps Datadog's payload (per `src/lib/automations/datadog-template.ts`, the JSON Datadog is configured to send) onto `datadog.alert` and forwards it to Octylink's `datadog-alerts` trigger. Unlike the GitHub relay, Datadog's stays 2xx even on a refused run because Datadog redelivers automatically; the GitHub relay uses 502 so **Redeliver** is the explicit retry path.
+
+Setup: `docs/octylink-automations.md` in the `octy` repo.
+
+## Host operations
+
+### Host preflight
+
+Before running the Hermes installer, Octylink checks the host:
+
+- Installer tools available
+- Required system libraries (from `deploy/hermes-system-packages.json` on Octylink)
+- Free disk space
+
+Blocking failures disable the **Set up Hermes** button and show what to fix. Warnings are shown but do not block. The preflight result is in `host.preflight` on the host payload (absent on older Octylinks that pre-date it).
+
+### Installing Hermes
+
+The **HostSetupCard** (`HostSetupCard.tsx`) is the one view shown when Hermes is not installed. It displays Octylink's home, the Hermes checkout path, the pinned commit, and the installer details. Pressing **Set up Hermes** calls `POST /api/hermes/host/install`, which runs Hermes's own stage protocol. A failed job stays on screen with up to 2,000 log lines (Dismiss / Try again). A failed install leaves a launcher that still answers `hermes --version`, so retrying forces the install.
+
+Install jobs are files on Octylink: the log survives an Octylink restart. The **Hermes installs** tile (`InstallLogTile`) reopens any past job.
+
+### Resetting the host
+
+`POST /api/hermes/host/reset` (`hermes:admin`, phrase `reset host` typed back + checkbox).
+
+What it removes:
+
+- Every agent: its folder, config, credentials, sessions, skills, cron jobs, memories, and Daytona sandboxes.
+- The Hermes install, installer files, and all install logs under `OCTYLINK_HOME`.
+- Host defaults (bug-report runner, GitHub review agent).
+
+What stays: Octylink itself, its managed settings and keys, and runs recorded in Octy's `octy_runs`.
+
+After the reset, the agents' Octy API keys are revoked by their operator. An older Octylink without the route answers `501 NOT_AVAILABLE`.
+
+The reset is blocked while a Hermes install or any agent run is in progress.
+
+## Authorization
+
+Reading the Octylink page requires a WorkOS session. Every write requires `hermes:admin`. The deliberate exception is the side panel (Octy's Chats experience), where any signed-in `@loanlight.com` user can send to the default Octy agent.
+
+`logHermesAdmin` writes one `octylink_actions` row per admin change (action, actor, profile, outcome, message — never a value). The Activity page (`/activity`) shows these rows.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Octy MCP server" href="/octy/mcp-server#octylink" icon="plug">
+    API keys for agents, key minting and revocation, and the MCP architecture that backs Hermes runs.
+  </Card>
+  <Card title="Bug reports console" href="/octy/bug-reports-console" icon="bug">
+    Trigger Octy and pick a Hermes runner agent from the runner picker.
+  </Card>
+  <Card title="Agent platform schema" href="/data-model/agent-platform-schema" icon="boxes">
+    The `octylink_actions` table that stores the admin audit trail.
+  </Card>
+  <Card title="Environment variables" href="/octy/environment-variables" icon="key">
+    `GITHUB_WEBHOOK_SECRET`, `DATADOG_WEBHOOK_SECRET`, `octylinkUrl`, and related config.
+  </Card>
+</Columns>

@@ -173,3 +173,19 @@ Two endpoints under `PortalAuditsBusinessVerificationController` (`api/v1/portal
 `not_applicable` is returned when the loan has no self-employment or vesting entity to check (`no_current_self_employment_or_vesting_entity`). `absent` is returned when the agent was not included in the audit's plan.
 
 Portal routes: `/loan-audits/[auditRunId]/business-verification` (staff viewer) and the next.js App Router BFF at `api/v2/audits/[auditRunId]/business-verification`.
+
+### State filings (LOA-3354)
+
+When the Cobalt Intelligence lookup returns filing documents for a business, the portal shows them as clickable links — each opens the state's own filing page in a new tab. The `BusinessVerificationFilings` component (`packages/shared-ui/src/audit/business-verification/BusinessVerificationFilings.tsx`) renders nothing when the state returned no filings.
+
+**Key filing badges** appear above the full list. The `keyFilings` helper selects up to three:
+
+| Badge | Which filing |
+|---|---|
+| Formed | The oldest dated filing; falls back to the last filing when none is dated |
+| Latest | The most recent filing that is not the formation or a status-change filing |
+| Status change | The most recent filing whose name matches a dissolution, revocation, or reinstatement keyword |
+
+The Status change badge is rendered in a red/danger style. If Latest or Status change coincides with the Formed filing, that badge is omitted.
+
+**All filings panel.** A "View all N filings" button opens a slide-over panel that groups filings by type. The `groupFilings` helper strips year numbers from names to form group labels (`"Annual Report 2025"` and `"Annual Report - 2024"` become one `"Annual Report"` group). Each group header shows the filing count, year range, and whether the group contains the formation filing. Within each group, 3 filings are shown initially with a "Show N more" toggle.

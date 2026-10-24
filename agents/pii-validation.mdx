@@ -246,6 +246,15 @@ LOA-1834 replaced the prior two-fallback matcher with a more robust shared match
 
 - **`parseAddressLoose`** — right-anchors state + ZIP from the end of the string, drops all commas, and strips a trailing numeric junk group (e.g. a spurious `0000`). Returns `null` only when no `<ST> <ZIP>` tail is present (conservative: stays a finding). Handles zero-comma, comma-after-street, and fully-delimited layouts uniformly.
 - **`streetLeadMatches`** — token-prefix comparison of the clean known street (number + name, suffix-tolerant via `normalizeStreet`) against the candidate lead. Everything after the matched prefix is treated as city and ignored. Preserves the PR #1138 invariant (`Ross St` ≠ `Ross Ave`; a one-sided suffix omission is tolerated only after number + name agree).
+
+**Circle abbreviation expansion (LOA-3345).** The shared USPS suffix table (`normalizeStreet`)
+now includes `CIRC`, `CIRCL`, `CRCL`, and `CRCLE` as Circle expansions alongside `CIR` (#5042).
+Additionally, the `MailingAddress`, `PropertyAddress`, and `EmployerAddress` per-field retrieval
+prompts can interpret a trailing informal `Cr` (after a street-name word) as Circle when the
+other address components — street number, street name, and locality — agree. `Cr` is intentionally
+excluded from the shared suffix table to avoid conflating it with `Creek` or `Drive` in contexts
+where the other components do not confirm the suffix; County Road abbreviations are also explicitly
+excluded from the `Cr` → Circle path.
 - **`explainNonSubjectAddressMatch`** — requires ZIP + state + street to agree; **city is advisory** (the ZIP pins the municipality). A diverging city is surfaced via `cityDiverged`, logged as `logger.warn` by the suppressor for observability.
 
 Both the suppressor (`checkKnownNonSubjectAddress/node.ts`) and the excluder (`pii-transformer.ts` `buildHouseholdKnownNonSubjectAddresses`) go through the same matcher, so the excluder can never be stricter than the suppressor — the subject property is always excluded before the suppressor checks the remaining known addresses.

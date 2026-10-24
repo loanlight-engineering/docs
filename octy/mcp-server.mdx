@@ -345,13 +345,15 @@ Being stateless matters because Octy runs several ECS tasks behind one ALB; the 
 
 ## Octylink
 
-Octylink hosts the Hermes runner agents that power Octy's non-Oz bug runners. The **Octylink** page (`/octylink`) in Octy is the admin surface for managing those agents: creating keys with the correct scopes, revoking an agent's keys on deletion, and checking skill-name validity. All admin changes are recorded in `octylink_actions` — see [agent platform schema](/data-model/agent-platform-schema).
+Octylink hosts the Hermes runner agents that power Octy's non-Oz bug runners. The **Octylink** page (`/octylink`) manages agents, roles, run queues, providers, automations, and host setup. Key intersection with the MCP server: Octylink agent API keys are minted with the correct scopes through `/api/hermes/mcp-key`, revoked on agent deletion. All admin changes are recorded in `octylink_actions` — see [agent platform schema](/data-model/agent-platform-schema).
 
 Octylink is not yet deployed to int or prod. Until it is and `octylinkUrl` / `octylinkPublicUrl` / `octylinkApiKeySecretName` are set in the CDK context, every `/api/hermes/*` call and the side panel return 503 `hermes_not_configured`.
 
 <Note>
 Octylink is an internal infrastructure name. Agent-facing text in tools, guides, errors, and the side panel says "Octy" — never "Hermes" or "Octylink". A test enforces this in the octy repo.
 </Note>
+
+For the full Octylink reference — architecture, roles, run queue, automations, providers, and host operations — see [Octylink](/octy/octylink).
 
 ## Related
 

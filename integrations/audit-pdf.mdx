@@ -176,6 +176,34 @@ consumed by `AuditReportPdfService` in `packages/encompass`. Optional data fetch
 degraded: a fetch failure logs a warning and the section is omitted rather than failing the PDF
 render.
 
+**State filings in the PDF (LOA-3354).** When a business's lookup matched a record and the state returned filing documents, the PDF renders a filings block beneath that business's checks table (`filingsBlock`). The block lists:
+
+- The oldest filing (labeled "Formation") — the last dated filing, or the last filing overall when none is dated.
+- Up to five of the most recent filings (labeled "Most recent"), newest first.
+- When more filings exist, a note: `and N more filing(s), listed in the portal.`
+- A footer: `Filing links open the state's website.` followed by the lookup capture date.
+
+Each filing name is rendered as a hyperlink (`link: f.url`) to the state's own page. Undated filings carry no positional label ("Formation" or "Most recent"), because without a date their order relative to others is unknown. The block is omitted for unmatched records, pending or failed lookups, and businesses with no filings returned.
+
+## Property value sources (LOA-3272)
+
+The property PDF's stats row (`buildStatsRow` in `property/property-content.ts`) labels every price by its data supplier. The API fields driving this — `estimateSource`, `listingSources`, `lastSold`, and `pricePerSqftDetail` — are read through a local `PropertyDataResponseWithSource` type that extends `PropertyDataResponse` from `@loanlight-engineering/shared-types`. This extension exists because the shared-types package version pinned by integrations consumers does not yet publish these fields.
+
+| Stat column | Label shown | Source attribution shown |
+|---|---|---|
+| Listing estimate | `Zestimate` (when `estimateSource` is `zillow`) or `Redfin Estimate` (when `redfin`) | None — the column label names the site |
+| Automated valuation | `Automated valuation (AVM)` | `N% confident` below the value when `avmConfidence` is present |
+| List price | `List price` | `Zillow listing` or `Redfin listing` below the price when listed |
+| Sale Price | `Sale Price:` | Source name below the price (`Zillow`, `Redfin`, or `Public records`) |
+
+Key rules:
+
+- The listing estimate column (`Zestimate` / `Redfin Estimate`) is hidden when `estimateSource` is ATTOM, null, absent, or unrecognized. When it is hidden the only valuation column is the AVM.
+- The AVM column appears whenever `avmValue` is non-null, regardless of source. ATTOM is never named; its estimate surfaces here only.
+- `listingSources.currentListing` determines the list price attribution. A missing `listingSources` defaults to Zillow because rows stored before Redfin support came from Zillow alone.
+- Recording Date and Transfer Type in the last-sold block show only when `lastSold.source` is `attom` or the API sends no `lastSold` object (the pre-Redfin fallback to `transactions.lastSale`). They read N/A beside a Zillow or Redfin sale.
+- Rent appears as `Stated rent (1003)`. ATTOM is never labeled anywhere in the rendered PDF.
+
 ## Subject listing screenshots (LOA-2989)
 
 `GeneratePropertyPdfInput` accepts an optional `listingScreenshots: ListingScreenshot[]` field. When present, `buildPropertyContent` appends one captioned page per screenshot **after the subject property's findings** and nowhere else (not for related properties or comparables).

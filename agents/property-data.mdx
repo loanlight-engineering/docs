@@ -87,7 +87,7 @@ Redfin URL discovery uses a two-stage path (LOA-3270): a HasData direct listing 
 1. **HasData direct listing search (primary).** `buildRedfinListingKeyword` constructs a search keyword from the address. `HasDataService.getRedfinListingDetails` requests HasData's Redfin listing-search endpoint with unit and locality validation (street number, street name, unit match, ZIP5 or city+state). A mismatch or shape rejection falls through to SerpApi. The direct path is subject to the same shared per-run budget as the Zillow direct path (max 6 attempts, 120 s cumulative, 45 s per attempt).
 2. **SerpApi fallback.** When the direct path returns nothing or is skipped, `ZillowUrlFinderService.findPropertyUrl(input, "redfin")` searches Google (`site:redfin.com`, detail path `/home/`) and scrapes the resolved URL via `HasDataService.getRedfinPropertyDetails`.
 
-Each lookup emits one `property_data_url_discovery` INFO event with `site: "redfin"`. A null result from either path degrades to a no-op merge. The Redfin merge is additive-only: `mergeRedfin()` never overwrites a non-null incumbent from HasData/Zillow or ATTOM.
+Each lookup emits one `property_data_url_discovery` INFO event with `site: "redfin"`. A null result from either path degrades to a no-op merge. Redfin data is consumed by two separate merge paths: `mergeCandidates` can source the current listing, last sale, price history, or estimate from Redfin when Zillow supplies none; `mergeRedfin()` additively fills tax, property facts, and coordinates — never overwriting a non-null incumbent from HasData/Zillow or ATTOM (LOA-3272).
 
 A subject-only Redfin listing screenshot is captured here via `ListingScreenshotService.captureIfMissing`
 and stored on the `subjectRedfinScreenshot` state channel. Zillow and Redfin screenshots are
@@ -96,10 +96,32 @@ captured independently because these two nodes run as parallel siblings in the s
 
 <Step title="consolidate">
 `consolidateProperty({ address, hasData, attom, zillowUrl, redfin })` produces a
-`ConsolidatedProperty`. Precedence: HasData/Zillow for listing, photos, and coordinates; ATTOM for
-official records (ownership, mortgages, title, liens, sales/assessment history, AVM).
-`mergeRedfin()` only fills null incumbents. Subject↔borrower proximity is computed by haversine;
-`proximity.flagged = miles > 50`. One `consolidateProperty` runs per REO address.
+`ConsolidatedProperty`. Two distinct merges run here (LOA-3272):
+
+**Listing merge (`mergeCandidates`).** Before the consolidated object is built, each source
+(Zillow, Redfin, ATTOM) is turned into a `ListingCandidate` and passed to `mergeCandidates`.
+For each listing group (`currentListing`, `lastSale`, `priceHistory`, `photos`, `estimate`, `apn`,
+`hoa`), the merge takes the value from the first source in that group's priority list that supplied
+it, and records the winning source in `listing.sources`. Priority by group:
+- `currentListing`, `priceHistory`, `photos`, `hoa`: Zillow → Redfin
+- `lastSale`, `estimate`: Zillow → Redfin → ATTOM
+- `apn`: ATTOM → Zillow → Redfin
+
+This means a property card shows one label and one source per number — e.g., if Zillow has no
+current listing but Redfin does, Redfin supplies `currentListing` and `listing.sources.currentListing
+=== "redfin"`. The ATTOM AVM is never shown as an estimate label to reviewers; only Zillow
+("Zestimate") and Redfin ("Redfin Estimate") are labelled.
+
+**Domain gap-fill (`mergeRedfin`).** After the listing merge, `mergeRedfin()` fills null incumbents
+in three domains — tax/assessment, property facts, and coordinates — additively. It never
+overwrites a non-null value from Zillow or ATTOM. The tax fill is year-aware (LOA-3343): when an
+ATTOM assessed value is present but `taxAmount` is null, Redfin fills `taxAmount` only from the
+Redfin record for that same assessment year — never from a newer or older payment, so the
+`{taxAmount, taxYear}` pair always describes the same year.
+
+ATTOM for official records (ownership, mortgages, title, liens, sales/assessment history, AVM).
+Subject↔borrower proximity is computed by haversine; `proximity.flagged = miles > 50`.
+One `consolidateProperty` runs per REO address.
 </Step>
 
 <Step title="aggregate">
@@ -274,6 +296,8 @@ entity name rather than the borrower's name. USPS street-suffix normalization (e
 is also applied to suppress false-positive `SUBJECT_OWNER_BORROWER_MISMATCH` findings where
 address variations differ only in suffix abbreviation.
 
+**Assessment history selection (LOA-3343).** `latestAttomAssessment()` (`consolidation/propertyConsolidator.ts`) selects the current assessment as the record with the highest `tax.taxYear` from ATTOM's assessment history array, because ATTOM does not guarantee order. Undated records rank last; ties keep source order. This means `assessmentCurrent` always reflects the most recent tax year on record, not the first entry ATTOM returns.
+
 `computeCoverageBuckets()` produces 10 buckets — `ids`, `coordinates`, `ownership`, `mortgages`,
 `assessmentCurrent`, `assessmentHistory`, `salesHistory`, `propertyFacts`, `lot`, `freshness` — and
 `attomBucketsPercent = round(present / 10 * 100)`. Missing buckets are the ones with a value of 0.
@@ -302,7 +326,13 @@ the consolidated facts (address, coordinates, beds/baths, AVM, last sale, owner,
 photos), coverage metrics (`subject_coverage_percent`, `borrower_coverage_percent`,
 `*_missing_buckets`), and `county_fips` as TEXT (leading-zero-safe). `estimate_source` (TEXT,
 migration `0157`) records which data source produced the property's valuation estimate
-(`zillow`, `redfin`, `attom`, or `null` when no estimate resolved).
+(`zillow`, `redfin`, `attom`, or `null` when no estimate resolved). `estimate_low` and
+`estimate_high` (numeric, migration `0178`) store the low/high bounds from the winning estimate
+source; `null` for Zillow Zestimate (no range supplied) and for any source that returns no
+bounds. `listing_sources` (jsonb, migration `0178`) stores the `ListingSources` map from
+`mergeCandidates` — each key is a listing group name and the value is the source that won it
+(e.g. `{"currentListing":"redfin","estimate":"zillow"}`). `null` on rows written before
+LOA-3272.
 </ResponseField>
 
 <Warning>

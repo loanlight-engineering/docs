@@ -596,21 +596,60 @@ processor's DI'd DB.
 </Step>
 <Step title="Cross-document validation (step 7d)">
 Once per extraction completion (gated on `auditRunId` + `loanId`; portal-only uploads skip
-silently): compares 10 appraisal-extracted fields against source values using deterministic
-normalize-then-exact TypeScript (never fuzzy). Two source paths feed the validation:
+silently): compares appraisal-extracted fields against source values using deterministic
+normalize-then-exact TypeScript (never fuzzy). Three source paths feed the validation:
 
-**MISMO application data (LOA-3162):** Occupancy and unit-count comparisons read the primary
-borrower's stored `urla_extraction_results` (Section 4), scoped to the current audit and loan.
-This replaces the earlier `urla_1003` LlamaCloud PDF retrieval for those two checks. A late
-appraisal uses its own audit's application, never a newer audit's. Missing extraction silently
-skips the application comparisons. Previously persisted `urla_1003` source rows remain readable;
-new collections never create them. Application findings are labelled "Loan application" and carry
-no file or page citation.
+**MISMO application data (LOA-3162 / LOA-3164):** Reads the primary borrower's stored
+`urla_extraction_results` (Section 4), scoped to the current audit and loan. Covers occupancy,
+unit-count, and — since LOA-3164 — borrower names (`XDOC-BORROWER-NAME`). Borrower names are
+compared against the appraisal's `subject.borrower_name` field using the party-grammar comparator;
+semicolon-separated entity owners are parsed independently. A late appraisal uses its own audit's
+application, never a newer audit's. Missing extraction silently skips the application comparisons.
+Application findings carry no file or page citation.
 
-**LlamaCloud document retrieval:** Two document types are still retrieved per-document via
+**LlamaCloud document retrieval:** Seven document types are retrieved per-document via
 deterministic LlamaCloud retrieval, each producing one structured-output LLM call:
 - 1008 Transmittal (`transmittal_1008`): loan purpose, occupancy, appraised value, appraiser license.
 - Flood Certificate (`flood_certificate`): SFHA indicator, FEMA flood zone, map number, map date.
+- Title commitment/preliminary title (`title_commitment`, LOA-3164): owner of record
+  (`XDOC-OWNER-OF-RECORD`, appraisal `subject.owner_of_public_record` vs vested owner on title)
+  and legal description (`XDOC-LEGAL-DESCRIPTION`). Final title policies are excluded.
+- Purchase contract (`purchase_contract`, LOA-3164): seller concessions
+  (`XDOC-FINANCIAL-ASSISTANCE`). Compares only when the appraisal explicitly answers No to
+  financial assistance and a contract price is present; a positive concession — in dollars or
+  as a percentage converted using the contract price — warns. Zero and skipped/unknown/blank
+  appraisal answers produce no finding.
+- HOA questionnaire (`hoa_questionnaire`, LOA-3164): feeds condo project checks below.
+- Condo documentation (`condo_documentation`, LOA-3164): feeds condo project checks below.
+- Condo project review (`condo_project_review`, LOA-3164): feeds condo project checks below.
+
+**Condo project cross-checks (LOA-3164, 1073/1075 only).** For UAD 2.6 and normalized UAD 3.6
+condo/co-op forms (Form 1073 and Form 1075), the three condo document sources above are collected
+and their project facts compared against appraisal-extracted `project_info` and
+`condo_project_info` fields. Each source is evaluated independently. The checks are:
+
+| Rule code | What it compares |
+|---|---|
+| `XDOC-CONDO-PROJECT-NAME` | Project name (HOA questionnaire / condo documentation / condo project review) |
+| `XDOC-CONDO-PROJECT-ADDRESS` | Building address |
+| `XDOC-CONDO-PHASE` | Project/phase scope |
+| `XDOC-CONDO-TOTAL-UNITS` | Unit count (project-scope or phase-scope, per source) |
+| `XDOC-CONDO-OWNER-OCCUPIED` | Owner-occupied units or percentage |
+| `XDOC-CONDO-DEVELOPER-CONTROL` | Developer control / HOA turnover status |
+| `XDOC-CONDO-SINGLE-ENTITY` | Units owned by one entity |
+| `XDOC-CONDO-COMPLETION` | Project and common-elements completion |
+| `XDOC-CONDO-CONVERSION` | Conversion flag and within-3-years status |
+| `XDOC-CONDO-COMMERCIAL-SPACE` | Commercial floor-area percentage |
+
+Condo sources with superseded-only classifications are unavailable. The latest non-superseded
+classification wins per document type. Each source evaluates the same set of rules independently;
+findings cite the document and page the evidence came from.
+
+<Note>
+The HOA special-assessment comparison was intentionally excluded from LOA-3164: the appraisal
+assessment field may reflect a tax assessment, not the HOA assessment, making the comparison
+unreliable.
+</Note>
 
 <Note>
 **UAD 3.6 flood coverage gap:** The five UAD 3.6 Reducto contracts and the 3.6 XML mapper
@@ -642,13 +681,18 @@ compliance rows now flow through `audit-results` and the partner API projection.
 nine-bucket `totalIssues` count is move-neutral — a mismatch counts once whether it lives in
 `findings` or `complianceResults`.
 
-Six Datadog monitors cover the cross-document validation path:
+Eleven Datadog monitors cover the cross-document validation path:
 - `appraisal-xdoc-collection-failed` — fires when `@event:appraisal.cross_doc_collection_failed` appears in prod logs; indicates the source collection step threw before storing anything, so all cross-doc validations yield no findings for that run. (LOA-2038)
 - `appraisal-xdoc-occupancy-unreadable` — fires on `@event:appraisal.cross_doc_occupancy_unreadable`; indicates the URLA occupancy field was not extractable, preventing the occupancy cross-doc check. (LOA-2038)
-- `appraisal-xdoc-source-retrieval-failed` — fires on LlamaCloud document retrieval failures for the 1008 or flood certificate. (LOA-3162)
-- `appraisal-xdoc-application-read-failed` — fires when reading the stored MISMO application data fails, preventing the application-side occupancy or unit-count checks. (LOA-3162)
+- `appraisal-xdoc-source-retrieval-failed` — fires on LlamaCloud document retrieval failures for any source document. (LOA-3162)
+- `appraisal-xdoc-application-read-failed` — fires when reading the stored MISMO application data fails, preventing the application-side occupancy, unit-count, or borrower-name checks. (LOA-3162)
 - `appraisal-xdoc-1008-quotes-withheld` — fires when the 1008 Transmittal quote gate withholds extracted values before the LLM call. (LOA-3162)
 - `appraisal-xdoc-flood-quotes-withheld` — fires when the flood-certificate quote gate withholds extracted values. (LOA-3162)
+- `appraisal-xdoc-title-quotes-withheld` — fires when the title commitment quote gate withholds values. A kept (info) event proves quote binding, not successful parsing or comparison. (LOA-3164)
+- `appraisal-xdoc-contract-quotes-withheld` — fires when the purchase contract quote gate withholds values. (LOA-3164)
+- `appraisal-xdoc-hoa-quotes-withheld` — fires when the HOA questionnaire quote gate withholds values. (LOA-3164)
+- `appraisal-xdoc-condo-documents-quotes-withheld` — fires when the condo documentation quote gate withholds values. (LOA-3164)
+- `appraisal-xdoc-condo-review-quotes-withheld` — fires when the condo project review quote gate withholds values. (LOA-3164)
 </Step>
 <Step title="Write the run">
 Writes `appraisal_runs` with `extractedData`, `complianceResults`, `findings`, coverage fields,
@@ -814,6 +858,19 @@ Two additions to the First Colony (`sharp_advantage`) bundle:
 - **`IMP_006` backfill:** the new global rule is automatically included in First Colony's active rule set via migration `0216` (same as all active sets).
 
 Apply via `/admin/staged-rules` → First Colony → dry-run → promote.
+
+<Note>
+**`CUST_FC000023` — Comparable sale recency (LOA-3233):** The rule reads
+`sales_comparison.has_three_closed_sales_within_12_months`, a derived boolean computed by
+`hasThreeClosedSalesWithin12Months` in `lib/appraisal-pipeline/rules/closed-sale-state.ts`,
+rather than a plain compound grammar predicate. The compound grammar's `each.element` can test
+only one field per comp, so it cannot AND closed-sale status and recency together — a grammar-only
+expression would check recency without filtering out active/pending comps. The helper reads
+`closedSaleState` per comp (cross-referencing listing markers, `sale_status`, the sale-date cell,
+and the concessions cell), then checks the effective-date window. Returns `true` when ≥3 comps are
+both closed and within 365 days; `false` only when no reading of the unknown comps could reach
+three; `undefined` (NEEDS_INFO) when it might, or when the grid has no evidenced comp.
+</Note>
 
 #### Priority Financial appraisal rules bundle (LOA-1683)
 

@@ -133,6 +133,8 @@ validation never aborts the run.
 `facts.summaries` merged into facts, or six rules silently misfire.
 
 As of LOA-2188 follow-up: `buildFactsFromCandidates` no longer fabricates `report.pulled_at` from the audit-run clock. The field is an optional, nullable fallback for a future real producer; `report_date` remains primary. Date-dependent credit rules use a single `resolveCreditReportReferenceDate` helper. A missing anchor returns `NEEDS_INFO` only when the date can change the verdict — anchor-independent outcomes (e.g. collections below the unwindowed cap) remain gradable. Coverage percent now reads extracted `report_date` rather than the previously fabricated timestamp, so values may differ from pre-deploy for runs where `report_date` was absent.
+
+**Extraction coverage vs. compliance coverage (LOA-3291).** The `coveragePercent` this node computes and the `aggregate` node persists measures *extraction* coverage — how much of the facts schema the pipeline filled in. *Compliance rule coverage* — how many checks ran, passed, and need review on the portal — is a distinct quantity derived on read at serve time from the labelled `complianceResults` rows via `creditCoverageFromRows` (`audit/check-labels/response-fields.ts`). The stored `coveragePercent` column is not the source of truth for portal badge counts.
 </Accordion>
 <Accordion title="evaluateRules — DB-backed rule evaluation">
 Resolves `loanProgramId` for program-scoped credit rules (LOA-1080) and calls
@@ -426,6 +428,30 @@ Outcomes are `PASS`, `FAIL`, `WARNING`, `NEEDS_INFO`, or `SKIPPED`. The evaluato
 `{ results, ruleSetId, ruleSetVersion }`, returns empty results without `db` and `lenderId`, and
 never throws.
 
+**Skip reasons (LOA-3291).** Every `SKIPPED` and `NEEDS_INFO` result now carries a
+`reason: CreditSkipReason` field (`lib/credit-pipeline/rules/types.ts`) explaining why no
+verdict was reached. The five codes are:
+
+| Code | Meaning |
+|---|---|
+| `disabled_by_lender` | The lender turned this rule off; it was not evaluated |
+| `does_not_apply` | The rule is inapplicable to this loan or context |
+| `missing_data` | A required field was absent (`NEEDS_INFO` cases) |
+| `configuration_problem` | The rule definition or thresholds are invalid |
+| `rule_error` | Evaluation itself threw an error |
+
+A `SKIPPED` result with no explicit reason defaults to `does_not_apply`
+(`evaluateResultReason`, `lib/credit-pipeline/rules/skip-reason.ts`). Human-readable text for
+each code lives in `audit/check-labels/credit-reason-text.ts` (server-side only; the wire
+carries the `reason` code and the existing row `message` remains the display text).
+
+**RuleOps fence role on Aurora (LOA-3373).** The `ruleops_fence_*` database role that guards
+raw-SQL writes to rule tables can now be provisioned by `DbInitUser` on Aurora PostgreSQL 16.
+Aurora does not add the creator membership edge that standard PostgreSQL creates automatically;
+the `ruleops-scanner-utils.ts` canary now accepts a fence role with no creator edge while still
+rejecting unexpected membership or creator edges with `INHERIT` or `SET`. `DbInitUser`'s
+`bootstrapVersion` was bumped to `"4"` to reflect this change.
+
 The rule operators on `credit_rules.operator` use the 16-value union pinned by
 `credit_rules_operator_check`. Migration `0190_credit_operator_abs_parity` added `abs_less_than`
 and `abs_less_than_or_equal` to bring credit to operator parity with appraisal, so credit and
@@ -496,6 +522,56 @@ The lender-wide CRED_024 row is **disabled** (`is_enabled: false`), so Prime, IT
 
 Rollout: run credit `import-updates` for Luxury first (so the lender-wide CRED_024 row exists), then apply the bundle. Never use the Settings **Adopt** flow for this — a later `adopt()` re-enables the lender-wide row until the bundle is re-applied.
 
+## Portal UI
+
+The credit section page (`packages/app/src/app/results/audits/[auditId]/_components/CreditSectionPage.tsx`)
+has two render arms, controlled by the lender's `show_the_work` feature flag:
+
+- **Standard arm (`showTheWork` off):** renders `CreditLiabilitiesView` — the per-group narrative
+  and summary cards.
+- **Agent-page arm (`showTheWork` on, LOA-3296):** wraps the view in the shared `AgentPage`
+  component. A single `CreditProgramRulesTable` is the check list; `CreditLiabilitiesView` sits
+  in the detail slot below it.
+
+**`CreditProgramRulesTable`** (`packages/shared-ui/src/audit/credit-liabilities/CreditProgramRulesTable.tsx`)
+is the authoritative credit rules table on the agent-page arm. Columns: Rule · Person · Result ·
+Message. It renders the labelled roster findings from `eligibleFindings(creditLoan.findings)` —
+non-superseded results with a non-null label (lender-disabled rules are excluded). Person names
+are resolved via `distinctCreditPeople(creditLoan)`.
+
+**`CreditCoverageCard`** (`packages/app/src/app/results/audits/[auditId]/_components/CreditCoverageCard.tsx`)
+is the Issue Summary card's credit body on the audit overview page. When needs-review findings
+exist it renders them in a `CreditProgramRulesTable`; otherwise it shows a clean `ShowRow`.
+Tapping **Show** saves the **All checks** view and navigates to the credit page.
+
+**Badge counts (LOA-3296).** The page header badge and the overview card sentence are both driven
+by `coverage.needsReview`, where `coverage` is derived on read from the labelled `complianceResults`
+rows — not from the stored `coveragePercent` column. Per-report coverage uses
+`creditCoverageFromRows` (injected into `PortalCreditService` via the `CREDIT_RUN_LABELS` port,
+`modules/portal-credit/credit-run-labels.port.ts`). Loan-level coverage uses `creditLoanCoverage`
+(`audit/check-labels/response-fields.ts`), which requires at least one current report with
+non-null `complianceResults` before it marks coverage as recorded (LOA-3291).
+
+**`CreditLabelChip`** (`packages/shared-ui/src/audit/credit-liabilities/CreditLabelChip.tsx`)
+renders a colored chip in a label's tone with its own text. Used for threshold verdicts and
+result badges. **`labelledThreshold`** (`labelledThreshold.tsx`) maps a `ThresholdVerdict`
+(`meets | warning | fails`) to a `CreditLabelChip`.
+
+### Report info cards (LOA-3367)
+
+`InfoColumnsTable` (`packages/shared-ui/src/audit/credit-liabilities/InfoColumnsTable.tsx`) was
+flattened in LOA-3367:
+
+- **Single-column tables** no longer render a heading row; values read directly off the row labels.
+- **Row labels** are in normal case (no uppercase or letter-spacing).
+- **Multi-column headings** are plain text without decorative styling.
+
+`CreditReportBlock` report-block headings no longer include "Credit Report" as a vendor
+placeholder when the provider is unknown. The heading source field now renders as:
+
+- No vendor: `Joint report · date` (joint) or just `date` (single)
+- Provider present: `name · vendor · date` (single) or `Joint report · vendor · date` (joint)
+
 ## HTTP endpoints
 
 All under `api/v1/portal/credit` (`PortalCreditController`):
@@ -558,6 +634,12 @@ Current evaluation paths when `windowUnresolvable`:
 - Matches each credit run's subjects onto the roster via `subject-matching.ts` (Jaro-Winkler ≥ 90, suffix stripping for Jr/Sr/II/III/IV, SSN last-4 tiebreaker + contradiction rules).
 - Per-person score, liabilities, income, and DTI are computed using only the subjects belonging to that person's `borrower_id`.
 - Loan-level qualifying FICO (lender-configurable method) and combined liabilities + DTI sit on top.
+
+**Override propagation (LOA-3291).** When the loan roster is built, active reviewer overrides
+(from `credit_rule_overrides`) are applied to each report's `complianceResults` before findings
+are attributed to people. `CreditLoanProjectionService.buildRoster` accepts an `overridesByRun`
+map and passes it to `buildFindings → applyOverrides`, ensuring person-level badge counts on the
+loan page reflect the same verdict the reviewer applied, not the original evaluation.
 
 **Supersession:** reports within a group are ordered by `pulled_at desc → credit_runs.created_at desc → credit_runs.id asc`. Superseded reports' findings carry `superseded: true` and are excluded from all badge counts.
 

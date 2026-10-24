@@ -265,7 +265,8 @@
               "octy/completion-webhook",
               "octy/issues-runs-labels-api",
               "octy/doc-refreshes",
-              "octy/mcp-server"
+              "octy/mcp-server",
+              "octy/octylink"
             ]
           },
           {

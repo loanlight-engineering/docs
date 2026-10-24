@@ -216,6 +216,20 @@ The migration chain is the load-bearing artifact and is fully self-contained. Th
 
 Publishing follows the standard bump-to-publish flow. For the full package description, see [shared packages](/ops/shared-packages#aus-db-aus-database-migration-chain-and-schema).
 
+## Recent notable migrations
+
+The table below records migrations added after the 2026-09-02 squash that carry meaningful schema
+or policy changes worth calling out.
+
+| Migration | Summary |
+|---|---|
+| `0177_loa3164_condo_classification_sources` | Seeds four condo document classification labels (`hoa_questionnaire`, `condo_documentation`, `condo_project_review`, `condo_budget`) in `classify_rules` and appends condo examples to the PROPERTY split prompt when they fit the 2,000-character limit. Required before the LOA-3164 condo cross-document checks can run. Emits `MIGRATION_METRIC loa3164_condo_classification_sources inserted=<N>` and `updated=<N> preserved_over_limit=<N>` notices. |
+| `0178_property_data_listing_sources_and_estimate_range` | Adds `estimate_low` and `estimate_high` (numeric, nullable) and `listing_sources` (jsonb, nullable) to `property_data_results`. `estimate_low`/`high` store the low/high bounds from the winning estimate source (`null` for Zillow Zestimate, which carries no range). `listing_sources` is the `ListingSources` map from `mergeCandidates` — recording which source won each listing group (LOA-3272). |
+| `0179_ltv_shadow_tables` | Creates `ltv_shadow_comparisons` and `ltv_shadow_results` as **shadow-only** tables for the EDU-30.2 LTV feature (LOA-3160). Neither table drives any live feature yet. `ltv_shadow_results` is keyed by `(lender_id, loan_id, generation)` with a `generation ≥ 1` integer check and a `kind` discriminator (`computed \| conflicting \| incomplete`). |
+| `0180_evidence_entities_loan_kind` | Extends `evidence_entities` kind constraints to add a `loan` alias kind and a `loan` entity kind, and tightens the three CHECK constraints (`alias_kind_check`, `entity_kind_check`, `kind_coherence_check`) to cover the new `loan↔loan` combination. |
+| `0181_ltv_shadow_guards` | Adds `BEFORE UPDATE/DELETE` and `BEFORE TRUNCATE` statement-level triggers on `ltv_shadow_results` and `ltv_shadow_comparisons` using the shared `evidence_reject_history_mutation()` function, then `REVOKE UPDATE, DELETE, TRUNCATE` from `PUBLIC`. These tables are append-only from the moment they are created. |
+| `0182_appraisal_loan_association_guard` | Adds a `BEFORE UPDATE` row-level trigger on `appraisal_runs` (`appraisal_loan_association_guard`) that raises `appraisal_loan_association_refused` (SQLSTATE `23514`) when an update tries to set a non-null `loan_id` that differs from the existing one. Allows `NULL` (from `ON DELETE SET NULL`) and an unchanged `loan_id`. The EDU-28 A6 association writer must change this trigger when it lands. |
+
 ## Two migration ledgers
 
 Do not confuse:

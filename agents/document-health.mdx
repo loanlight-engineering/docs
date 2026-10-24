@@ -284,12 +284,29 @@ recognised as their real type (for example `gift_letter`, `divorce_decree`) rath
 | `if_texas_50a6` | `property_state === 'TX'` AND `refinance_purpose === 'CASH_OUT'` |
 | `if_ny` | `property_state === 'NY'` |
 
+<Note>
+**LOA-3341 — `if_entity_vesting` on purchase loans.** `loanContext.title_held_in_trust` is only
+populated from ATTOM's trust indicator on refinances. On a purchase loan the current titleholder
+is the seller, whose trust status is irrelevant to the borrower's entity-documentation requirements.
+The field is therefore left unset on purchases, and `if_entity_vesting` always resolves to
+`skipped` for purchase loans — it cannot trigger entity-vesting document requirements based on the
+seller's ownership structure (LOA-3341, #5041).
+</Note>
+
 <Warning>
 When the `LoanContext` is missing the field a condition needs, the condition resolves to status
 `skipped` — it is **not** flagged. `if_active_duty` is always skipped (military status is not
 wired). `FUTURE_CONDITIONS` (`if_flagged`, `if_amended`, `if_in_flood_zone`) are logged and
 skipped.
 </Warning>
+
+**LOA-3358 — Luxury DSCR rental-agreement condition.** In the Luxury lender YAML
+(`packages/api/src/langgraph/lenders/luxury.yaml`), the `rental_agreement` document requirement
+changed from `required` to `if_refinance` for the `dscr_investor_cashflow` and
+`dscr_foreign_national` programs (LOA-3358, #5062). Practically: Luxury 1–4 unit DSCR purchase
+loans no longer require a lease; refinances still do. The `dscr_5_10_unit` program is unchanged —
+a lease is still always required there. If loan purpose is unavailable the `if_refinance` condition
+resolves to `skipped`.
 
 ## Signature-verification subgraph
 

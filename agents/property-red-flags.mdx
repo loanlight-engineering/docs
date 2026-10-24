@@ -128,7 +128,7 @@ Gated on `occupancy === "INVESTMENT"`.
 
 | Rule | Severity | Trigger |
 |---|---|---|
-| `VALUE_EXCEEDS_PRIMARY` | MEDIUM | subject value > borrower primary value |
+|| `VALUE_EXCEEDS_PRIMARY` | MEDIUM | investment subject market value exceeds borrower primary market value; subject uses Zestimate → ATTOM AVM → list price (in priority order); primary uses Zestimate → ATTOM AVM only (list price excluded for the primary). Skips when no market value is resolvable on either side. Tax assessments are never used — they trail the market by years (LOA-3343). |
 | `BORROWER_RENTING_PRIMARY` | MEDIUM / HIGH | A: current address housing expense is RENT. B: OWN but `ownerOccupied === false` and no REO entry at current address |
 || `RENT_VS_1003_MISMATCH` | MEDIUM | Zillow rent zestimate vs. 1003 `estimatedGrossMonthlyRentAmount` percent diff > 10; net rent (`estimatedNetMonthlyRentAmount`) is never used as the comparison basis and a gross value ≤ 0 (e.g. a "rent not used to qualify" PITIA negative) causes the rule to skip. **Declines when a multi-unit subject's listing is unit-scoped** (`numberOfUnits ≥ 2` and `listing.dataScope === 'unit'`): comparing a per-unit Zillow zestimate against the whole-property gross on the 1003 is not a meaningful comparison. The listing is marked `unit`-scoped by `resolveListingScope` when the loan address names no unit but the HasData scrape resolved one. Single-unit loans get the rule unchanged whatever the listing scope. When the rule fires on a multi-unit listing that has no declared scope (and so cannot be declined), the message appends a basis sentence noting the ambiguity (LOA-2793). |
 </Tab>

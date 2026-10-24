@@ -52,14 +52,14 @@ SECTION_8_DEMOGRAPHICS
 
 ## Rule IDs
 
-`RuleId` (`types/rule-ids.enum.ts`) has 33 values, grouped by URLA section:
+`RuleId` (`types/rule-ids.enum.ts`) has 34 values, grouped by URLA section:
 
 <AccordionGroup>
 <Accordion title="Section 1A — personal info & address">
 `PERSONAL_INFO_BASIC_DETAILS`, `CURRENT_ADDRESS_RULES`, `FORMER_ADDRESS_RULES`, `IS_AT_CURRENT_ADDRESS_LESS_THAN_2_YEARS`, `MAILING_ADDRESS_RULES`
 </Accordion>
 <Accordion title="Section 1B–1D — employment">
-`CURRENT_EMPLOYMENT_DETAILS`, `CURRENT_EMPLOYMENT_LESS_THAN_2_YEARS`, `ADDITIONAL_EMPLOYMENT_RULES`, `PREVIOUS_EMPLOYMENT_RULES`, `EMPLOYMENT_HISTORY_2_YEAR_MINIMUM`, `DSCR_BORROWER_INCOME_PRESENT`
+`CURRENT_EMPLOYMENT_DETAILS`, `CURRENT_EMPLOYMENT_LESS_THAN_2_YEARS`, `ADDITIONAL_EMPLOYMENT_RULES`, `PREVIOUS_EMPLOYMENT_RULES`, `EMPLOYMENT_HISTORY_2_YEAR_MINIMUM`, `DSCR_BORROWER_INCOME_PRESENT`, `BORROWER_INCOME_MISSING_ON_1003`
 </Accordion>
 <Accordion title="Section 1E / 2A–2D — income, assets, liabilities">
 `OTHER_INCOME_SOURCES`, `ASSETS_ACCOUNT_DETAILS`, `OTHER_ASSETS_DETAILS`, `LIABILITIES_DETAILS`, `OTHER_LIABILITIES_DETAILS`
@@ -99,6 +99,7 @@ Representative behaviors:
 - **`CURRENT_ADDRESS_RULES` / `FORMER_ADDRESS_RULES`** — US address completeness (street/city/state/zip/country) vs foreign (street+city only); if less than 24 months at the current address, emits INFO `IS_AT_CURRENT_ADDRESS_LESS_THAN_2_YEARS` plus a FAIL when former addresses do not cover the 24-month history; RENT housing type requires `rentalExpense`.
 - **`EMPLOYMENT_HISTORY_2_YEAR_MINIMUM`** (LOA-2736) — validates that a borrower has **continuous** employment covering the trailing 24-month window. The rule unions all of the borrower’s employment intervals (current, previous, and additional), clips the union to the trailing 24 months from today, and checks whether coverage is at least 24 months with no gaps. The prior implementation summed job durations, which absorbed gaps and counted ancient employment outside the window. Any uncovered gap within the trailing two years produces a FAIL naming the month range that is missing.
 - **`DSCR_BORROWER_INCOME_PRESENT`** — only when `loanProgram` is in `DSCR_PROGRAM_CODES`; FAILs when current-employment `monthlyIncome.total > 0` (DSCR qualifies on property cash flow, not borrower income).
+- **`BORROWER_INCOME_MISSING_ON_1003`** (LOA-2741) — emits an `INFO` (not `FAIL`) finding when a borrower carries no qualifying monthly income on the 1003: neither employment income (current or additional `monthlyIncome.total`) nor any Section 1e other-income source with a positive `monthlyAmount`. The finding message directs the reviewer to confirm whether income was omitted or the program qualifies without it. Not applicable when `loanProgram` is in `DSCR_PROGRAM_CODES` (the `DSCR_BORROWER_INCOME_PRESENT` rule covers DSCR loans and must not co-fire with this one). Lenders may disable it per program via `disabled_rules` in the lender YAML; Luxury disables it for `asset_qualifier` because Asset Qualifier qualifies on assets rather than borrower income (LOA-3342).
 - **`SECTION_4D_GIFT_FUNDS_PRESENT`** — advisory `INFO` rule (default enabled, fires once per borrower) when `section2FinancialInfo.giftsOrGrants` holds a row whose `assetType` is a gift type (`GIFT_OF_CASH` / `GIFT_OF_PROPERTY_EQUITY` / `GRANT`). The gift detail (count, asset types, sources, values) is interpolated into the `message` because the portal renders only `message`; structured `metadata` is also persisted. It does not affect the pass/fail result and co-exists with the `SECTION_4_LOAN_AND_PROPERTY_DETAILS` FAIL loop that catches *incomplete* gifts (a typeless row is caught there, not here).
 - **`DTI_EXCEEDS_50_PERCENT`** — reads `context.bottomRatioPercent` (no value → no finding); threshold is `ruleOptions.threshold` else `DEFAULT_DTI_THRESHOLD = 50`; FAIL when DTI exceeds the threshold.
 - **`REO_REFINANCE_SUBJECT_PROPERTY`** (`scope: "loan"`) — for REFINANCE, the Section-4 subject property must appear in some borrower's Section-3 owned properties (uses `allBorrowersData`).
@@ -173,6 +174,8 @@ The Postgres enums (`database/schema/enums.ts`): `finding_type` = `['PASS','FAIL
 `UrlaCompletenessService.getLastUrlaCompletenessByAuditRun(auditRunId)` loads the latest `urla_extraction_results` (404 if none), the `urla_rules_engine_results` ordered by `borrower_label ASC` LIMIT 1, and the findings ordered by `(rule_category, rule_id, id)`. It computes `UrlaRulesEngineSummary { total_rules, passed_count, failed_count, info_count }`.
 
 Both `GET /api/v1/audit_runs/:id/urla_completeness` and the portal `urla_completeness` endpoint now return a `checks` array (LOA-3289) alongside `coverage`. Each entry in `checks` carries the rule's `name`, its `label` (from the check-labels vocabulary), a `reason` code, the referenced findings' `messages`, and — for a passed check — a `verified` description of what was checked. Only trusted entries (those whose coverage is recorded and whose stamp matches `completed_at`) are served. The Swagger DTO documents `checks` with `label` as an open string; `coverage` is not yet in the Swagger response but is returned.
+
+Every `checks` row and every labeled 1003 finding also carry a `categoryLabel` field (LOA-3294): the human-readable URLA section name from `URLA_CATEGORY_LABELS` (for example `"Section 1b-1d - Employment"`). An unrecognized category falls back to the raw `RuleCategory` value. The portal 1003 Check page renders this label beneath each rule name. The API's wire type is `UrlaCheckRow`; the portal mirrors it in `LabelledUrlaCompleteness` (`lib/check-labels.ts`) and a parity test in `api-app-contracts` holds the two in sync.
 
 <Note>
 The `urla_completeness` API response includes both `rules_engine_result` (BORROWER_1 only, the `LIMIT 1` field) and `rules_engine_results` (all borrowers, plural). The EPC app and the audit PDF 1003 Check section now read `rules_engine_results` when present, so all borrowers' findings are shown (LOA-3020, LOA-2827). The shared-types `UrlaCompletenessData` type does not expose `rules_engine_results`; integrations consumers cast to `UrlaCompletenessWithBorrowers` (`packages/frontend/src/utils/urlaBorrowerResults.ts`) to access it.
