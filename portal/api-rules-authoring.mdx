@@ -152,6 +152,8 @@ Two tables store authoring state for the eligibility system:
 
 **`eligibility_configs`** — a per-lender JSON config (one row per lender, unique) that carries the full eligibility engine input: `grids` (per-program LTV matrix rows keyed by `rowId`), `geoBars` (geographic bar rules), `ltvModifiers` (condo cap, cash-out cap, multi-unit/FL-condo/declining-market reductions), `programClassifier` (doc-type and name-regex program matching), and `ficoStrategy` (per-program FICO selection strategy). Loaded and Zod-validated on every read by `EligibilityConfigLoaderService`.
 
+Migration `0183_eligibility_audit_trail` (LOA-3160 / EDU-30.2) adds three nullable columns to record which staged bundle produced this config row: `bundle_id` (text) is the bundle's stable ID, `bundle_version` (integer) is its version at apply time, and `content_hash` (text) is the SHA-256 of the bundle content. These three fields together form the **rules identity** referenced by `eligibility_results.rules_identity` (see [eligibility results](/data-model/result-tables#eligibility-results)). Rows written before this migration leave all three `NULL`; the derive-on-read fallback reads "rules version not recorded" for those rows.
+
 Grid row band axes (LOA-1778 adds three new columns alongside the existing `ficoMin`/`ficoMax`, `dscrMin`/`dscrMax`, `unitsMin`/`unitsMax`, and `purpose`/`occupancy`):
 
 | Axis | Values | Notes |

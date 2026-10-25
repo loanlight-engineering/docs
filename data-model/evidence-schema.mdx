@@ -263,6 +263,114 @@ The parser rejects a `no_disagreement` view whose `scope.displayLabel` contains 
 A published snapshot never changes. If a definition's semantics must evolve, add a new snapshot beside the existing ones. The EDU-08.5 parsers are in shared-types and carry no new registry snapshot — they extend the consumer-facing contract on top of the existing v1/v2 snapshots.
 </Note>
 
+## EDU-27 asset evidence tables (LOA-2998, migrations 0184–0186)
+
+These migrations land the durable DB layer for asset evidence produced by the EDU-27 adopter.
+
+### asset_evidence_records
+
+One row per generation capture for an asset evidence run (`kind = 'generation'` is the only
+accepted value). The table is append-only: statement-level triggers prevent UPDATE, DELETE, and
+TRUNCATE for all roles other than the DB owner (matching the immutability pattern established by
+`evidence_immutability_guards.sql`). PK `id`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `lender_id` | `uuid NOT NULL` | FK → `lenders` (ON DELETE RESTRICT) |
+| `loan_id` | `uuid` | FK composite with `lender_id` → `loans` (ON DELETE RESTRICT); nullable for ledger-only contexts |
+| `kind` | `text NOT NULL` | CHECK: `'generation'` only |
+| `run_id` | `uuid NOT NULL` | Unique with `kind` — one generation record per run |
+| `borrower_file_id` | `uuid NOT NULL` | The borrower file that was the evidence source |
+| `payload` | `jsonb NOT NULL` | The full generation capture payload |
+| `payload_sha256` | `text NOT NULL` | SHA-256 hex of `payload` (CHECK regex `^[0-9a-f]{64}$`) |
+| `created_at` | `timestamptz NOT NULL` | Default `now()` |
+
+Unique on `(run_id, kind)`. REVOKE UPDATE, DELETE, TRUNCATE from PUBLIC.
+
+### evidence_observation_generations — EDU-27 columns
+
+Migration `0184` extends `evidence_observation_generations` with EDU-27-specific columns. Each
+column is required when `adopter = 'EDU-27'` and forbidden otherwise (enforced by CHECK):
+
+| Column | Type | Notes |
+|---|---|---|
+| `asset_borrower_file_id` | `uuid` | The borrower file sourcing the asset statement |
+| `asset_as_of` | `date` | The statement "as of" date used for `asOf` ordering |
+| `asset_input_fingerprint` | `text` | SHA-256 hex of the generation input (frozen pin) |
+| `asset_source_hash_by_id` | `text` | SHA-256 hex of the source keyed by its ID (frozen pin) |
+
+The adopter CHECK on `evidence_observation_generations` is widened to include `'EDU-27'`.
+The `evidence_observation_items_subject_entity_check` constraint is updated to accept
+`source_local` subject references for EDU-27 observation items.
+
+<Note>
+`asset_input_fingerprint` and `asset_source_hash_by_id` must both be present or both absent (a
+further CHECK enforces co-presence). They correspond to the EDU-27 required pins
+`inputFingerprint` and `sourceHashById` declared in the shared-types eligibility contract.
+</Note>
+
+## EDU-15 business lookup tables (LOA-2940, migrations 0188–0190)
+
+EDU-15 ("declared business lookup") adds the decision layer for checking declared businesses
+against an external provider. Slice S1 ships with the feature flag `ENABLE_BUSINESS_LOOKUP`
+set to off by default. No provider calls are made until the flag is explicitly `"true"`. The
+following DB tables are created by S1; capture, provider, and persistence adapters ship in
+later slices.
+
+### evidence_business_lookup_capture_counters
+
+Per-`(lender_id, loan_id)` counter for capture sequences. Allocated inside the append transaction
+to guarantee strictly increasing, unique sequence numbers per loan.
+
+| Column | Type | Notes |
+|---|---|---|
+| `lender_id` | `uuid NOT NULL` | Composite PK with `loan_id` |
+| `loan_id` | `uuid NOT NULL` | Composite PK with `lender_id` |
+| `last_capture_sequence` | `bigint NOT NULL` | CHECK: `> 0`; monotonically increasing per loan |
+
+### business_type_category_profiles
+
+Per-lender lookup table that maps a business-type category string (folded for case-insensitive
+matching) to a profile key and an effectivity window. Used by the D2 egress decision to classify
+business types the lookup provider returns.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid PK` | Default `gen_random_uuid()` |
+| `lender_id` | `uuid NOT NULL` | FK → `lenders` (ON DELETE RESTRICT) |
+| `category_text` | `text NOT NULL` | The raw category string |
+| `category_folded` | `text NOT NULL` | Case-folded form for lookup; indexed with `lender_id` |
+| `profile_key` | `text NOT NULL` | The resolved profile |
+| `effective_from` | `timestamptz NOT NULL` | Start of effectivity window |
+| `effective_to` | `timestamptz NOT NULL` | End of effectivity window; CHECK: `effective_to > effective_from` |
+| `authority_id` | `text NOT NULL` | Provenance reference |
+| `row_version` | `text NOT NULL` | Version stamp for change tracking |
+
+Index on `(lender_id, category_folded)` for category lookups.
+
+### evidence_observation_generations — EDU-15 columns
+
+Migration `0188` extends `evidence_observation_generations` with EDU-15-specific columns:
+
+| Column | Type | Notes |
+|---|---|---|
+| `business_entity_id` | `uuid` | The declared business entity's ID |
+| `capture_sequence` | `bigint` | Sequence number from `evidence_business_lookup_capture_counters` |
+
+Both columns are required when `adopter = 'EDU-15'` and forbidden otherwise. A unique partial
+index `evidence_observation_generations_edu15_capture_unique` on
+`(lender_id, loan_id, business_entity_id, capture_sequence) WHERE adopter = 'EDU-15'` ensures
+one generation record per business entity per capture sequence.
+
+The adopter CHECK on `evidence_observation_generations` is widened to include `'EDU-15'`. New
+`evidence_observation_items` item kinds with `definition_code LIKE 'business_lookup.*'` and
+subject `kind = 'business'` are now accepted by the subject-entity and period-presence CHECKs.
+
+<Note>
+Migration `0189` validates the NOT VALID constraints added in `0188` using
+`SHARE UPDATE EXCLUSIVE` locks so reads and writes continue while the scan runs.
+</Note>
+
 ## EDU-27.0 — asset evidence: `asOf` ordering and required pins (shared-types 3.1.0, LOA-3228)
 
 `@loanlight-engineering/shared-types` 3.1.0 extends the observation eligibility contract for the EDU-27 asset adopter.

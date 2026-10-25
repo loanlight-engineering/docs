@@ -183,8 +183,14 @@ is classified, or when no closing date was extracted.
 <Step title="aggregate — persistence">
 Reconciles bank-statement account numbers against URLA Section 2 assets, validates bank-statement
 count + continuity, deduplicates results, resolves human-readable document names, and persists to
-Postgres. Emits `EVENTS.AGENT.DOCUMENT_HEALTH.COMPLETE` and returns `{ completed: true }` (even on
-error, to avoid loops).
+Postgres. The aggregate node also **builds the run's check list** and stamps it in the same UPDATE
+as `completed_at` via `owned()`. Each check list entry is keyed `<mapperKey>|<checkType>` — the
+same key the reader uses. A rolled-back persist records `persist_failed`; a terminal-audit guard
+records `audit_run_terminal`; a graph error the runner swallowed records `graph_failed`. No failure
+path records checks.
+
+Emits `EVENTS.AGENT.DOCUMENT_HEALTH.COMPLETE` and returns `{ completed: true }` (even on error, to
+avoid loops).
 
 **Completeness document name resolution (LOA-2725).** The document-completeness branch sources
 file names directly from the LlamaCloud pipeline list, so its names retain the raw
@@ -374,6 +380,90 @@ enforces a wall-clock deadline (`raceWithDeadline`) plus the per-call 45s / 1-re
 and a bounded image download, so a runaway sweep cannot exceed the SQS visibility timeout and
 trigger a duplicate audit.
 </Note>
+
+## Check list and labels (LOA-3293)
+
+The aggregate node (via `check-population.ts`) builds a structured check list for every audit run
+and hands it to `owned()` so it is stamped atomically with completion.
+
+### Check types
+
+Every displayed Document Health row carries up to four checks:
+
+| Check type | Covers |
+|---|---|
+| `presence` | Whether the document was present and classified |
+| `completeness` | Page-count structure and declared-page validation |
+| `signature` | Vision signature verification |
+| `expiration` | Expiration date against the estimated closing date |
+
+A present document carries all four. A single-entry row (missing, conditional, or
+`closing_date_inconsistent`) carries exactly its one relevant check.
+
+### Check IDs
+
+Each stored check list entry uses `checkId = <mapperKey>|<checkType>`. The mapper key is
+`<llama_cloud_file_id || document_name>#b<borrower_index>` (the borrower suffix appears only
+when `borrower_index` is non-null). Readers join on this same key.
+
+### Check labels
+
+Every check carries one of six labels, resolved by `check-labels/document-health-labels.ts` at read
+time from the stored raw values:
+
+| Label | Meaning |
+|---|---|
+| `passed` | The check ran and found no issue |
+| `failed` | A hard problem (e.g. `expired`, `date_invalid`, `unsigned`, `invalid_mismatch`) |
+| `missing` | The document is absent (`missing_document`) |
+| `incomplete` | Soft problem that needs review (e.g. `verification_failed`, `date_missing`, partial sign) |
+| `warning` | Advisory issue that does not block (e.g. `expiring_soon`) |
+| `not_applicable` | The check does not apply to this row — always carries a reason |
+
+`not_applicable` reasons come from `NOT_APPLICABLE_REASONS` in
+`langgraph/agents/documentHealth/nodes/verifyRequiredDocuments/not-applicable-reason.ts`:
+
+| Reason code | Displayed as |
+|---|---|
+| `signature_not_required` | Signature not required |
+| `blank_signature_template` | Only a blank, unsigned template was found |
+| `no_expiration_rule` | No expiration rule |
+| `expiration_not_checked` | Expiration not checked: no dated copy was found |
+| `not_latest_statement` | Only the latest statement is checked |
+| `completeness_not_checked` | Completeness not checked for this document |
+
+### API response changes (LOA-3293)
+
+The `GET /portal/audits/:id/document-health` and `GET /audit_runs/:id/results` routes now expose
+checks on every Document Health finding:
+
+- `findings[i].checks` — a `DocumentHealthChecks` object (replaces the prior `checks: null`). A
+  present document carries all four cell keys; single-entry rows carry exactly their one.
+- `requiredDocuments` — a new top-level array listing each required document type and whether any
+  document of that type was provided (`{ documentType, present }`). Computed before any
+  include-non-issues filter, over every stored row. Omitted when no row records `is_required`.
+- `coverage` — now computed on read over the displayed rows' cells (not from stored counts).
+  `coverage.needsReview` is used by the Issue Summary to count Document Health issues when
+  coverage is recorded; otherwise `issueCount` is the fallback.
+
+### Portal rendering (LOA-3293)
+
+The Document Health page renders through `AgentPage`. `GoodStandingTable` (the separate "good
+standing" component) was removed and its content merged into `DocumentHealthTable`, which now
+supports two views:
+
+- **Exceptions** — documents that have at least one needs-review check; a bank-statement group
+  shows only months that need review.
+- **All checks** — all documents, ordered Needs review first, then Passed. A bank-statement
+  group with any month needing review sits wholly under Needs review and expands to all months.
+
+The overview card reads "N checks ran · N passed · N need review" and lists documents needing
+review. `AuditProgressBar` and the callout helpers were removed. Generate Email now offers
+each document with a needs-review check and writes one `document · check · label · message`
+line per such check.
+
+Old audits (no recorded check list) still show coverage as "N problems recorded" with no
+ran/passed totals. Their cell labels come from the same labeller as recorded audits.
 
 ## Persistence
 
