@@ -71,9 +71,12 @@ Partner-specific endpoints:
   cross-tenant audit returns `404`.
 - `GET /api/v1/partner/audits/:auditId/results` — includes an `agents.appraisalEvaluation` block
   (the same `AuditAppraisalProjection`). Partner-boundary fields `interpretedLogic`, `ruleSource`,
-  `failedElements`, and `reasonCode` are stripped before the response. Summary counts
-  (`totalIssues`, `criticalIssues`, `warnings`) fold in appraisal compliance outcomes — FAIL →
-  `criticalIssues`; WARNING/NEEDS_INFO/PENDING → `warnings`; PASS/SKIPPED excluded.
+  `failedElements`, and `reasonCode` are stripped before the response. Each `complianceResults`
+  row carries `label` (a plain string; `null` for `DIFF_*` / `XDOC-*` rows) and `classification`
+  (always `null`; reserved). The block also carries `coverage` over the labelled rule rows. See
+  [results and access URLs](/partner-api/results-and-access-urls) for the full checks/coverage
+  shape. Summary counts (`totalIssues`, `criticalIssues`, `warnings`) fold in appraisal compliance
+  outcomes but are **deprecated** (LOA-3301); read `summary.checks` instead.
 
 <Note>
 `appraisalEvaluation` does not declare `requiresExplicitGrant`, so the router's zero-rows

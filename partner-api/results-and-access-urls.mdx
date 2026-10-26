@@ -17,23 +17,34 @@ When the run is `complete`, the results endpoint spreads `AuditResultsService.ge
   "status": "complete",
   "startedAt": "<iso>",
   "completedAt": "<iso>",
-  "summary": { "totalIssues": 4, "criticalIssues": 1, "warnings": 3 },
+  "summary": {
+    "totalIssues": 4,
+    "criticalIssues": 1,
+    "warnings": 3,
+    "checks": { "recorded": true, "ran": 42, "needsReview": 4, "counts": { "Passed": 38, "Missing": 4 } }
+  },
   "agents": { }
 }
 ```
+
+<Warning>
+`summary.totalIssues`, `summary.criticalIssues`, and `summary.warnings` are **deprecated** (LOA-3301). Read `summary.checks` and each agent block's `coverage` instead. Removal is scheduled one month after this reaches production.
+</Warning>
 
 ### The agents object
 
 `agents` is keyed by agent name; a key is present only if that agent ran. Possible keys:
 
-| Key | Shape | Source |
+| Key | Shape | Notes |
 | --- | --- | --- |
-| `piiValidation` | `{ status: "completed", results: [...] }` | [PII validation](/agents/pii-validation) |
-| `documentHealth` | `{ status: "completed", results: [...] }` | merged expiration + completeness, [document health](/agents/document-health) |
-| `signatureVerification` | `{ status: "completed", results: [...] }` | signature checks |
-| `propertyData` | `{ status: "completed", results: [...], properties: [...] }` | [property data](/agents/property-data) + [red flags](/agents/property-red-flags) |
-| `creditEvaluations` | `CreditReportPayload[]` (array) | [credit evaluation](/agents/credit-evaluation) |
-| `bankStatementIncome` | `BankStatementIncomeCompleted \| BankStatementIncomeSkipped \| { status: "failed", results: [] }` | [bank-statement income agent](/agents/bank-statement-income) (entitlement required) |
+| `piiValidation` | `{ status, results (dep.), checks, coverage }` | One check per displayed field × document × borrower row, plus Not-applicable checks. [PII validation](/agents/pii-validation) |
+| `documentHealth` | `{ status, results (dep.), checks, coverage }` | One check per document × check type (`presence`, `completeness`, `signature`, `expiration`). Signature checks have `checkType: "signature"`. [Document health](/agents/document-health) |
+| `signatureVerification` | `{ status, results }` — **deprecated** | Problem-only array. Signatures are now `documentHealth.checks` entries with `checkType: "signature"`. Removal tracked in LOA-3301. |
+| `propertyData` | `{ status, results (dep.), checks, coverage }` | One check per property rule. [Property data](/agents/property-data) + [red flags](/agents/property-red-flags) |
+| `urlaCompleteness` | `{ status, checks, coverage }` | 1003 completeness checks, one per rule outcome per borrower. **Absent** when the 1003 agent was not planned; present with empty `checks` and unrecorded `coverage` when it was planned but has no recorded results. |
+| `creditEvaluations` | `CreditReportPayload[]` (array) | Each evaluation now carries `coverage` (over that report's own rows) and each `complianceResults` row carries `label`, `classification`, `reason`. [Credit evaluation](/agents/credit-evaluation) |
+| `appraisalEvaluation` | `AuditAppraisalProjection` | Carries `coverage` and each `complianceResults` row carries `label` and `classification`. [Appraisal-Evaluation agent](/agents/appraisal-evaluation) |
+| `bankStatementIncome` | `BankStatementIncomeCompleted \| BankStatementIncomeSkipped \| { status: "failed", results: [] }` | No `checks` or `coverage` block. [Bank-statement income agent](/agents/bank-statement-income) (entitlement required) |
 
 #### bankStatementIncome block
 
@@ -83,9 +94,40 @@ Partner-visible `reason` values: `no_bank_statement_income_document`, `missing_b
 
 Each non-credit issue object carries fields such as `issueKind`, `message`, `confidenceScore`, `documentRef`, `severity`, `category`, `expirationDate`, `daysUntilExpiration`, `fieldName`, `documentName`. The [issue kind taxonomy](/pipeline/issue-kinds) explains the codes.
 
+### Checks and coverage
+
+Each agent block except `bankStatementIncome` now carries `checks` and `coverage`.
+
+**`checks`** is an array of labelled check objects, one per check the portal's readers produce. Every check object carries:
+
+- `checkId` — stable identifier within the audit. Format varies by agent: `<fileId>|<checkType>` for Document Health; `<validationId>` or `na|<field>|<borrowerIndex>` for PII; `<ruleId>` for Property Data and URLA.
+- `label` — a plain string, never an enum (new labels must not break strict clients, LOA-1088). Current values include `Passed`, `Missing`, `Incomplete`, `Flagged`, `Not applicable`, and others. `null` when the row is not a check (a lender-disabled Credit rule, or an appraisal `DIFF_*` / `XDOC-*` row). Treat unknown values as opaque.
+- `classification` — always `null`; reserved.
+- Agent-specific fields (see the table above for each block).
+
+**`coverage`** summarises whether the agent's checks were recorded and, if so, how many ran:
+
+```json
+{ "recorded": true, "ran": 12, "needsReview": 2, "counts": { "Passed": 10, "Missing": 2 } }
+```
+
+When `recorded` is `false`, a `reason` string is present instead of counts:
+
+```json
+{ "recorded": false, "reason": "not_evaluated" }
+```
+
+Possible `reason` values: `saved_before_coverage`, `not_run`, `not_complete`, `stale`, `not_evaluated`, `unreadable`, or an agent-specific failure reason. An unrecorded coverage is not a zero count.
+
+**Legacy `results` arrays** on `piiValidation`, `documentHealth`, and `propertyData` are **deprecated** — they list problem rows only; `checks` lists every row including passing ones. The `signatureVerification` key itself is deprecated: its content is now in `documentHealth.checks` with `checkType: "signature"`. Removal for all deprecated fields is tracked in LOA-3301.
+
+If a labelled reader throws, its block degrades gracefully: `checks: []` and `coverage: { recorded: false, reason: "unreadable" }`. The legacy `results` array and the HTTP 200 response are unaffected.
+
 ### Summary buckets
 
-`summary` is `{ totalIssues, criticalIssues, warnings }`. Issue kinds and severities are bucketed into critical vs warning (critical wins; the buckets are disjoint). Credit severities are derived from rule outcome (`FAIL → HIGH`, `WARNING → MEDIUM`; `PASS`/`SKIPPED` excluded). The full bucket sets live in [issue kinds](/pipeline/issue-kinds).
+`summary` carries `{ totalIssues, criticalIssues, warnings, checks }`. `summary.checks` is a coverage union over the agents the portal hero counts: Document Health (signatures included), Data Consistency, URLA Completeness, Properties, Credit (superseded reports excluded), and Appraisal. Skipped agents are excluded; Income is never counted separately. `summary.checks` is unrecorded when any counted agent is unrecorded, reporting the first such agent's reason. When every counted agent is excluded by the ledger, `summary.checks` is `{ recorded: true, ran: 0 }`.
+
+`summary.totalIssues`, `summary.criticalIssues`, and `summary.warnings` are **deprecated** (LOA-3301, removal one month after this reaches production). They count raw agent outcomes before overrides; `summary.checks` counts post-override labelled checks — these totals legitimately differ. Issue kinds and severities are bucketed into critical vs warning (critical wins; the buckets are disjoint). Credit severities are derived from rule outcome (`FAIL → HIGH`, `WARNING → MEDIUM`; `PASS`/`SKIPPED` excluded). The full bucket sets live in [issue kinds](/pipeline/issue-kinds).
 
 ## Credit results
 
@@ -101,7 +143,8 @@ Each `creditEvaluations[]` item is a `CreditReportPayload`:
 | `status` | `pending \| running \| completed \| failed \| reviewed` |
 | `inputFilename`, `auditedCreditDocumentFileName` | source document names (`auditedCreditDocumentFileName` nullable) |
 | `extractedData` | parsed credit report fields |
-| `complianceResults[]` | each `{ ruleCode, name, category, outcome (PASS\|FAIL\|WARNING\|NEEDS_INFO\|SKIPPED), message, severitySource, overridden, originalOutcome, overrideReason, overrideUser, overrideAt }` |
+| `complianceResults[]` | each `{ ruleCode, name, category, outcome (PASS\|FAIL\|WARNING\|NEEDS_INFO\|SKIPPED), message, severitySource, overridden, originalOutcome, overrideReason, overrideUser, overrideAt, label, classification, reason }`. `label` is a plain string (see [checks and coverage](#checks-and-coverage)); `classification` is always `null`; `reason` is why a SKIPPED or errored row reached no verdict (absent on verdicts). |
+| `coverage` | Coverage over this report's own rows; a superseded report keeps its own. Unrecorded (`not_evaluated`) when the report has no results. See [checks and coverage](#checks-and-coverage). |
 | `aiSummary` | narrative summary |
 | `isScanned`, `coveragePercent`, `overallRisk` | quality / risk signals |
 | `dtiRatio`, `grossMonthlyIncome` | computed ratios |

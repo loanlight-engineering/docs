@@ -126,7 +126,7 @@ When `complete`, the response spreads `auditResultsService.getFormattedResults(a
   "status": "complete",
   "startedAt": "<iso>",
   "completedAt": "<iso>",
-  "summary": { "totalIssues": 4, "criticalIssues": 1, "warnings": 3 },
+  "summary": { "totalIssues": 4, "criticalIssues": 1, "warnings": 3, "checks": { "recorded": true, "ran": 42, "needsReview": 4 } },
   "agents": { }
 }
 ```
@@ -191,7 +191,10 @@ Returns `{ "data": null }` when no `appraisal_runs` row exists (the agent was no
 no classified appraisal report was present). A failed or still-running appraisal is
 distinguishable via `data.status` — the endpoint never returns `404` for a run the audit owns.
 Four internal fields are stripped at the partner boundary: `interpretedLogic`, `ruleSource`,
-`failedElements`, `reasonCode`. Status codes: `200`, `401`, `404`.
+`failedElements`, `reasonCode`. Each `complianceResults` row now carries `label` (a plain string;
+`null` for `DIFF_*` / `XDOC-*` rows) and `classification` (always `null`; reserved). The block
+also carries `coverage` over the labelled rule rows. This endpoint shares the same projection as
+`appraisalEvaluation` in the `/results` route. Status codes: `200`, `401`, `404`.
 
 ## GET /api/v1/partner/audits/:auditId/classifications
 

@@ -27,9 +27,9 @@ Controller: `portal-appraisal/portal-appraisal.controller.ts` at `api/v1/portal/
 | `GET /api/v1/portal/appraisals/executive-metrics` | client_admin, client_user, super_admin | Portfolio KPIs (`executive-metrics.types.ts`) |
 | `GET /api/v1/portal/appraisals/settings/review-threshold` | auth | Read review threshold |
 | `PATCH /api/v1/portal/appraisals/settings/review-threshold` | client_admin, super_admin | `UpdateReviewThresholdDto` |
-| `GET /api/v1/portal/appraisals/:id` | auth | Run detail (partial-fallback merges `appraisal_run_partials`; section F fields snake_case) |
+| `GET /api/v1/portal/appraisals/:id` | auth | Run detail (partial-fallback merges `appraisal_run_partials`; section F fields snake_case; `showTheWork: boolean` per-viewer, resolved server-side from the `show_the_work` lender flag) |
 | `GET /api/v1/portal/appraisals/:id/status` | auth | Poll status |
-| `GET /api/v1/portal/appraisals/:id/rules` | auth | Compliance results |
+| `GET /api/v1/portal/appraisals/:id/rules` | auth | Compliance results; each row carries `label`, `classification`, and the response includes `coverage`. Same labelling as `GET /portal/audits/:auditId/appraisal/runs/:runId/rules`. |
 | `GET /api/v1/portal/appraisals/:id/review-fields` | auth | Fields flagged for review |
 | `POST /api/v1/portal/appraisals/:id/export` | client_admin, client_user, super_admin | Branded Review-summary PDF (HTTP 200, throttle 5/min) |
 
@@ -99,6 +99,20 @@ The updated-run flow is gated by an appraisal feature flag. When it is off, all 
 <Note>
 `DIFF_*` and `XDOC-*` rule codes are **non-overridable**: `POST rule-overrides` returns `400` for either prefix. Both families are appended post-evaluator as `complianceResults` rows with no `ruleId` and no `appraisal_rules` row, so the rule-config surface structurally cannot reach them. Attempting an override on these codes is always an error, not a no-op.
 </Note>
+
+### show_the_work UI mode (LOA-3379)
+
+When the lender's `show_the_work` flag is `on` or `internal`, the portal appraisal run page switches to a unified labelled-checks view for **completed** runs:
+
+- The **coverage box** ("N checks ran") replaces the Issues Found block and the Program Rules tile.
+- An **Exceptions / All checks** switch replaces the All Rules tab. Exceptions shows only checks that need review; All checks groups every check by label (`Passed`, `Missing`, `Incomplete`, etc.).
+- **Other findings** collects `DIFF_*` / `XDOC-*` rows, SSR documents, and LLM findings that are not labelled program-rule checks; these items are not overridable and do not count toward coverage.
+- The **override dialog** uses "Missing" and "Not applicable" (flag-on) instead of "Info" and "Skipped" (flag-off). Override and Revert re-read the rules and the audit's appraisal payload so the page, overview card, and hero badge stay in sync without a page reload.
+- The **overview card** count equals `coverage.needsReview`; the sentence changes from "N issues found" to "N checks ran · M need review".
+
+Flag-off viewers, partner-link viewers, and EPC-embed viewers always see the legacy view (Issues Found, All Rules tab, Program Rules tile). Pending, queued, running, and failed runs use the legacy in-page rendering regardless of the flag.
+
+The labelled rules read path (`getComplianceResults`) is shared with the partner results route. Stripping the added `label`, `classification`, and `coverage` fields leaves the legacy `results` and `summary` response byte-identical.
 
 ### Collateral review badge (LOA-2581)
 
