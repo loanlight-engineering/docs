@@ -108,10 +108,24 @@ The `required-documents.ts` module that existed before the grouped redesign has 
 
 ### Credit section
 
-The `credit` section (`{ data: CreditReportInput[] }`) renders one block per credit report (loans usually have exactly one). Each `CreditReportInput` is `{ status?, inputFilename?, extractedData?, complianceResults? }`. A report with neither extracted data nor compliance results (for example a pending run) is skipped. Each block has:
+The `credit` section (`{ data: CreditReportInput[] }`) renders one block per credit report
+(loans usually have exactly one). Each `CreditReportInput` is
+`{ status?, inputFilename?, extractedData?, complianceResults?, people? }`. A report with
+neither extracted data nor compliance results (for example a pending run) is skipped.
+Each block has:
 
-- A **bureau-score card** with columns **TransUnion**, **Experian**, **Equifax**, **Payments/mo.**, **Failed Rules**, **Warnings**. A primary-borrower row is always shown; a co-borrower row is added when a second borrower carries identifying info.
-- A **flagged-rules table** with columns **Rule**, **Result**, **Issue**. Only `FAIL` and `WARNING` outcomes appear, sorted FAIL before WARNING. The full `CreditRuleOutcome` set is `PASS`, `FAIL`, `WARNING`, `NEEDS_INFO`, `PENDING`, `SKIPPED`.
+- **Borrower Information table (LOA-3398).** When the report carries `people` (borrowers with
+  identifying info), the section opens with a person-per-column table headed by each person's
+  display name ("Borrower" or "Co-Borrower" as fallback; disambiguated with role or index when
+  names repeat). Rows: Role/Occupancy, Name on report, Current address.
+- A **bureau-score card** with columns **TransUnion**, **Experian**, **Equifax**,
+  **Payments/mo.**, **Failed Rules**, **Warnings**. Scores are resolved per borrower by
+  `borrower_id` tag (preferring tagged entries; positional fallback for legacy untagged data).
+  A primary-borrower row is always shown; a co-borrower row is added when a second borrower
+  carries identifying info.
+- A **flagged-rules table** with columns **Rule**, **Result**, **Issue**. Rows render based on
+  their `label` field (see [Check labels on sections](#check-labels-on-sections-loa-3298) below).
+  The full `CreditRuleOutcome` set is `PASS`, `FAIL`, `WARNING`, `NEEDS_INFO`, `PENDING`, `SKIPPED`.
 - A green note, `"{X} of {Y} credit rules passed."`, when the report has any compliance results.
 
 ### Loan Details card
@@ -235,11 +249,48 @@ interface ListingScreenshot {
 }
 ```
 
+## Check labels on sections (LOA-3298)
+
+When a lender has the `pdf_check_labels` flag enabled, every section table renders rows using the
+API's `label` field rather than legacy `hasIssue` / outcome heuristics. Two new modules in
+`audit/` implement this:
+
+**`label-selection.ts`** — `selectByLabel(row)` returns one of three values:
+- `"skip"` — `label` is `null` (the API says there is nothing to show) or is `"passed"` or
+  `"not_applicable"`.
+- `"fallback"` — `label` is absent or blank (older payload predating labels); the caller applies
+  its own pre-label filter.
+- `"render"` — any other label, including unknown future labels, renders; hiding an unknown
+  label could read cleaner than the audit, so it always shows.
+
+`rendersRow(row, preLabelFilter)` combines both paths: returns the pre-label filter result when
+`selectByLabel` is `"fallback"`, otherwise follows `selectByLabel`.
+
+**`label-display.ts`** — defines display text and pill colours for the six known labels:
+
+| Label | Pill colour | Text |
+|---|---|---|
+| `passed` | green | Passed |
+| `failed` | red | Failed |
+| `missing` | amber | Missing |
+| `incomplete` | amber | Incomplete |
+| `warning` | gray | Warning |
+| `not_applicable` | gray | Not applicable |
+
+Severity order (most severe first): `failed` → `missing`/`incomplete` (tied) → `warning` →
+unknown labels → `not_applicable` → `passed`. An unknown label renders as a gray pill with its
+own text. `groupLabel(labels)` picks the most severe known label in a group, or the first label
+when all are unknown.
+
+The "all-clear" banner and accompanying-appraisal-report handling that previously appeared in
+`audit-content.ts` were moved to the API side; the `pdf_check_labels` mode no longer renders
+them from the PDF library.
+
 ## Source modules
 
 | Module | Contents |
 |---|---|
-| `audit/` | `build-audit-doc`, `audit-content` |
+| `audit/` | `build-audit-doc`, `audit-content`, `label-selection`, `label-display` |
 | `audit/sections/` | `loan-details`, `summary`, `expiration-strip`, `document-issues`, `document-health-model`, `document-health-phrasing`, `data-consistency`, `check-1003`, `credit`, `properties` |
 | `property/` | `build-property-doc`, `property-content` |
 | `combine` | PDF merge logic |

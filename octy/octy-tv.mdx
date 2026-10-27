@@ -25,6 +25,8 @@ A story is a sequence of named chapters, each containing narration **cues** and 
 
 Narration is synthesised with OpenAI TTS (`gpt-4o-mini-tts`) and stored as content-addressed 48 kbps AAC clips in `public/explainers/voice/<hash>.m4a`. A clip's file name is a hash of its text and every voice setting, so unchanged lines are never re-synthesised.
 
+The explainer renderer is versioned. The portal's `@loanlight-engineering/explainer-renderer` package must be at or above the story's `schema_version` to play it. As of schema 3 (renderer 1.2.0), the Credit, Appraisal, and Properties Check training videos have been updated with refreshed content and voice clips, and the Business Verification training video (`business-verification-training`) is newly published (schema 3). Videos built for schema 3 are silently excluded on portals still running renderer 1.1.x or earlier.
+
 The player (`ExplainerPlayer`) assembles the clip sequence from the manifest and schedules them against the canvas animation. It exposes:
 
 - A **chapter scrubber** segmented by chapter, with jump-to-chapter buttons.
@@ -46,7 +48,7 @@ Each explainer carries an `audience` field:
 
 Current catalog covers:
 - **Team explainers:** `loanlight-overview`, `pre-audit-classification`, `document-health`, `pii-validation`, `urla-extraction`, `property-data`, `red-flags`, `credit-evaluation`, `appraisal-evaluation`, `bank-statement-income`, `iris`.
-- **Customer training videos:** `urla-1003-check-training`, `data-consistency-training`, `document-health-training`, `properties-check-training`, `credit-training`, `appraisal-training`, `bank-statement-income-training`.
+- **Customer training videos:** `urla-1003-check-training`, `data-consistency-training`, `document-health-training`, `properties-check-training`, `credit-training`, `appraisal-training`, `bank-statement-income-training`, `business-verification-training`.
 
 ## Publishing to the portal
 

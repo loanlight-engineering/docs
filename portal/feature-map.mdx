@@ -100,6 +100,22 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
 
     Sidebar and overview issue counts must come from the v2 `useResultsData()` projections (`dataConsistency.issueCount`, `documentHealth.issueCount`, `propertyData.redFlags.length`, `urlaCompleteness.rules_engine_result.summary.failed_count`). The "Errors" card/route was removed.
 
+    **Issue Summary hero and sidebar check counts (LOA-3297, behind `show_the_work`).** When
+    `show_the_work` is on, the hero and the Issue Summary sidebar count checks across every
+    *counted agent* using the API's check `label` field. Counted agents are:
+    `documentHealth`, `dataConsistency` (PII Validation), `urla` (URLA Extraction),
+    `properties` (Property Data), `credit` (Credit Evaluation), and `appraisal`
+    (Appraisal Evaluation). An agent is excluded from the count when the ledger says it was
+    skipped or when credit/appraisal has no results at all. Label totals from each agent are
+    bucketed as: `passed`, `failed`, `couldntCheck` (missing or incomplete), `warnings`.
+    Not-applicable rows and null labels (non-check rows) do not count.
+
+    The module that owns this logic is
+    `packages/app/src/app/results/audits/[auditId]/_components/issue-label-totals.ts`
+    (`issueTotalsOf`, `bucketOfLabel`) paired with `is-agent-counted.ts` (`isAgentCounted`,
+    `ledgerOf`). `COUNTED_AGENT_UI_TYPES` maps each counted agent to its
+    `UiAuditAgentType` key in the ledger.
+
     **Eligibility card (LOA-2032):** mounted as the first card on Issue Summary (the base overview), behind an access gate. The gate combines the lender's `eligibility_card` flag state with the viewer's role; it is resolved server-side by `GET /api/eligibility-card-access` and fails closed — the card is hidden on any error or missing session.
 
     The `eligibility_card` flag is a tri-state stored in `feature_value` on `lender_feature_flags`: `"off"` | `"internal"` | `"on"`. A lender with no row defaults to `"internal"`. The rule after LOA-3311 is:

@@ -31,6 +31,18 @@ Every agent starts from the Octy base distribution (`distributions/octy-base`). 
 
 The base is versioned by a digest of its files — nothing is bumped by hand. An update is a three-way merge that keeps operator config edits. SOUL.md belongs to the agent after creation (the agent tab's SOUL.md **Reset** puts the base's back).
 
+Each policy value shown in the base template's policy view carries a `policySource` label:
+
+- **Octylink pin** — the value is set as a terminal pin in the Octylink host's `.env`. These
+  pins lock sandbox credentials and API keys that Octylink manages centrally; they cannot be
+  overridden by the agent or the operator profile.
+- **Profile config** — the value comes from the Hermes profile config and can be edited per
+  agent.
+
+Sandbox pins kept in the Octylink `.env` are documented inline in the policy copy (see
+`src/app/(app)/octylink/policy-copy.ts`) so operators understand why a pin exists and cannot
+be changed from within Hermes.
+
 ## Roles
 
 Roles are an optional job on top of the base, chosen once at creation (`features: ["roles"]` on Octylink enables the feature). The three options are:
@@ -122,9 +134,29 @@ An additional key can be added to the pool for providers that support it (`pool_
 
 Providers → **Custom endpoints** (the second rail row, present when Hermes supports it): OpenAI-compatible URLs in the agent's `config.yaml`. Add one with a name, base URL, API key, API mode (`auto-detect`, `chat_completions`, `codex_responses`, `anthropic_messages`), and a model. **Check** probes the URL before saving and populates the model list.
 
+### MCP catalog token authentication
+
+When adding a catalog MCP server from the MCP tab, Octylink now supports **token authentication**
+(header auth) as the default option for OAuth-only entries that are not yet connected. You can
+enter a preset server name and URL; the UI selects header authentication by default and explains
+that the provider-issued token replaces OAuth sign-in: it is sent as `Authorization: Bearer <token>`
+and stored in the agent's `.env`. The token method is useful when the provider does not offer
+an OAuth flow that Hermes can drive interactively.
+
 ### Dashboard reachability
 
 When the Hermes dashboard is not answering (dashboard not started, wrong port, or a dashboard restart in progress), the provider detail says "The ways to set this provider up are not known until the Hermes dashboard answers." Starting the dashboard from the Dashboard tab or the Overview restores it.
+
+### Dashboard tab session renewal
+
+The Dashboard tab embeds the Hermes dashboard via a `mintTicket` call that issues a short-lived
+session ticket through Octylink's CloudFront-signed URL path. The ticket is renewed
+automatically every 5 minutes (`300_000 ms`) and whenever the page becomes visible after a
+missed interval (for example, after the tab returns from background). A renewal that returns
+HTTP 403 immediately ends the session and displays "Your access to this dashboard ended." —
+the user must re-open the tab. The `mintTicket` function is exported from
+`src/lib/hermes-admin/octylink.ts` and throws a `TicketError` on non-2xx responses or network
+failures, preserving the HTTP status for the caller.
 
 ### Subscription tokens
 
@@ -148,13 +180,17 @@ Older Octylink (no `features: ["automations"]`) shows "not available" on the Aut
 Each automation block shows:
 
 - **Agent** — only agents created with the automation's matching role are offered. The agent that is Octy (the host default) can never run an automation.
-- **Slack channel** — picked from the channels the agent's bot sees. For `pr-reviews` this is optional (the pull-request stamp is always posted).
+- **Slack channel** — picked from the channels the agent's bot sees using the Slack channel picker
+  (see [Slack pickers](#slack-pickers)). For `pr-reviews` this is optional (the pull-request stamp is always posted).
 - **Skill** — the role's default; editable. The task method lives in the skill (edited on the agent's Skills tab).
 - **Task** — what is sent with each event. Check "Use the role's default" to follow the role's template.
 - **On/Off switch** — the switch reads the saved agent; it stays off until an agent is saved.
 - **Connect sheet** — everything to paste into GitHub or Datadog, in order.
 - **Test** — sends a sample event (Datadog: a sample alert; PR reviews: needs a repo and PR number). Runs for real; result appears under **Recent runs**.
-- **Recent runs** — the last N automation runs for this automation, with state, stamp, and destinations.
+- **Recent runs** — a table of the last 10 automation runs for this automation, sorted newest-first.
+  Columns: status, run detail (with a link to the run's chat when available), pull-request or
+  destination links, and relative time. When the 10 shown do not include all runs, a note directs
+  to the agent's Chats for full history.
 
 Every write on the tile requires `hermes:admin` and is logged. A custom task is logged as "custom", never its text.
 
@@ -185,6 +221,21 @@ The `delivery_id` (GitHub's GUID) is forwarded to Octylink, making a retry a no-
 The relay maps Datadog's payload (per `src/lib/automations/datadog-template.ts`, the JSON Datadog is configured to send) onto `datadog.alert` and forwards it to Octylink's `datadog-alerts` trigger. Unlike the GitHub relay, Datadog's stays 2xx even on a refused run because Datadog redelivers automatically; the GitHub relay uses 502 so **Redeliver** is the explicit retry path.
 
 Setup: `docs/octylink-automations.md` in the `octy` repo.
+
+## Slack pickers
+
+When an agent's Hermes profile has a Slack connection, Octylink can look up the bot's channel
+and member directories via `GET /api/hermes/slack/members?profile=<slug>`. This backs two
+Slack-backed credential types on the Automations tile:
+
+- **`SLACK_HOME_CHANNEL`** — picks a Slack channel from the bot's visible list. Displayed as
+  a searchable dropdown; falls back to a free-text input if the directory is unavailable.
+- **`SLACK_ALLOWED_USERS`** — picks Slack member IDs (comma-separated) from the bot's
+  member list. Same searchable-dropdown / free-text fallback pattern.
+
+The pickers call `GET /api/hermes/slack/members` (`SlackCredentialPicker`), which proxies to
+Hermes; a 502 or unavailable Hermes dashboard silently falls back to the manual text input
+without an error state. The `SlackMember` type has `id`, `name`, `real_name`, and `image`.
 
 ## Host operations
 

@@ -77,6 +77,25 @@ Unverified checks (checks that threw instead of completing) and unreadable signa
 
 **Map to an internal task.** The finding identifies bank statements for processor review before contacting the borrower.
 
+## LL-Appraisal-01 — appraisal review
+
+Fires when the appraisal results contain compliance failures or actionable LLM findings.
+
+**Finding count.** How many issues the finding title and body report depends on whether the
+`epc_show_the_work` flag is on for the lender and whether the API recorded appraisal coverage:
+
+- **`epc_show_the_work` off, or coverage not recorded:** count = labelled compliance rows with
+  `outcome` `FAIL` or `WARNING` + actionable LLM findings (those whose `severity` is not
+  `info`, `informational`, or `none`). When `complianceResults` is null (run threw before
+  evaluation), only the raw finding count applies.
+- **`epc_show_the_work` on and `coverage.recorded === true` with a numeric `needsReview`
+  (LOA-3379):** count = `coverage.needsReview` (the API's own total, matching the portal badge)
+  + compliance rows with `label === null` and `outcome` `FAIL`/`WARNING` (unlabelled checks
+  that still fire) + actionable LLM findings. This makes the EPC finding count match what the
+  portal shows.
+
+Source: `findings/definitions/appraisal-badge-count.ts` and `appraisal.definition.ts`.
+
 ## LL-1003-01 — 1003 completeness
 
 See [URLA Completeness rules engine](/agents/urla-completeness#ll-1003-01-encompass-finding-loa-2827) for full details. Fires when the URLA Completeness rules engine produces `FAIL` outcomes. One finding per audit run; lines are grouped by borrower. Activated by `findings_1003`.

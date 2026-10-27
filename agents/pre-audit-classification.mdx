@@ -109,7 +109,14 @@ Class `SplitDocumentsNode`. Phase 1 of classify-split. Calls `classifySplitPersi
 Class `DocumentClassificationNode`. Phase 2: `classifySplitPersistence.classifyStagedSegments(state.splitStage)` runs the LLM classify per segment and finalizes the run. Returns `{ classifySplitRunId, status, classifications, stagingFileIdsByDocId }`. If `splitStage.documents.length === 0` it returns `status: "skipped"`. This is the only node that **throws** on failure; the orchestrator catches it and terminalizes the ledger row as `failed`.
 </Step>
 <Step title="classificationResolution">
-Class `ClassificationResolutionNode`. `RESOLVERS = [BankStatementResolver]`. For each classification it computes `rawClassification = llmRawClassification ?? classificationType`, finds the first resolver whose `supports(ctx)` is true (otherwise a passthrough), and persists to `document_classifications` (`llm_raw_classification`, `classification_type` = resolved label, `classification_resolution_context`). It mutates the in-memory `classificationType` to the resolved value so downstream fan-out predicates see the resolved label. Per-classification failures are caught, pushed to `errors`, and downgrade status to `"partial"`.
+Class `ClassificationResolutionNode`. The resolver list is `RESOLVERS` from `resolvers/registry.ts`:
+`[BankStatementResolver, BrokerageStatementResolver]`. For each classification it computes
+`rawClassification = llmRawClassification ?? classificationType`, finds the first resolver whose
+`supports(ctx)` is true (otherwise a passthrough), and persists to `document_classifications`
+(`llm_raw_classification`, `classification_type` = resolved label,
+`classification_resolution_context`). It mutates the in-memory `classificationType` to the
+resolved value so downstream fan-out predicates see the resolved label. Per-classification
+failures are caught, pushed to `errors`, and downgrade status to `"partial"`.
 </Step>
 <Step title="extract{BankStatement,PropertyAddress,W2,Paystub}Metadata">
 Generic class `MetadataExtractionNode<TSchema>`, one instance per extractor. Receives a `MetadataExtractionPayload` (`{ classification, stagingFileId }`) via `Send`. Computes a 1-indexed inclusive `pageRange` from `classification.pageStart`/`pageEnd` and calls `llamaExtract.extract({ fileInput: stagingFileId, schema, systemPrompt, pageRange })`. Persists to `document_classifications.extracted_metadata` with a JSONB merge so multiple extractors accumulate into one column. On failure it logs a warning and returns `{ errors, status: "partial" }` — extraction failure never aborts the audit.
@@ -157,15 +164,49 @@ W-2 and paystub extractors are easy to miss: the fan-out has **four** extractors
 
 `extracted-metadata.schema.ts` defines a documentation/contract Zod schema `ExtractedMetadataSchema` (`.partial()`, one key per extractor, each value `{ fields, confidences }`). It is not parsed at write time; the DB column stays plain `jsonb`.
 
-## Bank-statement resolution
+## Classification resolution
 
-`BankStatementResolver` (`bank-statement-resolver`) is the only registered resolver. It exists because per-bank raw labels (`chase_bank_statement`, `wells_fargo_bank_statement`, and so on) must collapse into an asset or income usage so PII and income agents know how to treat them.
+The `classificationResolution` node runs every classified segment through the `RESOLVERS` list
+(defined in `resolvers/registry.ts`). The first resolver whose `supports(ctx)` returns `true`
+claims the segment; an unclaimed segment passes through with its LLM label unchanged. Each
+resolver also declares `outputsFor(rawClassification, splitType)` — the possible resolved labels
+for a given input — so the routing catalog can enumerate what a resolver may produce without
+running it live.
+
+Two resolvers are registered (in claim order):
+
+### Bank-statement resolver
+
+`BankStatementResolver` (`bank-statement-resolver`) collapses per-bank raw labels
+(`chase_bank_statement`, `wells_fargo_bank_statement`, and so on) into an asset or income usage
+so PII and income agents know how to treat them.
 
 - `supports`: `splitType === "BANK_STATEMENT"`, or raw `endsWith("_bank_statement")`, or raw in the legacy set `{bank_statement_personal, bank_statement_business, bank_statement_income}`.
 - `resolve`: reads `loanContext.resolvedLoanProgram` **only** (never re-derives from raw lender fields), normalizes it (`trim().toLowerCase()`, spaces/dashes → `_`), and decides usage. A trailing `_<N>mo` suffix is stripped first (so `bank_statement_12mo`/`_24mo` resolve to the base program). A canonical program is then treated as a bank-statement **income** program if its base equals `"bank_statement"` or ends with `"_bank_statement"` (LOA-1825: the prior hardcoded `Set(["bank_statement"])` missed lender-specific income programs like `itin_bank_statement`; the pattern match covers all `*_bank_statement`-suffixed keys without pre-enumerating them). Usage is `asset` for everything else (`asset_qualifier`, `full_doc`, `unknown`, unresolved).
 - The resolved label is `"<rawClassification>_<usage>"`, for example `chase_bank_statement_asset`. Bank-brand granularity stays in `llm_raw_classification` and the extractor's `institution` field.
 
 The provenance snapshot (`ResolutionContext`) records `resolverName`, `loanId`, `auditRunId`, `lenderCode`, `lenderId`, `resolvedProgram`, `normalizedProgram`, `rawClassification`, `splitType`, and `defaultedToAsset`.
+
+### Brokerage-statement resolver (LOA-2849)
+
+`BrokerageStatementResolver` (`brokerage-statement-resolver`) routes brokerage, investment, and
+retirement account statements (401k, IRA, mutual funds, taxable brokerage) by whether the loan
+program qualifies on the borrower's assets or on income.
+
+- `supports`: raw classification is exactly `brokerage_statement` (case-insensitive).
+- `resolve`: reads `loanContext.resolvedLoanProgram` via `resolveProgram` and
+  `normalizeProgram`. When the normalized program is `asset_qualifier`, `asset_depletion`, or a
+  lender-defined variant of either (matched by `isProgramOrVariant`, which strips a trailing
+  `_<N>mo` suffix), the resolved label is `brokerage_statement_income` — the statement is the
+  qualifying income document on asset-based programs. For every other program (`full_doc`,
+  `bank_statement`, `dscr`, `unknown`, unresolved) the label is `brokerage_statement_asset` —
+  the statement documents reserves. The resolver never guesses income; when in doubt it defaults
+  to asset (`defaultedToAsset: true` in the context snapshot).
+- The routing config (integrations migration 048) seeds two global routing entries:
+  `brokerage_statement_income` → eFolder name `"Brokerage / Investment Statement (Income)"`,
+  type `brokerageStatementIncome`; `brokerage_statement_asset` → `"Brokerage / Investment
+  Statement (Assets)"`, type `brokerageStatementAsset`. The existing `brokerage_statement` entry
+  is retained so documents classified before this migration shipped still route correctly.
 
 ## Tables written
 

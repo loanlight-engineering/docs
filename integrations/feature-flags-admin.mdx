@@ -34,6 +34,7 @@ The service maintains a code-defined registry (`feature-flags.registry.ts`) of t
 | `findings_property_data` | Findings — Property Data | `false` | **Value-bearing** (`off` / `manual` / `auto`). Added LOA-2039. |
 | `findings_appraisal_evaluation` | Findings — Appraisal Evaluation | `false` | **Value-bearing** (`off` / `manual` / `auto`). Added LOA-2039. |
 | `findings_urla_completeness` | Findings — URLA Completeness | `false` | **Value-bearing** (`off` / `manual` / `auto`). Added LOA-2039. |
+| `epc_show_the_work` | Show the Work (EPC) | `false` | Switches the EPC delivery path to the API's check labels. When on: the audit PDF renders rows using the `label` field (see [audit-pdf library](/integrations/audit-pdf#check-labels-on-sections-loa-3298)) and drops legacy all-clear lines; the `LL-Appraisal-01` finding count uses the API's `coverage.needsReview` total when appraisal coverage is recorded (LOA-3379). Turn on only after the API's label fields are deployed. Separate from the portal's `show_the_work` flag. |
 
 The six `findings_*` flags share a common `FindingMode` type (`off` / `manual` / `auto`) parsed by `finding-mode.ts::parseFindingMode`. `enabled = true` with `feature_value = 'off'` reads as off at runtime. `enabled = false` or an absent row also reads as off.
 
@@ -91,12 +92,13 @@ For value-bearing flags (`ssr_only_detection`), include `value`:
     { "key": "findings_credit_evaluation", "enabled": false, "value": null },
     { "key": "findings_property_data", "enabled": false, "value": null },
     { "key": "findings_appraisal_evaluation", "enabled": false, "value": null },
-    { "key": "findings_urla_completeness", "enabled": false, "value": null }
+    { "key": "findings_urla_completeness", "enabled": false, "value": null },
+    { "key": "epc_show_the_work", "enabled": false, "value": null }
   ]
 }
 ```
 
-All twelve flags are always present in the response.
+All thirteen flags are always present in the response.
 
 ## Audit logging
 

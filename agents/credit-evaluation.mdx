@@ -656,6 +656,29 @@ The generation call is capped at `LOAN_NARRATIVE_MAX_TOKENS = 4096` output token
 
 **Lender setting:** `credit_qualifying_fico_method` in `lender_feature_flags` — `lowest_middle` (default) or `primary_wage_earner`. Configurable via the credit rules admin select.
 
+**FICO selection strategies (LOA-3314).** The loan's representative qualifying FICO is chosen by
+`selectRepresentativeFico` (`lib/loan-context/fico-selection.ts`) from a `FicoSelectionSeed`
+(a set of `FicoPerson` objects — one per credit person with a borrower id and a FICO — and
+`FicoCandidate` objects — one per 1003 borrower with their monthly income state). Three named
+strategies are defined:
+
+| Strategy | How it picks |
+|---|---|
+| `HIGHEST` | The scored person with the highest FICO across all borrowers. |
+| `LOWEST_MID` | The scored person with the lowest FICO across all borrowers (the traditional qualifying FICO). |
+| `PRIMARY_WAGE_EARNER` | The borrower with the unique highest 1003 monthly income. Each candidate must own exactly one scored person (matched by `ownerLabel`); a tie, a missing income field, or an unmatched person returns an unknown reason rather than guessing. A loan with exactly one borrower selects that borrower without reading income. |
+
+The strategy is resolved from a `FicoStrategyConfig` (a `program → FicoStrategyName` map
+plus a required `default`), stored per lender in `eligibility_configs.ficoStrategy`. The active
+program's own entry is used; when the program is null, the `default` is used. A missing entry
+for the active program is `strategy_miss` (not a fallback to another lender's policy).
+
+When `PRIMARY_WAGE_EARNER` cannot pick a winner, `FicoUnknown` records the reason
+(`income_tie`, `income_missing`, `income_unreadable`, `borrower_unmatched`, `no_score`,
+`application_missing`). The most severe failure is reported first, using the precedence order:
+`application_missing` → `borrower_unmatched` → `no_score` → `income_unreadable` →
+`income_missing` → `income_tie`.
+
 Custom credit-rule authoring lives in a separate `portal-credit-rules` module
 (`PortalCreditRulesController`): natural-language parsing (`credit-nl-parse.service.ts`), a
 dry-run preview (`credit-preview.service.ts`), the credit field registry, a compound-condition
