@@ -1,0 +1,114 @@
+---
+title: EPC sync queue
+description: The ordered PATCH queue that serialises every EPC state update for one transaction behind a single in-flight request.
+icon: arrow-right-left
+---
+
+The EPC sync queue (`epc_sync` / `epc_sync_item`) replaced direct EPC PATCH calls in LOA-3266. Every state update, cancel, document push, AUS document, `ReportComplete`, and findings delivery now records **desired state** in the queue rather than calling EPC's PATCH API directly. The reconciler reads the queue and sends exactly one PATCH at a time per EPC transaction.
+
+**Why.** `container-assembly.ts::deliveryBatchIndexByType` already split types that share a folder name into separate PATCHes, but they were sent back to back. Encompass only matches a folder by name once the PATCH that created it has been processed — a second PATCH could arrive before the first was processed and fail to find the folder, creating a duplicate. A locked loan deferred our PATCHes and replayed them in the wrong order for the same reason. A fixed wait could not fix either problem.
+
+Source: `packages/encompass/src/epc-sync/`.
+
+## How it works
+
+<Steps>
+<Step title="Request desired state">
+Every caller (status update, cancel, document push, AUS document, `ReportComplete`, findings) calls `EpcSyncService.request(transactionId, ...)` instead of calling EPC's PATCH API directly. `request` upserts one `epc_sync` row per EPC transaction (identified by `epc_transaction_id`) and inserts one `epc_sync_item` row per owed delivery. Items collapse to the latest desired state: a `upsertDesired` call from an older-received audit run never overrides a later one.
+</Step>
+<Step title="Trigger the reconciler">
+Four events trigger a reconcile run for a transaction:
+
+- A **reconcile message** (`loanlight.epc_sync.reconcile` on SQS) sent by any writer.
+- Any **saved webhook event** for the transaction (EPC's `response:processed`, `response:updated`, `response:retry` events).
+- A **5-minute sweep** (`EpcSyncSweepService`): reads `epc_sync` rows with `next_check_at` due.
+- A **startup sweep** when the service initialises.
+
+Slack-driven and direct-API writes are not queued — only the paths above trigger a reconcile.
+</Step>
+<Step title="Claim a lease">
+`EpcSyncReconcilerService` acquires a row lease on the `epc_sync` row with `SKIP LOCKED` so two workers never process the same transaction simultaneously.
+</Step>
+<Step title="Read EPC events">
+The reconciler fetches `GET /partner/v2/transactions/{id}/events` to learn the current state of any in-flight PATCH before deciding what to send next.
+</Step>
+<Step title="Decide">
+`decide.ts::decide` analyses the row, open items, and EPC events and picks one of: **send**, **wait**, or **idle**. The folder rule: the first item for a new folder name is always processed before its siblings, so types that share a folder never ride one PATCH.
+
+`build-patch.ts::buildNextPatch` assembles the PATCH body from the items.
+</Step>
+<Step title="Send and acknowledge">
+The reconciler sends the PATCH and stores the `X-Correlation-ID` it sent. EPC ignores the ID we send and answers with its own (in the response header and in its events). `EpcSyncRepository.acknowledgeSend` re-keys the in-flight PATCH and its items to EPC's correlation ID so later event lookups match.
+</Step>
+<Step title="Wait for verdict">
+The next PATCH waits for the previous one's `response:processed` event (matched by EPC's correlation ID). A cancel settles on `response:updated`. After the verdict, status and ledgers are updated and the next item is processed.
+</Step>
+</Steps>
+
+## Correlation-ID adoption
+
+EPC's processed verdict arrives as a `response:processed` event carrying the correlation ID from EPC's response header — not the `X-Correlation-ID` we sent (EPC ignores ours). If the send succeeded but the response was never observed (timeout or crash), the reconciler adopts the one `response:processed` event whose `sent` timestamp falls within `EPC_SYNC_CRASH_ADOPT_WINDOW_MS` (15 min, allowing for clock skew) of our send time. Two candidates, or a candidate with no `sent` time, adopt nothing and fire the stalled monitor instead.
+
+## Timeouts and limits
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `EPC_SYNC_CHECK_INTERVAL_MS` | 1 h | Normal between-check interval |
+| `EPC_SYNC_OVERDUE_MS` | 12 h | An in-flight PATCH at this age is logged and re-sent (up to `EPC_SYNC_MAX_RESENDS` times) |
+| `EPC_SYNC_GIVE_UP_MS` | 36 h | At this age, items are failed but the PATCH stays in flight and holds the queue until EPC processes it |
+| `EPC_SYNC_MAX_RESENDS` | 2 | Maximum re-sends for an overdue PATCH (not for never-left sends) |
+| `EPC_SYNC_MAX_SEND_ATTEMPTS` | 4 | Total send budget for never-left failures (connection refused, DNS, circuit open, 429, token errors, 401 after refresh) |
+| `EPC_SYNC_LEASE_SECONDS` | 300 | Reconciler row lease; sized to exceed the worst-case send + events read |
+| `EPC_SYNC_SWEEP_BATCH` | 100 | Max rows the 5-minute sweep processes per tick |
+
+**Never-left failures** (sends that never reached EPC) are retried after `EPC_SYNC_SEND_RETRY_DELAYS_MS` delays (60 s, 5 min, 15 min). A timed-out or 5xx PATCH is checked against the events list before anything is re-sent. A 4xx is never re-sent as-is.
+
+**Locked loans.** A loan EPC has locked defers our PATCHes until it is unlocked. A `response:retry` event signals this. Locked loans are never re-sent proactively. At give-up time (`EPC_SYNC_GIVE_UP_MS`) items fail, but the PATCH stays in the queue until EPC processes it — nothing else is sent while it is in flight.
+
+## Local status and ledgers
+
+Local status (`transaction_state.status`), `document_push_record`, `audit_delivery_log`, and findings claims are updated only after EPC's `response:processed` verdict confirms the PATCH succeeded — not at send time. The `documents.materialized` EventBridge event is published only after the attached verdict.
+
+The reset guard and stuck-delivery detector accommodate the lag while a loan is locked.
+
+## No feature flag
+
+The EPC sync queue has no feature flag. Once rows exist in `epc_sync`, rolling back the image leaves queued PATCHes unsent until the next roll-forward. Fix-forward is the only rollback path.
+
+## Run ordering
+
+Runs are ordered by when LoanLight received them (`transaction_state.created_at`, via `EpcSyncRepository.resolveRunOrders`, `findActiveRun`, and `findLatestRun`). EPC's `created` timestamp is the same for every run of a transaction. The run received last carries the newest desired state.
+
+**Known limits:**
+
+- Two runs received at the same moment can rank either way.
+- A redelivered old webhook inserts a new `transaction_state` row and may rank as the newest run (see LOA-3335).
+- A superseded run's refused status write logs `info`, not `CRITICAL` (`epc_sync.superseded_run_status_not_written`).
+
+## Datadog monitors
+
+Two new monitors ship with LOA-3266 (int and prod variants each):
+
+| Monitor | Trigger |
+|---|---|
+| `epc-sync-delivery-failed` | A sync row reaches a terminal failure state |
+| `epc-sync-stalled` | A sync row's correlation ID is ambiguous (two adoption candidates, or no undated candidate) and cannot be re-sent |
+
+Runbook: `packages/encompass/docs/report-efolder-delivery.md` in `loanlight-integrations`.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Audit lifecycle" href="/integrations/audit-lifecycle" icon="workflow">
+    The full webhook-to-report-delivery flow; EPC sync handles the terminal PATCH step.
+  </Card>
+  <Card title="Integrations database schema" href="/integrations/database-schema" icon="database">
+    The `epc_sync` and `epc_sync_item` table definitions and migration 046.
+  </Card>
+  <Card title="CDA eFolder delivery" href="/integrations/cda-efolder-delivery" icon="send">
+    Document push for CDA and AVM PDFs, which also routes through the sync queue.
+  </Card>
+  <Card title="EPC findings" href="/integrations/epc-findings" icon="flag">
+    Findings delivery, which records desired state via EpcSyncService.request.
+  </Card>
+</Columns>

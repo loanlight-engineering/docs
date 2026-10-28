@@ -176,6 +176,7 @@
               "integrations/orchestration-pipeline",
               "integrations/results-access",
               "integrations/epc-findings",
+              "integrations/epc-sync",
               "integrations/legacy-dev-connect",
               "integrations/cda-efolder-delivery"
             ]

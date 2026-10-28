@@ -14,7 +14,7 @@ Migrations live in `packages/encompass/migrations/*.sql` and are applied by the 
 There is **no applied-migrations ledger.** Every `.sql` is re-run whenever the migrations' content hash changes, so **every migration must be idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `ALTER`). A non-idempotent statement wedges `LLIntegrationsDatabaseStack` in `UPDATE_ROLLBACK_FAILED` and blocks all deploys (LOA-1004).
 </Warning>
 
-The current schema has **18 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 034 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
+The current schema has **20 tables**. Migration `001_baseline_schema.sql` creates the original baseline; the numbered migrations 002 through 034 add and amend the rest. Both runners order migrations **lexically** (`DbMigrate` via `Array.prototype.sort()`, `run-migrations.sh` via the shell glob), so there are two `014_*` files, two `020_*` files, three `021_*` files, two `023_*` files, and a final `zzzz_reapply_role_grants.sql` that — because digits sort before lowercase letters — always runs last.
 
 | Migration | Adds |
 |---|---|
@@ -60,6 +60,7 @@ The current schema has **18 tables**. Migration `001_baseline_schema.sql` create
 || `043_drop_cda_efolder_delivery` | DDL: drops `cda_efolder_delivery` and `cda_efolder_delivery_config` — the retired Developer Connect CDA delivery tables (phase 2 of LOA-2847 cleanup). AVM / CDA delivery now rides document push (`document_push_record`, `document_delivery_claim`). Idempotent (`DROP TABLE IF EXISTS`). |
 || `044_loa_3066_strip_transaction_state_credentials_token` | DML: removes `request.credentials.token` from every stored `transaction_state.transaction` jsonb column. Left in place, each lender's client secret was readable by every role with read access to `transaction_state`. Re-runs as a no-op once stripped. |
 || `045_edu04_intake_provenance` | DDL: creates `intake_occurrence` (one row per unique raw PDF received per EPC transaction document) and `intake_provenance_binding` (version-bound, hash-verified intake record per `transaction_state` + `transaction_document` pair). See tables below. (LOA-2929 / EDU-04) |
+|| `046_loa_3266_epc_sync` | DDL: creates `epc_sync` (one row per EPC transaction) and `epc_sync_item` (one row per owed delivery). Widens the `state` CHECK on `document_delivery_claim` and `materialized_split_record` to add `queued`. Adds `written_by_sync` and `sync_processed_ok` to `transaction_update`. See tables below. (LOA-3266) |
 || `zzzz_reapply_role_grants` | re-`GRANT`s `db_readonly` / `db_readwrite` on all tables; sorts last |
 
 <Note>
@@ -144,6 +145,8 @@ EPC update tracking.
 | `correlation_id` | uuid, UNIQUE |
 | `status`, `partner_status`, `is_processed_successfully` | |
 | `request_data` | jsonb |
+| `written_by_sync` | boolean NOT NULL DEFAULT false (added in 046, LOA-3266). Marks rows written by the sync reconciler so they can be distinguished from direct-send rows. Historical rows stay `false`. |
+| `sync_processed_ok` | boolean, nullable (added in 046, LOA-3266). Set when EPC's `response:processed` verdict arrives; `true` = success, `false` = failure, `NULL` = verdict not yet seen. |
 
 ### audit_details
 
@@ -262,6 +265,8 @@ The de-dup key is a unique index over `(loan_id, original_doc_id, COALESCE(page_
 
 **Claim columns (migration `028`, LOA-2031):** `state` text (default `'delivered'` on existing rows), `claimant_id` text, `lease_expires_at` timestamptz, `attempts` integer. These give the materializer the same atomic-claim semantics as `document_delivery_claim` — an INSERT ... ON CONFLICT against the existing unique index serializes racing workers. The `state = 'delivered'` backfill ensures all pre-migration rows still block re-materialization.
 
+Migration `046` (LOA-3266) widens the `state` CHECK to add `queued` (a split handed off to the EPC sync queue; reclaimable once its sync item settles). Added `NOT VALID` to skip scanning historical rows.
+
 ### document_delivery_claim
 
 Atomized de-dup ledger for the document-push pipeline (migration `027`, LOA-2031). One row per `(transaction_record_id, claim_key, container_norm)` triple. Acquired **before** the first external call (S3 fetch → EPC push), so two workers processing the same SQS redelivery both see the existing claim and only one proceeds.
@@ -271,7 +276,7 @@ Atomized de-dup ledger for the document-push pipeline (migration `027`, LOA-2031
 | `transaction_record_id` | FK → `transaction_record` |
 | `claim_key` | Content hash (`sha256:<hash>`) when available; document id (`doc:<id>`) for carved splits with no hash. |
 | `container_norm` | Normalized eFolder name (via `normalizeFolderName`) — the same normalization the live already-filed check uses. |
-| `state` | `in_flight` (blocks until `lease_expires_at`) \| `delivered` (blocks permanently) \| `failed` (reclaimable immediately). |
+| `state` | `in_flight` (blocks until `lease_expires_at`) \| `delivered` (blocks permanently) \| `failed` (reclaimable immediately) \| `queued` (handed off to the EPC sync queue; blocks until the sync item settles — added in 046, LOA-3266). |
 | `claimant_id` | Worker identity; a release is guarded on this so a zombie cannot clobber the succeeding worker's state. |
 | `lease_expires_at` | When the `in_flight` block expires. Deliberately **shorter** than the SQS visibility timeout (600 s vs. 900 s) so a SIGKILL'd worker's claim expires before the redelivered message is processed. |
 | `attempts` | Re-acquisition count; `> 1` signals a raced or retried delivery. |
@@ -361,6 +366,57 @@ Version-bound, hash-verified provenance record linking a `transaction_state` + `
 | `created_at`, `updated_at` | timestamptz NOT NULL |
 
 Key constraints: UNIQUE `uq_ipb_run_occurrence (transaction_state_id, intake_occurrence_id)`. CHECK constraints enforce: `state = 'failed'` iff `failure_reason IS NOT NULL`; `state = 'recorded'` requires `object_version IS NOT NULL`; `delivery = 'attached'` or `'announced'` requires `state = 'recorded'`; `scope_and_version_unavailable` requires both `intake_occurrence_id` and `object_version` to be NULL.
+
+### epc_sync
+
+One row per EPC transaction. Holds the desired state for the ordered PATCH queue introduced in LOA-3266. See [EPC sync queue](/integrations/epc-sync) for architecture details. Added by migration `046`.
+
+| Column | Notes |
+|---|---|
+| `id` | PK (uuid) |
+| `epc_transaction_id` | text NOT NULL, UNIQUE — the EPC transaction ID |
+| `transaction_record_id` | FK → `transaction_record` |
+| `is_uat` | boolean, default false |
+| `desired_status`, `desired_partner_status` | Desired EPC status fields |
+| `desired_loan_extensions`, `desired_errors` | jsonb — desired EPC loan extensions and errors |
+| `desired_run_id`, `desired_run_order_at` | Which audit run set the desired state and when it was received |
+| `desired_version` | integer, increments on each upsert |
+| `observed_status`, `observed_partner_status`, `observed_loan_extensions`, `observed_run_id` | State of the last EPC-confirmed PATCH |
+| `sent_status`, `sent_partner_status`, `sent_run_id`, `prev_sent_*` | Values of the in-flight and previous PATCH (provisional until EPC accepts) |
+| `in_flight_correlation_id` | Correlation ID sent with the in-flight PATCH (ours, not EPC's, until acknowledged) |
+| `in_flight_sent_at`, `in_flight_item_ids`, `in_flight_carries_state` | In-flight PATCH bookkeeping |
+| `in_flight_run_id`, `in_flight_extensions`, `in_flight_failure`, `in_flight_gave_up_at`, `in_flight_correlation_from_epc`, `in_flight_resend`, `in_flight_acknowledged` | Lifecycle fields for the in-flight PATCH |
+| `last_verdict` | CHECK `processed \| retry \| updated` — EPC's most recent verdict |
+| `last_event_at` | When the most recent EPC event arrived |
+| `retry_seen`, `resend_count`, `send_attempts`, `overdue_logged_at` | Retry and overdue tracking |
+| `rejected_desired_version`, `state_alone_retry_version` | Version whose state PATCH EPC refused; retry version |
+| `next_check_at` | When the sweep should next check this row; indexed |
+| `lease_owner`, `lease_expires_at` | Reconciler row lease |
+| `created_at`, `updated_at` | |
+
+Indexes: `idx_epc_sync_next_check_at` on `(next_check_at) WHERE next_check_at IS NOT NULL`; `idx_epc_sync_transaction_record_id` on `transaction_record_id`.
+
+### epc_sync_item
+
+One row per owed delivery within a transaction's sync queue. Added by migration `046`.
+
+| Column | Notes |
+|---|---|
+| `id` | PK (uuid) |
+| `sync_id` | FK → `epc_sync` |
+| `seq` | bigint GENERATED ALWAYS AS IDENTITY — queue order |
+| `kind` | CHECK `document \| aus_document \| report_complete \| findings \| cancel` |
+| `state` | CHECK `owed \| in_flight \| settled_success \| settled_failure \| failed \| unverified \| superseded`; default `owed` |
+| `run_id` | uuid — the audit run that created this item |
+| `ledger_ref` | jsonb — reference to the external ledger record (e.g. `document_delivery_claim` or `findings_delivery`) |
+| `payload` | jsonb NOT NULL — desired delivery content |
+| `delivery_kind` | text — sub-type of the delivery |
+| `correlation_id` | uuid — EPC's correlation ID once in-flight |
+| `sent_at`, `folder_id`, `folder_name` | When the PATCH was sent; which eFolder the item landed in (set from the verdict) |
+| `materialized`, `materialized_published_at`, `materialized_publish_failed_at` | The `documents.materialized` event payload and its publication state |
+| `created_at`, `updated_at` | |
+
+Indexes: `idx_epc_sync_item_sync` on `(sync_id, seq)`; partial `idx_epc_sync_item_sync_open` on `(sync_id, seq) WHERE state IN ('owed', 'in_flight')`; partial `idx_epc_sync_item_unpublished` on `(created_at) WHERE state = 'settled_success' AND materialized IS NOT NULL AND materialized_published_at IS NULL`; unique `uq_epc_sync_item_report_complete_per_run` on `(sync_id, run_id) WHERE kind = 'report_complete'`.
 
 ## Access
 

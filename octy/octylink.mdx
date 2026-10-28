@@ -130,6 +130,17 @@ An additional key can be added to the pool for providers that support it (`pool_
 
 **Models** — every model the signed-in provider reports, each with its capabilities (`reasoning`, `fast`, `vision`, `tools`, `long_context`).
 
+### Credentials tab
+
+The Credentials tab lists every credential the agent's base and role install. Each save calls `OctylinkClient.tsx::saveCredential` and reads two fields from the response:
+
+- **`restart_required`** — when `true` (or absent, for compatibility), the amber "restart pending" strip appears and the toast says "Restart to make it live". When `false`, the strip stays as it was and the toast says "saved" without a restart prompt. Saves that write no `.env` value (for example, a token's expiry date stored in Octylink's own state) return `restart_required: false`.
+- **`notices[]`** — each entry is shown as an info toast. Octylink sends one when `DD_MCP_TOKEN` is replaced without a date, because the old date belonged to the old token and has been dropped. Without this toast, a new token would have no expiry warnings until someone remembered to enter its date.
+
+Removals follow the same `restart_required` logic: the toast mentions a restart only when Octylink says one is needed.
+
+After a save, only the credential rows are refreshed. The next full setup load picks up any new rows Octylink added (such as a token expiry date).
+
 ### Custom endpoints
 
 Providers → **Custom endpoints** (the second rail row, present when Hermes supports it): OpenAI-compatible URLs in the agent's `config.yaml`. Add one with a name, base URL, API key, API mode (`auto-detect`, `chat_completions`, `codex_responses`, `anthropic_messages`), and a model. **Check** probes the URL before saving and populates the model list.

@@ -497,6 +497,10 @@ Per-rule definitions (`ruleSetId`, `sourceTemplateId` — intentionally not an F
 Human-in-the-loop tables: `credit_corrections` (field edits) and `credit_rule_overrides`
 (override outcome `PASS | FAIL | WARNING | NEEDS_INFO | SKIPPED`).
 
+**CRED_031 — Minimum Usable Score Count**
+
+Fires when a borrower's credit report contains fewer than the configured `min_score_count` of usable bureau scores. A score whose bureau cannot be named (unknown bureau) is not counted as usable. Outcomes: one usable bureau score = `FAIL`; two or three usable scores = `PASS`; zero usable scores, or a score with an unidentifiable bureau = `NEEDS_INFO` (existing pre-threshold behaviour). The rule cannot distinguish a bureau with no file on the borrower from one that was never pulled; the threshold is set to reflect the minimum that guidelines require, not the number of bureaus expected.
+
 ## Lender-specific rule bundles
 
 Curated credit rule bundles live in `portal-credit-rules/staged-bundles/`. Apply them via `/admin/staged-credit-rules` → dry-run → promote.
@@ -617,6 +621,26 @@ Current evaluation paths when `windowUnresolvable`:
 - **All amounts readable, undated-only total ≥ cap:** emits `WARNING` — collections with no usable date breach the cap even before the window can be applied.
 - **All amounts readable, full pre-window total < cap:** emits `PASS` — the window can only shrink the qualifying set further.
 - **All amounts readable, full total ≥ cap but dated collections contribute:** emits `NEEDS_INFO` ("Reference report date is unavailable for the collection window carve-out.") — the anchor is required before the rule can breach.
+
+### Luxury CRED_019 severity delta (LOA-3394)
+
+The `luxury-cred019-severity` bundle is a **delta bundle** (not a full replacement): it applies only to Luxury Mortgage and declares a footprint of exactly two items: CRED_019 severity promotion and CRED_031 adoption.
+
+The bundle:
+
+- **Seeds CRED_031** for Luxury via the template row (migrated as inactive in `0322_seed_cred_031_min_score_count.sql`; the bundle creates it enabled). Threshold: `min_score_count: 2`, lender-wide — the same value First Colony uses.
+- **Promotes CRED_019** from `WARNING` to `FAIL` for Luxury.
+
+Apply via `/admin/staged-credit-rules` → dry-run → promote. Expected dry-run output: `seeded: ["CRED_031"]`; `severityUpdated: ["CRED_019"]`; nothing else. Credit bundles are not auto-applied on deploy; the apply is a manual step after confirming the dry-run.
+
+**Datadog absence monitors.** Two per-lender monitors replace the former fleet-wide `credit-rules-cred031-not-evaluated` monitor:
+
+| Monitor | Lender | Shipped state |
+|---|---|---|
+| `credit-rules-cred031-not-evaluated` | First Colony (pinned to `@lender_id`) | un-muted |
+| `credit-rules-cred031-not-evaluated-luxury` | Luxury Mortgage (pinned to `@lender_id`) | muted until the bundle is applied |
+
+The spike and model-unclassified monitors no longer identify First Colony as the only CRED_031 adopter.
 
 ### First Colony (LOA-2718)
 

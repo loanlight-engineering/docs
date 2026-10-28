@@ -28,13 +28,15 @@ Check results follow a closed vocabulary: `passed`, `failed`, `warning`, `missin
 
 After a record is found, the agent scores the match:
 
-| Confidence | Condition |
-|---|---|
-| `high` | Both name and address agree |
-| `medium` | Either name or address agrees |
-| `low` | Neither agrees — treated as not found; all checks report `missing` |
+| Confidence | Condition | `found` check |
+|---|---|---|
+| `high` | Both name and address agree | `passed` |
+| `medium` | Either name or address agrees | `passed` (with a `Warning` on the `found` check, signalling the partial match) |
+| `low` | Neither agrees | treated as not found; all checks report `missing` |
 
 Name agreement uses normalized name matching (NAME-0). Address agreement checks the street number and ZIP5 of the declared business address against the state record.
+
+A medium match (name only or address only) surfaces as a `Warning` with a next step. It keeps its `active` and `formation` results but counts toward needs-review rather than as a clean pass.
 
 ### Delaware special case
 
@@ -69,13 +71,31 @@ For each usable subject the agent acquires or reuses a `business_verification_lo
 
 The lookup key is `kind|name|state|street_number|zip5` (cleaned). Vesting entities append the property state. A lookup completed within the past **120 days** (Fannie Mae standard) is reused; an older lookup is retired (`retired_at`) and a new one is created.
 
+<Note>
+Self-employed lookups now carry `SELF_EMPLOYED_PLANNER_VERSION = "2"` in their key (LOA-3355). A lookup matched by the old rules (planner version 1) is not reused; the next audit searches again. On re-audit, the first run after deploy always makes a fresh paid search, plus up to 2 extra ID lookups per self-employed business.
+</Note>
+
 The partial unique index `bv_lookups_loan_key_live_unique` ensures at most one live (pending or complete, un-retired, not served from a saved copy) lookup per loan and key. When two audits for the same loan need the same lookup simultaneously, one picks up the other's result.
 
 ### Search strategy
 
 The search planner decides provider calls per subject type:
 
-- **Self-employed:** name search in the business-address state.
+- **Self-employed:** name-and-address identification (`search-planner.ts::identifyByNameAndAddress`, introduced in LOA-3355 with `SELF_EMPLOYED_PLANNER_VERSION = "2"`). Every company whose cleaned name equals the 1003's is checked against the 1003 address (physical or mailing). That includes same-name alternatives from the provider. Different-name records at the 1003 address and near-name alternatives whose own listing shows the 1003 street and ZIP are also weighed. At most `MAX_SAME_NAME_LOOKUPS` (2) extra ID lookups are made per business, stopping as soon as a company is confirmed at the address.
+
+  Self-employed outcomes:
+
+  | Outcome | When | `found` result |
+  |---|---|---|
+  | One company at the address | High confidence match | `passed` |
+  | One same-name company only (nothing at the address) | Medium confidence (name only) | `passed` with `Warning` |
+  | Several candidates, or any unresolved alternative | `ambiguous` — no company is chosen | `missing` (all three checks missing; counts toward needs-review, never as `failed`) |
+  | All candidates looked up and found empty | Not found | `missing` |
+  | A same-name lookup fails | Lookup fails; next audit retries | failure |
+  | Provider saves a copy withholding alternatives | Treated as `ambiguous`; page explains why | `missing` |
+
+  When the result is `ambiguous`, `checks.ts::deriveBusiness` renders: "The business could not be identified: N {State} records could be {name}." followed by each candidate with its status, city, and whether it is at the 1003 address. `active` and `formation` read "The business could not be identified, so the rule could not be verified."
+
 - **Vesting entity:** Cobalt typeahead search (stateless), then an ID lookup on the typeahead result. If typeahead fails, falls back to a name search in the property state.
 
 ### Concurrency and lease
@@ -119,7 +139,7 @@ One row per Secretary of State lookup. A completed lookup is reused by later aud
 | `search_path` | jsonb | Sequence of provider calls planned and executed |
 | `raw_responses` | jsonb | Provider response payloads |
 | `record` | jsonb | The matched `StateRecord` (null when outcome ≠ `matched`) |
-| `candidates` | jsonb | Near-match candidates when outcome ≠ `matched` |
+|| `candidates` | jsonb | Near-match candidates when outcome ≠ `matched`. Each candidate entry now includes optional `status` (normalised entity status, from the state listing), `city`, and `atDeclaredAddress` (boolean) fields added in LOA-3355. `status` falls back to the franchise-tax line for Delaware. |
 | `served_from_saved_copy` | boolean NOT NULL | True when the result came from a prior lookup's file cache |
 | `effective_date` | date | Date the record was effective |
 | `screenshot` | jsonb | Captured screenshot reference |

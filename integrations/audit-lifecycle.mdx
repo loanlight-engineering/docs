@@ -96,9 +96,11 @@ The full ten-code planned catalog (all families and registration status per envi
 **Best-effort.** A findings delivery failure is logged and alerted (Datadog monitor `findings-delivery-failed`) but never blocks the terminal PATCH. Completion always reaches Encompass.
 </Step>
 <Step title="PATCH the report into Encompass">
-The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResources` → generate streaming URLs → PUT bytes → resource refs), then the EPC transaction is PATCHed:
+The PDF is uploaded to Encompass as a resource (`EpcService.createDocumentResources` → generate streaming URLs → PUT bytes → resource refs). All EPC PATCHes then go through the **EPC sync queue** (LOA-3266) rather than being sent directly. `EpcSyncService.request` records the desired state in `epc_sync` / `epc_sync_item`; `EpcSyncReconcilerService` sends exactly one PATCH at a time per EPC transaction and waits for EPC's `response:processed` verdict before sending the next. See [EPC sync queue](/integrations/epc-sync) for details.
 
-- **Complete** — status `completed` / partnerStatus `Complete`, attaches the PDF, sets `loanLightAusHasBeenRun = "COMPLETED"`, emits a `ReportComplete` service event. Local `transaction_state` is updated to `completed` (3× retry).
+Desired state per delivery kind:
+
+- **Complete** — status `completed` / partnerStatus `Complete`, attaches the PDF, sets `loanLightAusHasBeenRun = "COMPLETED"`, emits a `ReportComplete` service event. Local `transaction_state` is updated to `completed` after EPC's verdict.
 - **Error (recoverable)** — uploads the report but keeps Encompass status `Processing` so the user can retry; no `errors[]`.
 - **Failed (terminal)** — status `failed`, `loanLightAusHasBeenRun = "FAILED"`, includes `errors[]`. Only when Encompass explicitly fails.
 </Step>
