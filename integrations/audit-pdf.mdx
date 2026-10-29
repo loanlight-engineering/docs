@@ -34,6 +34,7 @@ interface GenerateAuditPdfV2Input {
   sections: AuditSectionsInput;      // see below
   errorDetails?: AuditErrorDetails;
   hasAccompanyingAppraisalReport?: boolean; // LOA-2094
+  agentStatuses?: AgentStatusesInput; // LOA-3299 — counted-agent run ledger; drives coverage strip, per-section notes, and Coverage Appendix
 }
 ```
 
@@ -181,8 +182,8 @@ When the run is `failed` or `pending`, the section states that nothing could be 
 business. A run that is absent or skipped is simply not rendered.
 
 <Note>
-The Coverage Appendix (a full per-check grid for every run) is not yet included in the PDF. It
-depends on LOA-3145 and will be added in a later slice.
+**Coverage Appendix (LOA-3299).** When `epc_show_the_work` is on, a Coverage Appendix is appended to the
+PDF after all sections. See [Coverage features](#coverage-features-loa-3299-epc_show_the_work).
 </Note>
 
 The section is built by `audit/sections/business-verification.ts` in `packages/audit-pdf` and is
@@ -285,6 +286,58 @@ when all are unknown.
 The "all-clear" banner and accompanying-appraisal-report handling that previously appeared in
 `audit-content.ts` were moved to the API side; the `pdf_check_labels` mode no longer renders
 them from the PDF library.
+
+## Coverage features (LOA-3299, `epc_show_the_work`)
+
+When the lender has `epc_show_the_work` on, three new coverage surfaces appear in the audit PDF.
+They all share a single model (`audit/coverage-model.ts`) built from the API's per-agent `coverage`
+blocks, so they cannot disagree. The encompass parser preserves `coverage` from `/results` (Data
+Consistency, Document Health), `/urla_completeness`, `/property_data`, and `/credit`, plus
+`requiredDocuments`, Data Consistency not-applicable `checks`, 1003 `category`/`categoryLabel`/`verified`,
+Credit rule `reason`, and the `agentStatuses` ledger.
+
+**Counted agents** are the agents whose check totals feed the coverage model:
+`documentHealth`, `dataConsistency`, `urla` (1003), `properties` (Property Data), and `credit`.
+
+### Summary strip
+
+The Audit Summary section's six problem-row columns are replaced by a horizontal strip showing totals
+across all counted agents:
+
+| Column | Meaning |
+|---|---|
+| Checks Passed | Counted agent checks that returned `passed`. Hidden when any counted agent is unrecorded or its section did not load. |
+| Failed | Checks with a `failed` or `missing`/`incomplete` label. |
+| Couldn't Check | Checks the agent could not evaluate. |
+| Warnings | Checks with a `warning` label. |
+| Required Docs Present | Whether all required documents were found. |
+
+When any counted agent is unrecorded, the strip hides "Checks Passed" and every "ran" claim and
+reads "N problems recorded in …". An unavailable section reads "Section unavailable".
+
+### Per-section coverage notes
+
+Each counted agent's section closes with one coverage note: a line stating how many checks ran and
+how many passed (or an unavailable/degraded variant when the section did not load). This closes the
+1003 Check, Document Health, Data Consistency, Properties, and Credit sections.
+
+### Coverage Appendix
+
+A Coverage Appendix is appended to the main audit PDF (after all other sections and before
+property pages on the combined-delivery path; absent from property-only split PDFs). It lists
+every check in every counted section, including `not_applicable` rows. Sections:
+
+- **1003, Data Consistency, Properties, and Credit** — one row per check, with its label and reason.
+- **Document Health** — a matrix: documents on rows, check types (missing, expiration, etc.) as columns.
+
+The appendix is omitted when the entire model is unavailable (for example, when the audit's API
+calls all failed). When individual sections are missing, only their block is degraded; the others
+render normally.
+
+<Note>
+Flag-off is untouched: the `legacy/` rendering path is not edited and produces byte-identical output
+to the pre-LOA-3299 baseline.
+</Note>
 
 ## Source modules
 

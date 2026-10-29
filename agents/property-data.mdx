@@ -122,6 +122,22 @@ Redfin record for that same assessment year — never from a newer or older paym
 ATTOM for official records (ownership, mortgages, title, liens, sales/assessment history, AVM).
 Subject↔borrower proximity is computed by haversine; `proximity.flagged = miles > 50`.
 One `consolidateProperty` runs per REO address.
+
+**ATTOM subject parcel verification (LOA-3026).** After ATTOM data is fetched, `verifyAttomSubjectParcel`
+checks that the returned record actually describes the property on the loan file. When two conditions
+are both true, the record is marked **unverified** (`attom_parcel_mismatch`) and withheld from the
+consolidated result everywhere (AVM, assessment, sales history, and all other ATTOM fields):
+
+1. The loan file describes an improved residence (`FinancedUnitCount` 1–4, or an attached/detached,
+   site-built, primary-residence or second-home property).
+2. The ATTOM response has **both** no building data (no living area, beds, or baths) **and** a
+   land-type label in `propertyType`, `propType`, or `propLandUse` — recognized land words:
+   `miscellaneous`, `vacant`, `unimproved`, `land`, `lot`. (`"RESIDENTIAL (NEC)"` is not a land
+   word; ATTOM uses it on improved homes.)
+
+An APN mismatch alone never rejects a record because MISMO and ATTOM format APNs differently often
+enough that a mismatch is weak evidence. This change prevents a wrong-parcel AVM (for example, an
+adjacent vacant lot whose AVM is strong) from reaching the valuation decision or red-flag rules.
 </Step>
 
 <Step title="aggregate">

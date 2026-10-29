@@ -209,9 +209,29 @@ Every write on the tile requires `hermes:admin` and is logged. A custom task is 
 
 `POST /api/github/webhook` (middleware-exempt, authenticated by `GITHUB_WEBHOOK_SECRET` HMAC over the raw body).
 
+**Which repositories are reviewed** is now the `pr-reviews` automation's own `repos` setting on
+Octylink, not the `GITHUB_REPOS` env var. Review requests from any repository in the org reach
+Octy's GitHub App webhook and are forwarded to Octylink, which enforces the per-automation allow
+list. The Automations tile's **PR reviews → Repositories** setting offers *Every repository*
+(default) or *Only these* — a searchable checklist of the repos the Octy GitHub App is installed
+on (`GET /api/hermes/automations/github-repos`). Any repository not on that list can still be added
+by name, since the org webhook delivers all repos.
+
+<Note>
+**Older Octylink** (no `repos` field on the automation view): the relay falls back to the
+`GITHUB_REPOS` env var. A skipped repository is recorded on the Activity trail with the skip reason
+so it is not silently dropped.
+</Note>
+
+<Note>
+The reviewer's `GH_TOKEN` must have read access to every reviewed repository. A fine-grained
+Personal Access Token only covers the repos it was granted; any reviewed repo outside that set will
+result in a refused run. The agent's Credentials tab lists what the current token can read.
+</Note>
+
 Flow:
 
-1. Free checks (repo in `GITHUB_REPOS`, not a draft, not a fork, not the author's own PR).
+1. Free checks (not a draft, not a fork, not the author's own PR, valid org webhook).
 2. If the event could be a review for the configured reviewer, Octylink is queried for the `pr-reviews` automation's GitHub login (the agent's `GH_TOKEN` identity).
 3. A `review_requested` event for that login (or Octy's App bot, when `GITHUB_APP_SLUG` is set) becomes `github.review_requested` and is forwarded to `/v1/automations/pr-reviews/trigger`.
 4. A PR closed or merged (while a review may be running) becomes `github.pr_closed`.

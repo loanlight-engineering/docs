@@ -68,6 +68,7 @@ assembler will silently drop the field for SQS-delivered messages.
   fields (shared schema). Two recent additions:
 
   - `incomeType` (from `CX.LOANLIGHT.INCOMETYPE`) and `noteRate` (note rate, percent)—both surfaced on the audit PDF's Loan Details card.
+  - `avmBorrowerAccepted` (string, optional) — the borrower's AVM acceptance response, sourced from Encompass custom field `CX.LOANLIGHT.AVMACCEPTED`. Recognized values (case-insensitive): `Y`/`Yes`/`True` → accepted; `N`/`No`/`False` → declined. Any other value, or a missing field, is treated as unknown. Used by the HELOC valuation-ordering decision to determine whether an AVM that passed quality thresholds satisfies the loan (LOA-3414). Requires `CX.LOANLIGHT.AVMACCEPTED` to be added to the Partner Connect product's field list before it reaches LoanLight.
   - `transactionId` (string, optional) — the EPC transaction id (`transaction.id`). Added by LOA-2838; used by loanlight-api to correlate the audit run back to the Encompass EPC transaction.
   - `encompassLoanId` (string, optional) — the Encompass loan GUID, parsed from the EPC entity ref (`entityRef.entityId`). Added by LOA-2838. Stored on `loans.encompass_loan_id`. The CDA eFolder delivery producer binds this identifier to each `collateral_review_orders` row at claim time.
 
