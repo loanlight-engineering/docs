@@ -139,6 +139,10 @@ The preview is the same code path the server runs, so what you see is what the a
 
 The detail panel also surfaces the issue's runs (from `GET /api/octy-issues/[id]/runs`, newest first). `RunDetailPanel` and `RunTimeline` render each run's status, model, skill, and timeline. While a run is active, the UI polls `GET /api/octy-runs/[runId]/status`, which retrieves the live Warp state and persists changes (including the `oz_session_url` Warp session link).
 
+### Subagents dock
+
+When the active run has subagents, a **Subagents** dock (`SubagentDock.tsx`) appears above the terminal in the run panel. It shows every subagent as a collapsible list: running count, done count, failed count, and — for running entries — a live elapsed timer. Selecting a subagent row switches the terminal view to that subagent's session. The dock expands automatically while at least one subagent is running and collapses to a summary line once all finish, preserving the user's choice if they manually toggled it. Subagent messages in the chat are no longer attributed as "You" to distinguish them from the user's own messages.
+
 `ACTIVE_OZ_STATUSES` is `queued`, `pending`, `claimed`, `in_progress`. When a run is active the panel warns that a run is in progress but still lets you launch another.
 
 When a run finishes, the completion webhook stores its markdown `summary` and `pr_urls`, and advances the issue to `ai_complete` (only if it was still `delegated`). The summary renders as markdown in the run detail; PR links open against loanlight-api. From there engineers move the issue to `in_review`, `closed`, or `cancelled`.

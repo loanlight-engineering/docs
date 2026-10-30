@@ -73,7 +73,7 @@ The appraisal issue count fed into the Overview rollup is computed by `summarize
 The Collateral Review section surfaces the automated AVM → CDA escalation state for the audit run's loan. Data is fetched from `GET /api/audit-runs/[id]/collateral-review` (Octy route handler) which calls the loanlight-api internal controller at `/internal/collateral-review/appraisals/:runId` via `x-internal-api-key` authentication.
 
 The section shows:
-- **Badge** — the decision outcome (`avm_only`, `avm_then_cda`, `below_threshold`, `skipped_*`, `shadow_would_order_avm`, etc.) as a labeled badge with live/shadow mode distinction.
+- **Badge** — the decision outcome as a labeled badge with live/shadow mode distinction. SSR outcomes: `avm_only`, `avm_then_cda`, `below_threshold`, `skipped_*`, `shadow_would_order_avm`. HELOC outcomes: `avm_used`, `order_appraisal`, `order_evaluation`, `order_inspection`, `shadow_would_order_appraisal`, `shadow_would_order_evaluation`, `shadow_would_order_inspection`, `needs_input`, `manual_order_required`, `product_not_available` (LOA-3456).
 - **Score and threshold** — the firing collateral score, agency (`fannie_mae` or `freddie_mac`), and the lender's configured threshold.
 - **AVM order state** — status, requested/resolved timestamps, and the Clear Capital AVM order ID (`avmClearCapitalOrderId`) when the order reached Clear Capital.
 - **CDA order state** — order status, the lender's turn-time setting (24 or 48 hours), the Clear Capital CDA order ID (`cdaClearCapitalOrderId`) when applicable, and an "Open report" link once the CDA document is delivered.

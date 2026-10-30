@@ -267,7 +267,8 @@
               "octy/issues-runs-labels-api",
               "octy/doc-refreshes",
               "octy/mcp-server",
-              "octy/octylink"
+              "octy/octylink",
+              "octy/agent-coverage"
             ]
           },
           {

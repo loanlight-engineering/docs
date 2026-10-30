@@ -129,7 +129,11 @@ The BFF forwards to `GET /api/v1/portal/collateral-review/appraisals/:runId`. Th
 - `CollateralReviewLowRisk` — visible to **all** roles. The agency score was below the lender's threshold so nothing was ordered. Reports `kind: "low_risk"`.
 - `CollateralReviewEvaluatedOnly` — staff-only view (`super_admin` only). Shows the decision outcome and score for non-`below_threshold` cases where no order was placed (e.g. `no_score`, `score_rejected`, `skipped_*`, `shadow_would_order_avm`).
 
-Decision outcomes: `avm_only`, `avm_then_cda`, `below_threshold`, `no_score`, `score_rejected`, `skipped_no_loan`, `skipped_before_effective_date`, `shadow_would_order_avm`. Order statuses: `pending`, `awaiting_callback`, `succeeded`, `failed`, `no_hit`, `declined`, `abandoned`.
+**SSR escalation decision outcomes:** `avm_only`, `avm_then_cda`, `below_threshold`, `no_score`, `score_rejected`, `skipped_no_loan`, `skipped_before_effective_date`, `shadow_would_order_avm`.
+
+**HELOC valuation decision outcomes (LOA-3456):** `avm_used`, `order_appraisal`, `order_evaluation`, `order_inspection`, `shadow_would_order_appraisal`, `shadow_would_order_evaluation`, `shadow_would_order_inspection`, `needs_input`, `manual_order_required`, `product_not_available`, `skipped_before_effective_date`. The `order_inspection` and `shadow_would_order_inspection` outcomes were added when an accepted passing AVM now triggers an exterior property inspection order (`collateral_review_decisions` CHECK widened by migration `0196`). `avm_used` remains a valid outcome on existing rows.
+
+Order statuses: `pending`, `awaiting_callback`, `succeeded`, `failed`, `no_hit`, `declined`, `abandoned`.
 
 **CDA order fields (LOA-2581).** The `CollateralReviewPortalCda` shape includes:
 

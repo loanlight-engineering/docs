@@ -45,13 +45,14 @@ be changed from within Hermes.
 
 ## Roles
 
-Roles are an optional job on top of the base, chosen once at creation (`features: ["roles"]` on Octylink enables the feature). The three options are:
+Roles are an optional job on top of the base, chosen once at creation (`features: ["roles"]` on Octylink enables the feature). The four options are:
 
 - **Plain** — no role; a general-purpose agent.
 - **PR reviewer** — runs the `pr-review` skill on each pull-request review request. Its automation is `pr-reviews`.
 - **Datadog monitor** — runs the `datadog-monitor` skill on each monitor alert. Its automation is `datadog-alerts`.
+- **Octy engineer** (`octy-engineer`) — a named specialist role for the Octy engineering team. It installs the role's skill and SOUL.md but has no automation; there is no channel or trigger to set up.
 
-A role is fixed for the agent's life; there is no switching. When an Octylink has no `roles` feature, the tab shows "not available" — never an error.
+A role can be changed after creation via the **Change role…** action in the agent's Danger Zone (Overview tab → bottom of page). The change rewrites the agent's configuration and therefore uses the same slug-typed-back confirmation gate as deletion. An automation that was configured for the old role is left with no agent after a role change and must be reassigned. When an Octylink has no `roles` feature, the tab shows "not available" — never an error.
 
 ### What a role installs
 
@@ -110,6 +111,14 @@ Slack-driven and cron-driven runs reach the gateway directly and are not subject
 ## Providers and models
 
 The **Providers & models** tab (`ProvidersTab.tsx`) shows every provider Hermes knows, broken into **Connected** (authenticated; runs can use these) and **Not connected** (available; sign in or add a key to use one).
+
+### Provider usage limits
+
+The Overview tab's **Provider Limits** tile (`ProviderLimits.tsx`) shows each connected provider's usage rings: spend and request counts for the current billing period alongside the provider's configured limits. Each ring is colored by how close the provider is to its limit. A provider with no configured limit shows its raw usage without a ring. The tile is updated on each Overview load.
+
+### Reasoning effort
+
+The **Reasoning effort** control (`ReasoningEffort.tsx`) in the Providers tab lets you set the default reasoning-effort level for providers that support it (e.g. Anthropic extended thinking, OpenAI `o`-series). Three options are available: **Low**, **Medium**, and **High**. The selected effort is written to the agent's profile config and applies to all runs unless overridden by a per-run parameter. Providers that do not expose a reasoning-effort setting do not show the control.
 
 ### Provider detail
 

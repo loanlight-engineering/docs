@@ -1,0 +1,86 @@
+---
+title: Agent coverage
+description: The Octy standard — seven rules that make an agent debuggable — and a matrix showing where every LoanLight agent and portal feature stands.
+icon: shield-check
+---
+
+The **Agent Coverage** page at `/agent-coverage` documents the Octy standard: seven rules that define whether Octy can reliably debug an agent, and the current coverage status of every audit-pipeline agent, standalone agent, and portal feature against those rules.
+
+The page source lives in `src/app/(app)/agent-coverage/` (`AgentCoverage.tsx`, `content.ts`, `model.ts`). Labels, data-tool counts, and billing metadata are read live from `src/lib/agent-types.ts` and `src/lib/oz-tools-registry.ts`; the coverage matrix itself is declared in `content.ts` and tested by `content.test.ts`, which asserts that every tool ID in the matrix is registered and every catalogue agent has a row.
+
+## The Octy standard (N1–N7)
+
+Octy can debug an agent when it can anchor a report on a real audit run, find that run's trace, see the model calls inside it, and read the agent's results and the human corrections to them. The seven rules formalise those needs.
+
+| Rule | Short name | Requires |
+|---|---|---|
+| **N1** | Container | Every execution has a real `audit_runs` container and exactly one `agent_runs` row with the honest `trigger_source` (`epc`, `partner`, or `portal`) and its `agent_config`. |
+| **N2** | Run → container | The agent's own run row carries the container's id, set when the row is created, so failed and in-flight runs are linked too. |
+| **N3** | Trace found | The LangSmith root trace carries `metadata.auditRunId` set to that container, plus `agentType`, `lenderId`, the run's own id, and `triggerSource`. |
+| **N4** | LLM detail | Every model call is a child span of that root, through a wrapped client or a traceable span, and through the PII anonymizer. |
+| **N5** | Ledger | The `agent_runs` row moves `pending → processing → complete | failed` with its errors, `llm_config` pinned, and cost in `agent_runs.cost`. |
+| **N6** | Octy knows it | A catalogue entry in `src/lib/agent-types.ts`, a section in the base-prompt architecture text (`oz-skills/index.ts`), and data tools for its results and human corrections. |
+| **N7** | Reportable | A bug can be filed from the portal page that showed the result, from the audit tab, and from Octy's lookup and audit modal, anchored on the audit run. |
+
+## Coverage matrix
+
+The matrix lists every agent and portal feature as of 2026-10-29 (the `AS_OF` constant in `content.ts`). Agents that run on more than one entry point (e.g. audit vs. portal) get one row per entry point when the coverage differs.
+
+### Pipeline agents (run by the AgentOrchestrator, phase by phase)
+
+| Agent | N1 | N2 | N3 | N4 | N5 | N6 | N7 |
+|---|---|---|---|---|---|---|---|
+| Classify & split (`preAuditClassification`) | ✅ | ✅ | ✅ | ⚠️ Partial — model calls traced but not anonymized | ✅ | ✅ | ⚠️ Partial — reportable from Octy; no portal report control |
+| URLA extraction (`urlaExtraction`) | ✅ | ✅ | ✅ | ⚠️ Partial | ✅ | ✅ | ⚠️ Partial |
+| PII validation (`piiValidation`) | ✅ | ✅ | ✅ | ⚠️ Partial | ✅ | ✅ | ⚠️ Partial |
+| Property data (`propertyData`) | ✅ | ✅ | ✅ | ⚠️ Partial | ✅ | ✅ | ⚠️ Partial |
+| Credit — audit lane (`creditEvaluation`) | ✅ | ✅ `credit_runs.audit_run_id`, `origin = audit` | ✅ Root carries `metadata.auditRunId`; narrative has its own root on the same container | ✅ Judge and AI summary through wrapped client and anonymizer | ✅ | ✅ Five credit data tools + ledger | ✅ Report control on Credit Results tab; Octy lookup and audit modal |
+| Document health (`documentHealth`) | ✅ | ✅ | ✅ | ⚠️ Partial | ✅ | ✅ | ⚠️ Partial |
+| Property red flags (`redFlags`) | ✅ | ✅ | ✅ | N/A — deterministic rules, no model | ✅ | ✅ | ⚠️ Partial |
+
+### Standalone agents (own lane and worker)
+
+| Agent | N1 | N2 | N3 | N4 | N5 | N6 | N7 |
+|---|---|---|---|---|---|---|---|
+| Appraisal review (`appraisalEvaluation`) | ✅ | ✅ `appraisal_runs.audit_run_id` | ✅ | ⚠️ Partial — cross-document check suppressed from trace; final narrative untraced | ✅ | ✅ Nine appraisal data tools | ⚠️ Partial — reportable from Octy; portal offers finding verdicts only |
+| IRIS (inside appraisal, `appraisalIris`) | ⚠️ Partial — runs on appraisal's container but has no `agent_runs` row | ✅ Rows hang off `appraisal_runs`, which carries `audit_run_id` | ⚠️ Partial — root carries `appraisalRunId`, not `auditRunId`; Octy finds it through the audit's appraisal runs | ⚠️ Partial — reconcile narrative untraced | ⚠️ Partial — no ledger row; cost merges into appraisal's row | ✅ Eight IRIS data tools | ⚠️ Partial |
+| Bank statement income — audit lane (`bankStatementIncome`) | ✅ | ✅ `borrower_files.audit_run_id` stamped at insert | ✅ Job-level root with `metadata.auditRunId`, `borrowerFileId`, `triggerSource`, `executionId` | ✅ Graph and post-graph LLM steps through wrapped client and anonymizer | ✅ Steps pin under `bankStatementIncome`; summary spend on `agent_runs.cost` | ✅ Five BSI data tools + ledger | ✅ Report control on Bank Statements tab; Octy lookup and audit modal |
+| Business verification | ✅ `agent_runs` row exists | ❌ No result table linked to the container | ❌ Not traced | ❌ Planner model calls untraced | ⚠️ Partial — ledger row exists; pins and cost not recorded | ❌ Not in catalogue; no data tools | ⚠️ Partial — visible in Octy as a ledger row only |
+| Liabilities assessment (`liabilitiesAssessment`) | N/A — inactive (`agents.active = false`) | N/A | N/A | N/A | N/A | N/A — kept in catalogue so old rows label correctly | N/A |
+
+### Portal features (run from a portal page, outside an audit)
+
+| Feature | N1 | N2 | N3 | N4 | N5 | N6 | N7 |
+|---|---|---|---|---|---|---|---|
+| Credit — portal lane (`creditEvaluation`) | ✅ `PortalCreditService` creates a portal container and `creditEvaluation` ledger row at run creation | ✅ `credit_runs.audit_run_id` set at insert; `credit_runs.origin = portal` replaces the old NULL test | ✅ Root carries container, `triggerSource: portal`, `creditRunId` | ✅ Same wrapped client and narrative root as the audit path, through the anonymizer | ✅ `CreditProcessor` drives the ledger, pins `llm_config`, records spend on `agent_runs.cost` | ✅ Same catalogue entry and five credit data tools, scoped by container | ✅ Report control on `/credit-review/[runId]`; `/lookup` resolves a credit run id |
+| Bank statement income — portal lane (`bankStatementIncome`) | ✅ Portal container created at upload | ✅ `borrower_files.audit_run_id`; a pre-existing file gets a container created at job time | ✅ Job root carries the container, never null | ✅ Same job-level root and wrapped client as the audit path | ✅ | ✅ | ✅ |
+
+<Note>
+The N4 anonymization gap on pipeline agents (Classify & split, URLA, PII, Property data, Document health, Property red flags) is tracked in LOA-3372. Credit and Bank Statement Income on both entry points meet N4 fully as of LOA-3372. Fixing the remaining pipeline agents requires running each under the anonymized root that Credit and BSI now use.
+</Note>
+
+## Coverage statuses
+
+| Status | Meaning |
+|---|---|
+| Fully supported | The rule is met |
+| Partly supported | The rule is partially met; the gap is noted in the cell |
+| Not supported | The rule is not met |
+| Not applicable | The rule does not apply (e.g. a deterministic engine has no model calls) |
+
+## Related
+
+<Columns cols={2}>
+  <Card title="Oz tool API" href="/octy/oz-tool-api" icon="wrench">
+    The data tools that back N6 (Octy knows it) for each agent.
+  </Card>
+  <Card title="Agent platform overview" href="/agents/platform-overview" icon="bot">
+    The agent catalogue, the runs ledger, and how agents are planned.
+  </Card>
+  <Card title="Oz run lifecycle" href="/octy/oz-run-lifecycle" icon="workflow">
+    How N1–N7 translate into a live debugging session.
+  </Card>
+  <Card title="Bug Reports console" href="/octy/bug-reports-console" icon="bug">
+    Where N7 (reportable) surfaces for engineers.
+  </Card>
+</Columns>

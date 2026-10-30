@@ -138,6 +138,13 @@ exist.
     VALID` (still blocking new writes) without failing the deploy. Octy's classify-split config
     editor enforces the same 2000-character limit client-side
     (`CLASSIFY_SPLIT_CONFIG_LIMITS.ruleDescription`).
+
+    **`avm_report` rule (LOA-3413, migration `0195`).** Migration `0195` seeds a `classify_rule`
+    for `llama_classify_type = 'avm_report'` under the existing `APPRAISAL` split category. It
+    describes a Clear Capital ClearAVM report: a computer-generated value estimate identified by
+    a "ClearAVM Estimate" heading, AVM ID, Estimated Value, High/Medium/Low Confidence percentage,
+    and FSD. The INSERT uses `ON CONFLICT (split_category_id, llama_classify_type) DO NOTHING`
+    so a rule an operator already created or reworded is not overwritten by a deploy.
   </Accordion>
   <Accordion title="split_confusion_edges — low-confidence neighbors">
     Directed neighbor edges for low-confidence expansion. Columns: `source_category_id`,

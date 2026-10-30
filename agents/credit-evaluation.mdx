@@ -28,12 +28,13 @@ A standalone credit run is created from the portal via `POST /api/v1/portal/cred
 carries `inputS3Key` (required, path-traversal guarded), optional `loanId`, `ruleSetId`,
 `grossMonthlyIncome`, and `selectedRuleSources[]`.
 
-The controller inserts a `credit_runs` row with status `pending` and enqueues a job on the
-BullMQ queue `credit-extraction`. `CreditProcessor`
+`PortalCreditService` now creates a portal `audit_runs` container and one `creditEvaluation`
+`agent_runs` ledger row at run creation (LOA-3372). The controller then inserts a `credit_runs`
+row with status `pending`, `origin = 'portal'`, and `audit_run_id` set to the new container,
+and enqueues a job on the BullMQ queue `credit-extraction`. `CreditProcessor`
 (`modules/portal-credit/credit.processor.ts`, `@Processor("credit-extraction")`) claims the
 run with a compare-and-set (`pending → running` plus a `claimToken` and heartbeat), downloads
-the PDF from S3, and calls `LangGraphService.createCreditEvaluationGraph`. Solo runs have
-`audit_run_id IS NULL`.
+the PDF from S3, and calls `LangGraphService.createCreditEvaluationGraph`.
 </Tab>
 <Tab title="Audit-driven run (pipeline)">
 During an audit, `AuditAgentsExecutor`
@@ -468,11 +469,19 @@ catalog.
 One row per run. Carries `status` (`pending | running | completed | failed | reviewed`),
 `extractedData` (facts), `complianceResults`, `aiSummary`, `isScanned`, `coveragePercent`,
 `overallRisk`, `dtiRatio` (real), `grossMonthlyIncome` (real), `ruleSetId`/`ruleSetVersion`,
-`auditRunId`, `selectedRuleSources[]`, `layersUsed[]`, `auditedCreditDocumentId`, recovery
-columns (`lastHeartbeatAt`, `claimToken`, `recoveryAttempts`, `errorCategory`), `deletedAt`
-(soft delete), and `summary_reconciliation` (jsonb, nullable — see below). Two partial unique
-indexes — `(auditRunId, auditedCreditDocumentId)` and `(auditRunId)` where the document id is
-null — both gated on `deleted_at IS NULL`. `buildCreditRunsConflictArgs()` chooses the upsert target.
+`auditRunId`, `origin` (`portal | audit`, see below), `selectedRuleSources[]`, `layersUsed[]`,
+`auditedCreditDocumentId`, recovery columns (`lastHeartbeatAt`, `claimToken`,
+`recoveryAttempts`, `errorCategory`), `deletedAt` (soft delete), and `summary_reconciliation`
+(jsonb, nullable — see below). Two partial unique indexes —
+`(auditRunId, auditedCreditDocumentId)` and `(auditRunId)` where the document id is null —
+both gated on `deleted_at IS NULL`. `buildCreditRunsConflictArgs()` chooses the upsert target.
+
+**`origin` (LOA-3372, migration `0197`).** Identifies which lane wrote the row: `'portal'` or
+`'audit'`. The audit lane's writers omit this column and rely on the `DEFAULT 'audit'`; a DB
+trigger stamps `'portal'` on a row inserted without a container (`audit_run_id IS NULL`) during
+a rolling deploy. `CreditProcessor`'s recovery sweep and the orphan-sweep partial index now key
+on `origin = 'portal'` instead of `audit_run_id IS NULL`. Historic portal rows were backfilled
+to `'portal'` at migration time.
 
 **`summary_reconciliation` (LOA-3320).** After extraction, the agent extracts the credit report's
 own summary tables and compares them against totals computed from the extracted tradelines. Proven
@@ -722,13 +731,18 @@ programs (`PCF`, `SCF`) via `isEnabled: false` program overlays.
 
 `CreditProcessor` writes are scoped by a `claimToken` and keep a heartbeat
 (`CREDIT_HEARTBEAT_INTERVAL_MS`). A startup reconcile plus a periodic orphan sweep
-(`CREDIT_ORPHAN_SWEEP_INTERVAL_MS`) recover stale `pending`/`running` solo runs
-(`audit_run_id IS NULL AND deleted_at IS NULL`), re-enqueue them with `addBulk` (jobId
+(`CREDIT_ORPHAN_SWEEP_INTERVAL_MS`) recover stale `pending`/`running` portal runs
+(`origin = 'portal' AND deleted_at IS NULL`), re-enqueue them with `addBulk` (jobId
 `recover:<id>:<attempts>`) up to `CREDIT_MAX_RECOVERY_ATTEMPTS`, then terminally fail. There are
 two orphan legs: stale-heartbeat (older than `heartbeatCutoff`) and null-heartbeat
 (`startedAt < windowCutoff`). Runs that are still heartbeating past
 `CREDIT_SILENT_RUN_BUDGET_MS` are alert-only — termination is owned by the in-process
 `CREDIT_GRAPH_DEADLINE_MS` deadline, which sits strictly below the BullMQ lock.
+
+**Graceful shutdown (LOA-3412).** On SIGTERM, `shutdownGracefully` (`src/graceful-shutdown.ts`)
+stops the `SqsConsumerHost` from accepting new SQS messages, waits for `BullWorkerShutdown`
+to drain all in-flight BullMQ jobs (including credit runs), then calls `app.close()`. This
+ensures a credit run in progress is not killed mid-graph during a rolling deploy.
 
 <Tip>
 Tracing a credit finding that looks wrong? See
