@@ -4,7 +4,7 @@ description: Database tables that retain and index URLA assertion evidence colle
 icon: shield-check
 ---
 
-The evidence capture subsystem retains the URLA MISMO XML submitted with each loan and extracts structured "facts" from it — borrower declarations, asset references, and similar assertions. The tables listed here are the durable store for that evidence. The system is **in initial rollout**: as of late September 2026 it is active on `local` and `int` only, behind a per-lender allowlist and a feature flag.
+The evidence capture subsystem retains the URLA MISMO XML submitted with each loan and extracts structured "facts" from it — borrower declarations, asset references, and similar assertions. The tables listed here are the durable store for that evidence. Evidence capture is **in production rollout**: as of 2026-10-31, unconditional production evidence capture is enabled for all lenders (LOA-3160 EDU-30.2).
 
 <Note>
 These tables are in the `loanlight-api` AUS database (the shared Aurora cluster), not the integrations database. They are introduced by migrations `0116`–`0121` (LOA-2927). Migration `0122` (LOA-2928 / EDU-03) widens `evidence_entities` to support employer, employment, property, and gift subjects and adds `assertion_ordinal` to `evidence_facts`. Migration `0153` (LOA-3054 / EDU-03.5) adds `alias_kind = 'business'` and `entity_kind = 'business'` to `evidence_entities`, and adds the nullable `input_raw_sha256` column to `urla_extraction_results`.
@@ -12,13 +12,11 @@ These tables are in the `loanlight-api` AUS database (the shared Aurora cluster)
 
 ## Eligibility and rollout
 
-Evidence capture is guarded by two conditions (`src/audits/evidence/evidence-eligibility.ts`):
-
-1. `DEPLOYED_ENVIRONMENT` must be `local` or `int`.
-2. The lender's UUID must appear in the `EVIDENCE_SYNTHETIC_LENDER_ALLOWLIST` environment variable (comma-separated UUIDs).
-3. The per-lender feature flag `evidence_urla_capture` must be `true`.
-
-All three must be satisfied. This is an explicit allowlist — no lender runs evidence capture in production yet.
+Evidence capture is guarded by conditions checked in `src/audits/evidence/evidence-eligibility.ts`.
+As of LOA-3160 EDU-30.2 (2026-10-31), production evidence capture runs unconditionally for all
+lenders. Earlier rollout stages required `DEPLOYED_ENVIRONMENT` to be `local` or `int`, a per-lender
+UUID allowlist (`EVIDENCE_SYNTHETIC_LENDER_ALLOWLIST`), and the `evidence_urla_capture` feature
+flag. Those gates are no longer the controlling condition for URLA capture production runs.
 
 ## Tables
 
@@ -216,6 +214,11 @@ no decision rows are included (EDU-28 has no decision-row adopter). Adopter is E
 shared-types 5.1.0) — the property-data evidence snapshot. Holds the EDU-29 registry rows;
 adopter is EDU-29.
 
+**`observation-first-proof.v4`** (`OBSERVATION_FIRST_PROOF_V4_REGISTRY`, LOA-3160 / shared-types
+8.1.0) — the stated-DSCR observation snapshot for the LTV shadow (EDU-30). Adds three rows to
+v3: `dscr.stated_ratio`, `dscr.stated_rent`, and `dscr.stated_pitia` (adopter EDU-30, subject
+`loan`, `pdf` locator). Every v3 row is unchanged.
+
 The change ships as a **new snapshot, not an edit to v1**, following the EDU-01.5 precedent.
 Editing a published snapshot in place would allow one id to name two different schemas across
 package versions, silently re-parsing stored batches differently on upgrade. EDU-07 (LOA-2932)
@@ -262,6 +265,83 @@ The parser rejects a `no_disagreement` view whose `scope.displayLabel` contains 
 <Note>
 A published snapshot never changes. If a definition's semantics must evolve, add a new snapshot beside the existing ones. The EDU-08.5 parsers are in shared-types and carry no new registry snapshot — they extend the consumer-facing contract on top of the existing v1/v2 snapshots.
 </Note>
+
+## EDU-17 income rule-outcome record (LOA-2942, migrations 0208–0210)
+
+EDU-17 keeps each set of income rule outcomes as a versioned, append-only record in the existing
+evidence ledger rather than only in `income_rule_outcomes`. This makes a later reader able to tell
+whether an outcome can be replayed, whether a reviewer override still applies, and whether the
+outcome is up to date or a recalculation is pending. All EDU-17 paths sit behind the existing
+evidence gate; lenders without evidence enabled are unaffected.
+
+### evidence_observation_generations — EDU-17 column (migration 0208)
+
+Migration `0208` adds `rule_outcome_record` (jsonb, nullable) to `evidence_observation_generations`.
+The adopter CHECK is widened to include `'EDU-17'`, and the adopter-shape CHECK requires
+`rule_outcome_record IS NOT NULL` when and only when `adopter = 'EDU-17'`. The sealed result
+digest v1 excludes `rule_outcome_record`.
+
+The record holds the exact inputs consumed, the rule-set version and content hash, the evaluator
+build and image pins, and the policy version.
+
+### income_runs — current_published_generation (migration 0209)
+
+`income_runs` gains `current_published_generation` (uuid, nullable). Only `completeRun` writes it;
+NULL on domain-only completions. A NULL read fails closed. It binds a run to the generation it
+published so readers can tell whether a stored generation is current.
+
+### income_run_rule_overrides — reviewed_generation (migration 0209)
+
+`income_run_rule_overrides` gains `reviewed_generation` (uuid, nullable). A reviewer override
+records the generation it was made against. The rule-outcome reader compares this binding to the
+current generation to determine whether the override is stale.
+
+### evidence_recompute_enqueues — delivery state (migration 0210)
+
+Migration `0210` adds delivery state columns to `evidence_recompute_enqueues`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `active_delivery_token` | `text` | Token identifying the active delivery attempt |
+| `delivery_ordinal` | `bigint` | CHECK: `>= 1`; monotonically increasing per scope |
+| `predecessor_attempt_id` | `text` | The attempt this delivery supersedes |
+| `delivery_state` | `text` | CHECK: `'intent'` \| `'uncertain'` \| `'confirmed'` |
+| `state_version` | `bigint` | CHECK: `>= 0`; default 0. Optimistic lock for state transitions |
+
+All delivery columns are present or all absent (CHECK). A database trigger enforces allowed state
+transitions and prevents arbitrary UPDATEs to these columns.
+
+### evidence_recompute_attempts — outcome kind (migration 0210)
+
+Migration `0210` also adds outcome kind columns to `evidence_recompute_attempts`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `kind` | `text` | Closed outcome kind; see below |
+| `delivery_token` | `text` | The delivery token this attempt belongs to |
+| `reason` | `text` | Machine-readable reason code |
+| `failure_class` | `text` | Classification of failure |
+| `failed_step` | `text` | Which step failed (required for `completed_ledger_failed`) |
+| `diagnostic` | `text` | Human-readable diagnostic (passes the error-text boundary) |
+
+The `result` column CHECK is widened to add `'not_attempted'`. The `outcome_check` CHECK constraint
+enforces valid (kind, result, retryable) triples:
+
+| `kind` | `result` | `retryable` | Meaning |
+|---|---|---|---|
+| `delivery_failure` | `failed` | true/false | Delivery infrastructure failed |
+| `computation_failure` | `failed` | false | The income computation itself failed |
+| `retryable_rejection` | `rejected` | true | Rejected but retriable |
+| `terminal_refusal` | `rejected` | false | Permanently rejected |
+| `job_identity` | `rejected` | false | Rejected due to job identity mismatch |
+| `blocked` | `blocked` | false | Blocked by a precondition |
+| `succeeded` | `succeeded` | false | Completed successfully |
+| `disabled` | `not_attempted` | false | Gate was off; no charge to retry budget |
+| `completed_ledger_failed` | `succeeded` | false | Committed completion; ledger drive failed |
+
+A unique partial index `evidence_recompute_attempts_delivery_unique` on
+`(lender_id, loan_id, scope_key, delivery_token) WHERE delivery_token IS NOT NULL` ensures
+one attempt record per delivery token per scope.
 
 ## EDU-27 asset evidence tables (LOA-2998, migrations 0184–0186)
 

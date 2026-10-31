@@ -95,11 +95,11 @@ config of `false` is disabled; `true` or an object is enabled. Thresholds come f
 |---|---|---|
 | `INELIGIBLE_PROPERTY_TYPE` | CRITICAL | property type in the program matrix `ineligible_property_types`, or lot acreage > `max_acreage` |
 | `ZESTIMATE_MISMATCH` | HIGH | list price vs zestimate percent diff > `thresholds.zestimate_variance_percent` (default 10) |
-| `NOT_LISTED_FOR_SALE` | HIGH | PURCHASE and subject is not listed for sale |
-| `LISTED_FOR_SALE` | HIGH | REFINANCE and subject is listed for sale |
+| `NOT_LISTED_FOR_SALE` | HIGH | PURCHASE and subject is not listed for sale; also fires when the subject is listed for rent only (LOA-3129) |
+| `LISTED_FOR_SALE` | HIGH | REFINANCE and `isListedForSale` is true; no longer fires when subject is for-rent only (LOA-3129) |
 | `HOME_VALUE_CHANGE` | MEDIUM | PURCHASE only: list price vs Zillow last-sold price (within 24 months) exceeds `thresholds.home_value_change.percent` in either direction (LOA-2090); enabled under `rules.loan_purpose.PURCHASE` in lender YAML |
 | `RENTAL_VALUE_CHANGE` | MEDIUM | rental price-history change exceeds the tier |
-| `ACTIVE_FORECLOSURE` | CRITICAL | preforeclosure records within last 3 years (appends upcoming auction within ±90 days) |
+|| `ACTIVE_FORECLOSURE` | CRITICAL | Missing when the subject parcel is not verified or ATTOM preforeclosure coverage is false; Failed when any preforeclosure record is recent (within 3 years); Passed otherwise. The finding message names the lender, a positive opening bid, and calendar dates (LOA-3319). |
 || `ZONING_MISMATCH` | HIGH | `lot.zoning` is not residential |
 || `RAPID_RESALE` | HIGH | two most recent ownership transfers within `months` (default 6); financing recordings (mortgages, stand-alone finance, quit-claims with no price/seller) are excluded |
 || `LLC_TO_LLC_SALE` | HIGH | most recent non-future, dated sale within the last **365 days** (UTC, inclusive, `LLC_TO_LLC_SALE_MAX_SALE_AGE_DAYS`) whose buyer and seller both match an entity pattern. Undated and future-dated rows are skipped before selecting the most recent sale; a history with no parseable date produces no finding (LOA-2911). The window and the constant are interpolated into the rules-catalog description so the portal cannot advertise a looser check than the engine runs. |
@@ -118,7 +118,7 @@ Gated on `occupancy === "PRIMARY_RESIDENCE"`.
 
 | Rule | Severity | Trigger |
 |---|---|---|
-| `LISTED_FOR_RENT` | HIGH | listing status includes RENT / `FOR_RENT` |
+|| `LISTED_FOR_RENT` | HIGH | `isListedForRent === true` (LOA-3129: now keyed on the dedicated rental flag, not a status substring) |
 | `RENTAL_HISTORY` | MEDIUM | price history has rental events |
 | `DIFFERENT_STATE_SAME_EMPLOYER` | MEDIUM | subject state ≠ current-address state, and an employer is in the current-address state |
 </Tab>
@@ -130,7 +130,7 @@ Gated on `occupancy === "INVESTMENT"`.
 |---|---|---|
 || `VALUE_EXCEEDS_PRIMARY` | MEDIUM | investment subject market value exceeds borrower primary market value; subject uses Zestimate → ATTOM AVM → list price (in priority order); primary uses Zestimate → ATTOM AVM only (list price excluded for the primary). Skips when no market value is resolvable on either side. Tax assessments are never used — they trail the market by years (LOA-3343). |
 | `BORROWER_RENTING_PRIMARY` | MEDIUM / HIGH | A: current address housing expense is RENT. B: OWN but `ownerOccupied === false` and no REO entry at current address |
-|| `RENT_VS_1003_MISMATCH` | MEDIUM | Zillow rent zestimate vs. 1003 `estimatedGrossMonthlyRentAmount` percent diff > 10; net rent (`estimatedNetMonthlyRentAmount`) is never used as the comparison basis and a gross value ≤ 0 (e.g. a "rent not used to qualify" PITIA negative) causes the rule to skip. **Declines when a multi-unit subject's listing is unit-scoped** (`numberOfUnits ≥ 2` and `listing.dataScope === 'unit'`): comparing a per-unit Zillow zestimate against the whole-property gross on the 1003 is not a meaningful comparison. The listing is marked `unit`-scoped by `resolveListingScope` when the loan address names no unit but the HasData scrape resolved one. Single-unit loans get the rule unchanged whatever the listing scope. When the rule fires on a multi-unit listing that has no declared scope (and so cannot be declined), the message appends a basis sentence noting the ambiguity (LOA-2793). |
+|| `RENT_VS_1003_MISMATCH` | MEDIUM | Asking rent (from `asking_rent` when available, else Zillow Rent Zestimate) vs. 1003 `estimatedGrossMonthlyRentAmount` percent diff > 10 (LOA-3129: the message and field path name the basis — "Asking rent" vs "Rent estimate"); net rent (`estimatedNetMonthlyRentAmount`) is never used as the comparison basis and a gross value ≤ 0 (e.g. a "rent not used to qualify" PITIA negative) causes the rule to skip. **Declines when a multi-unit subject's listing is unit-scoped** (`numberOfUnits ≥ 2` and `listing.dataScope === 'unit'`): comparing a per-unit Zillow zestimate against the whole-property gross on the 1003 is not a meaningful comparison. The listing is marked `unit`-scoped by `resolveListingScope` when the loan address names no unit but the HasData scrape resolved one. Single-unit loans get the rule unchanged whatever the listing scope. When the rule fires on a multi-unit listing that has no declared scope (and so cannot be declined), the message appends a basis sentence noting the ambiguity (LOA-2793). |
 </Tab>
 
 <Tab title="Second home (enabled: false)">

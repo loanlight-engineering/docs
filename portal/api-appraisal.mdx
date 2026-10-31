@@ -135,6 +135,41 @@ The BFF forwards to `GET /api/v1/portal/collateral-review/appraisals/:runId`. Th
 
 Order statuses: `pending`, `awaiting_callback`, `succeeded`, `failed`, `no_hit`, `declined`, `abandoned`.
 
+**Appraisal, evaluation, and inspection ordering via Clear Capital (LOA-3411, LOA-3415, LOA-3465).**
+When the HELOC decision is `order_appraisal`, `order_evaluation`, or `order_inspection`, the
+collateral review module places the order directly with Clear Capital. The `collateral_review_orders`
+table is extended for these order types:
+
+| New column | Notes |
+|---|---|
+| `product_code` | Clear Capital product code; required for valuation orders. For `pci` (inspection): `PCI_EXTERIOR`; for `appraisal`: `1004`, `1025`, `1073`, or `2090`; for `evaluation`: `EVALUATION_EXTERIOR`. NULL on AVM and CDA rows. |
+| `turn_time_hours` | Requested turn-time tier (integer, CHECK > 0). NULL on AVM and CDA rows. |
+| `vendor_status` | Latest Clear Capital status string. |
+| `vendor_status_at` | Timestamp of the latest vendor status. |
+| `quote_warning` | Non-null when Clear Capital returned a quote-level warning. |
+| `order_request` | Full Clear Capital order request payload (jsonb). Required alongside `product_code` for valuation orders. |
+| `send_started_at` | When the order was first dispatched to Clear Capital. |
+| `report_pdf_sha256` | SHA-256 hex of the delivered report PDF. Required on `succeeded` valuation orders. |
+| `report_xml_s3_key` | S3 key of the MISMO XML for appraisal orders. Required on `succeeded` appraisal orders. |
+| `report_xml_sha256` | SHA-256 hex of the XML. Required alongside `report_xml_s3_key`. |
+| `valuation_value` | Concluded value for `evaluation` orders; always NULL for `pci` (inspection concludes no value). |
+
+A new unique partial index prevents two active valuation orders on the same loan (for `pci`,
+`appraisal`, and `evaluation` types not in `abandoned`/`no_hit`/`declined` or where `send_started_at`
+is set). A `succeeded` valuation order must satisfy a report-presence CHECK.
+
+**`collateral_review_order_events` table (LOA-3415, migration 0199).** One row per Clear Capital
+timeline event received for a valuation order. Events are deduplicated on SNS `MessageId` (unique
+index). Key columns: `order_id` (FK → `collateral_review_orders`), `message_id` (unique),
+`event_type` (CHECK: `OrderCompleted` \| `OrderDeclined` \| `OrderCanceled` \| `OrderAccepted` \|
+`OrderAssigned` \| `InspectionScheduled` \| `InspectionCompleted` \| `HoldAdded` \| `HoldRemoved` \|
+`MessageAdded` \| `EstimatedCompletionDateChanged` \| `RevisionRequestDenied` \| `UnderReview`),
+`clear_capital_order_id`, `vendor_timestamp`, `details` (jsonb).
+
+**Appraisal Order section page (LOA-3465).** The portal audit detail and results pages gain an
+**Appraisal Order** section (`appraisal-order/page.tsx`) that shows the current Clear Capital order
+status for the loan's valuation order, including inspection progress.
+
 **CDA order fields (LOA-2581).** The `CollateralReviewPortalCda` shape includes:
 
 | Field | Visibility | Meaning |

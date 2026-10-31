@@ -12,8 +12,8 @@ TypeScript contracts, reusable CDK constructs, and LocalStack dev tooling.
 
 <Note>
 The repo now tracks **seven packages** at their current versions:
-`shared-types@7.0.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
-`shared-auth@0.3.0`, `shared-api-auth@0.3.0`,
+`shared-types@8.1.0`, `shared-cdk@1.15.0`, `shared-local@0.1.0`,
+`shared-auth@0.6.0`, `shared-api-auth@0.3.0`,
 `shared-lambda-auth@0.2.0`, and `aus-db` (LOA-1961 — see below). (Older snapshots of this doc warned that only three
 packages existed on disk and that types like `RelatedTrace` were published-only;
 that is no longer true — `RelatedTrace` lives in `shared-types/src/octy.types.ts`,
@@ -28,10 +28,10 @@ looks missing.
 
 | Package | Role | Version (repo HEAD) |
 |---|---|---|
-| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, evidence contracts, revision contracts, AVM eFolder delivery events, roles, declaration evidence, observation registries) | 7.0.0 |
+| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, evidence contracts, revision contracts, AVM eFolder delivery events, roles, declaration evidence, observation registries) | 8.1.0 |
 | `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 1.18.0 |
 | `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | 0.1.0 |
-| `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.3.0 |
+| `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.6.0 |
 | `@loanlight-engineering/shared-api-auth` | NestJS WorkOS auth module (incl. WorkOS Connect M2M and user-lifecycle methods) | 0.3.0 |
 | `@loanlight-engineering/shared-lambda-auth` | API Gateway authorizer handler | 0.2.0 |
 | `@loanlight-engineering/aus-db` | AUS database migration chain + schema copy; locator API for consumers (LOA-1961) | see below |
@@ -116,7 +116,7 @@ consume. The audit pipeline emits `AuditRunResults`, `DataConsistencyResponse`,
 `DocumentHealthResponse`, `PropertyDataResult` / `RedFlagResult`,
 `UrlaRulesEngineResult`, and more; the portals render them into tables.
 
-`shared-types@7.0.0` exports these modules (all re-exported from `src/index.ts`):
+`shared-types@8.1.0` exports these modules (all re-exported from `src/index.ts`):
 `field-value.types`, `table.types`, `audit-response.types`, `credit.types`,
 `common.types`, `api-response.types`, `property-data.types`,
 `urla-completeness.types`, `octy.types`, `portal-audits.types`, `role.types`,
@@ -334,6 +334,30 @@ The audit response/table types (`api-response.types`, `common.types`,
 `urla-completeness.types`) are the original contract surface; the credit, EPC-event,
 octy, role, portal-audits, access-policy, and field-value modules were layered on
 since.
+
+## shared-auth: WorkOS AuthKit wrapper
+
+`shared-auth` wraps `@workos-inc/authkit-nextjs` for Next.js apps. Key change in 0.6.0 (LOA-1033):
+
+**Failed sign-in callback redirects.** `handleAuthCallback` now passes `onError: callbackErrorRedirect`
+to AuthKit's `handleAuth`. A failed callback redirects to `/login?error=<code>` instead of rendering
+a raw 500 JSON body. `LoginErrorCode` is exported so each consuming app can type its `/login` copy
+against these codes:
+
+| Callback error | Redirect code |
+|---|---|
+| Expired PKCE cookie (10-minute `Max-Age`) | `sign_in_expired` |
+| `OauthException` with `error: "invalid_grant"` | `sign_in_expired` |
+| Missing code/state, OAuth state mismatch, session save failure | `sign_in_failed` |
+
+When `NEXT_PUBLIC_APP_URL` is unset, the redirect is built from the request's origin.
+
+<Note>
+`octy` pins `shared-auth@0.1.0` exactly and is untouched until it upgrades. The portal (in
+`loanlight-api/packages/app`) will consume 0.6.0 via LOA-3479, which also adds the `/login` page
+copy for both error codes. Running 0.6.0 without updated `/login` copy shows the plain login page
+for the new error codes.
+</Note>
 
 ## aus-db: AUS database migration chain and schema
 

@@ -55,6 +55,15 @@ type upstream (LOA-751), so retained primary residences and second homes never b
 `//SUBJECT_PROPERTY/ADDRESS` and the borrower current address from the borrower party's current
 residence. `monthlyRent` is extracted only when the borrower address has a unit. The LLM does not
 extract Section 3 REO addresses.
+
+**Multi-borrower support (LOA-3123).** `transformToPropertyAddresses` reads **every borrower's**
+address and Section 3 REO entries, not just Borrower 1's. Each borrower's current address becomes
+a separate `borrowerResidences` entry (attributed by 1-based borrower index). Borrowers who share
+the same address and unit are collapsed into one entry; borrowers in different units of the same
+building stay separate. On a refinance, a co-borrower's address in the subject's building is
+treated as the subject property. Each residence is gated on its **own** borrower's own-or-rent
+answer — a blank answer is treated as unknown, never borrowed from Borrower 1. Investment Section 3
+entries from all borrowers feed the REO channel, deduplicated across borrowers.
 </Step>
 
 <Step title="validateAddresses">
@@ -204,6 +213,14 @@ names a unit, the scrape result must resolve to the **same** unit (normalized so
 closed, so ATTOM populates the property profile instead of silently substituting the wrong unit's
 data. Unit-less (single-family) subjects are unchanged. Additionally, a `FOR_RENT` listing no
 longer populates `currentListPrice` with its monthly rent; rent routes through `rentZestimate` only.
+
+**Rental vs sale decoupling (LOA-3129).** `PropertyDetails`, `ConsolidatedProperty.listing`, and
+`property_data_results` now carry `isListedForRent` (bool) and `askingRent` (monthly rent amount)
+as separate fields from `isListedForSale`. A for-rent listing sets `isListedForRent = true`,
+`isListedForSale = false`, `currentListPrice = null`, and puts the monthly rent in `askingRent`.
+An empty status stays unknown for both flags. The same treatment applies to Redfin for-rent pages.
+`askingRent` is stored in `property_data_results.asking_rent` (migration `0200`), a new column
+distinct from `monthly_rent` (which records what the borrower pays at their current address).
 </Accordion>
 
 <Accordion title="SerpApi / Zillow URL finder (ZillowUrlFinderService)">
@@ -296,6 +313,10 @@ ownership (owners, absentee, vesting type, trust indicator, owner-occupied resol
 title, liens (foreclosure + preforeclosure), sales history, assessment history, tax history, and
 AVM valuation.
 
+**ATTOM owner type — explicit individual (LOA-2689).** `property_data_results.owner_type` previously stored `"corporate"` or `null`, making an owner ATTOM identified as an individual indistinguishable from one ATTOM did not comment on. The consolidator now records the provider's exact `Y` or `N` corporate indicator on each owner entry (`corporateIndicator`). The stored `owner_type` resolves as `"corporate"` for Y, **`"individual"`** for N, and `null` when ATTOM is silent. The consolidated `corporate` boolean used by red-flag rules is unchanged.
+
+**ATTOM preforeclosure fix (LOA-3319).** The preforeclosure request was previously sent to a dead path keyed by address. It now calls `GET /propertyapi/v1.0.0/preforeclosuredetails?attomid=<id>` — id taken from the expanded profile or the basic profile — as a sequential second wave after the address batch. With no recognised id, no request is made and coverage is false. A 200 response is coverage only when `property.PreforeclosureDetails` carries object `Default` and `Auction` arrays. The consolidator reads `property.PreforeclosureDetails`, lender from `lenderNameFullStandardized`, opening bid from `recordedAuctionOpeningBid`, and drops 0 and negative amounts before building lien entries.
+
 **ATTOM trust indicator and entity-owner resolution (LOA-2737).** Owner names and the trust
 indicator now resolve from one ordered list of owner blocks so the name source and indicator source
 cannot drift apart. The trust indicator sits on the owner _entry_ at
@@ -348,13 +369,18 @@ source; `null` for Zillow Zestimate (no range supplied) and for any source that 
 bounds. `listing_sources` (jsonb, migration `0178`) stores the `ListingSources` map from
 `mergeCandidates` — each key is a listing group name and the value is the source that won it
 (e.g. `{"currentListing":"redfin","estimate":"zillow"}`). `null` on rows written before
-LOA-3272.
+LOA-3272. `is_listed_for_rent` (boolean, default `false`, migration `0200`) and `asking_rent`
+(numeric, nullable, migration `0200`) record the rental listing status and monthly asking rent
+for each property row (LOA-3129); `asking_rent` is distinct from `monthly_rent`, which records
+what the borrower pays at their current address.
 </ResponseField>
 
 <Warning>
-The borrower's current home is stored with **`property_type: "current_home"`**, not `"borrower"`.
-The subject row is `"subject"` (`source_order: 0`); REO rows are `"investment"`. The
-`current_home` row is persisted whenever borrower data was fetched, regardless of loan purpose.
+With multi-borrower support (LOA-3123) a joint application now produces **one `current_home` row per
+borrower residence** rather than one row for Borrower 1 only. A co-borrower's row is labelled
+`Current Home (Borrower 2)` in the portal. REO rows are `"investment"`. The subject row is
+`"subject"` (`source_order: 0`); rows are persisted whenever borrower data was fetched, regardless
+of loan purpose.
 </Warning>
 
 ## `PropertyDataResponse` — `locationType`

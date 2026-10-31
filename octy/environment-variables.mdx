@@ -103,12 +103,27 @@ A separate base URL and key from the loanlight-api pair — integrations is a di
 
 ## Oz → Octy docs-refresh and Slack
 
-| Variable | Purpose |
-|---|---|
-| `OZ_TO_OCTY_API_KEY` | Static shared secret the nightly `octy-docs-refresh` skill sends as `Authorization: Bearer …` to `POST /api/oz/docs-refresh`. From Secrets Manager (`Octy/OzToOctyApiKey`). |
-| `SLACK_BOT_TOKEN` | Bot token (`chat:write`) for the best-effort Doc Refreshes Slack relay. Unset disables the relay; the DB record is still saved. From Secrets Manager (`Octy/SlackBotToken`). |
+|| Variable | Purpose |
+||---|---|
+|| `OZ_TO_OCTY_API_KEY` | Static shared secret the nightly `octy-docs-refresh` skill sends as `Authorization: Bearer …` to `POST /api/oz/docs-refresh`. From Secrets Manager (`Octy/OzToOctyApiKey`). |
+|| `SLACK_BOT_TOKEN` | Bot token (`chat:write`) for the best-effort Doc Refreshes Slack relay. Unset disables the relay; the DB record is still saved. From Secrets Manager (`Octy/SlackBotToken`). |
 
 See [Doc Refreshes](/octy/doc-refreshes).
+
+## Datadog webhook and MCP
+
+|| Variable | Purpose |
+||---|---|
+|| `DATADOG_WEBHOOK_SECRET` | Shared secret for the Datadog webhook integration. From Secrets Manager (`Octy/DatadogWebhookSecret`). Wired to production in the Octy CDK stack (`datadogWebhookSecretName`). |
+|| `OCTY_MCP_CONFIRM_SECRET` | Shared secret for the Octy MCP confirmation endpoint. From Secrets Manager (`Octy/McpConfirmSecret`). Wired to production (`octyMcpConfirmSecretName`). |
+
+## OctyLink dashboard
+
+|| Variable | Purpose |
+||---|---|
+|| `NEXT_PUBLIC_OCTYLINK_DASHBOARD_URL` | Public URL of the OctyLink dashboard (e.g. `https://octylink-dash.loanlight.com`). Injected from `octylinkPublicUrl` in the CDK context. Distinct from `NEXT_PUBLIC_OCTY_WEBHOOK_BASE_URL` and from the OctyLink API URL. |
+
+See [OctyLink](/octy/octylink) for the OctyLink integration context.
 
 ## DB Studio (LOA-1944)
 

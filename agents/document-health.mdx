@@ -306,6 +306,15 @@ wired). `FUTURE_CONDITIONS` (`if_flagged`, `if_amended`, `if_in_flood_zone`) are
 skipped.
 </Warning>
 
+<Note>
+**DSCR worksheet display name (LOA-3434).** The `dscr_worksheet` document type's display name is
+now **"DSCR Worksheet"** (was "DSCR Worksheet (5-10 Unit)"). The type key, category, and
+classifications are unchanged; the document is still required wherever it was. The new name
+applies across Document Health, the Encompass results embed, portal results, and the fallback
+classifier's allow-list at read time, so audits run before the change show the new name with no
+data re-run. No stored `documentName` uses the old display name.
+</Note>
+
 **LOA-3358 — Luxury DSCR rental-agreement condition.** In the Luxury lender YAML
 (`packages/api/src/langgraph/lenders/luxury.yaml`), the `rental_agreement` document requirement
 changed from `required` to `if_refinance` for the `dscr_investor_cashflow` and

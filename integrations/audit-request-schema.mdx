@@ -68,7 +68,18 @@ assembler will silently drop the field for SQS-delivered messages.
   fields (shared schema). Two recent additions:
 
   - `incomeType` (from `CX.LOANLIGHT.INCOMETYPE`) and `noteRate` (note rate, percent)—both surfaced on the audit PDF's Loan Details card.
-  - `avmBorrowerAccepted` (string, optional) — the borrower's AVM acceptance response, sourced from Encompass custom field `CX.LOANLIGHT.AVMACCEPTED`. Recognized values (case-insensitive): `Y`/`Yes`/`True` → accepted; `N`/`No`/`False` → declined. Any other value, or a missing field, is treated as unknown. Used by the HELOC valuation-ordering decision to determine whether an AVM that passed quality thresholds satisfies the loan (LOA-3414). Requires `CX.LOANLIGHT.AVMACCEPTED` to be added to the Partner Connect product's field list before it reaches LoanLight.
+  - `avmBorrowerAccepted` (string, optional) — the borrower's AVM acceptance answer. Resolved from
+    two optional Encompass fields (LOA-3414):
+    - `CX.LOANLIGHT.AVMACCEPTED` — asks "Does the borrower want to use the AVM?" `Y`/`Yes`/`True`
+      → accepted; `N`/`No`/`False` → declined.
+    - `CX.LOANLIGHT.STATEDVALUESELECTED` — asks the inverse question ("Did the borrower keep their
+      own stated value?"). `Y`/`Yes`/`True` → declined (inverted); `N`/`No`/`False` → accepted
+      (inverted). Deephaven maps to this field.
+    Resolution: if only one field carries a real answer, it is used. If both carry real answers and
+    agree, `AVMACCEPTED` value is used. If both carry real answers and disagree, no answer is
+    sent. A blank or unrecognized value on either field is not a real answer. `loanlight-api` reads
+    the resolved value as `Y` = accepted. Each field must be registered in the Partner Connect
+    product's field list before it reaches LoanLight. Only one field should be mapped per lender.
   - `transactionId` (string, optional) — the EPC transaction id (`transaction.id`). Added by LOA-2838; used by loanlight-api to correlate the audit run back to the Encompass EPC transaction.
   - `encompassLoanId` (string, optional) — the Encompass loan GUID, parsed from the EPC entity ref (`entityRef.entityId`). Added by LOA-2838. Stored on `loans.encompass_loan_id`. The CDA eFolder delivery producer binds this identifier to each `collateral_review_orders` row at claim time.
 
