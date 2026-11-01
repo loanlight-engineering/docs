@@ -150,7 +150,7 @@ Two tables store authoring state for the eligibility system:
 
 **`eligibility_rule_sets` / `eligibility_rules`** — the rule authoring model, mirroring the credit/appraisal shape (`rule_sets` + `rules` with `code`, `category`, `thresholds`, `evaluateFnKey`, `operator`, `fieldPath`, `condition`, and optional `loanProgramId`). Key differences from credit/appraisal: no `severity` column on the rule (severity is purely a function of `outcome`, computed by `eligibilitySeverity()`). Unique partial index on `(rule_set_id, name) WHERE is_active = true` prevents duplicate active names per lender.
 
-**`eligibility_configs`** — a per-lender JSON config (one row per lender, unique) that carries the full eligibility engine input: `grids` (per-program LTV matrix rows keyed by `rowId`), `geoBars` (geographic bar rules), `ltvModifiers` (condo cap, cash-out cap, multi-unit/FL-condo/declining-market reductions), `programClassifier` (doc-type and name-regex program matching), and `ficoStrategy` (per-program FICO selection strategy). Loaded and Zod-validated on every read by `EligibilityConfigLoaderService`.
+**`eligibility_configs`** — a per-lender JSON config (one row per lender, unique) that carries the full eligibility engine input: `grids` (per-program LTV matrix rows keyed by `rowId`), `geoBars` (geographic bar rules), `ltvModifiers` (condo/cash-out/multi-unit/FL-condo/declining-market reductions and caps; LOA-3160 adds purpose-aware caps and explicit property bars — see below), `programClassifier` (doc-type and name-regex program matching), and `ficoStrategy` (per-program FICO selection strategy). Loaded and Zod-validated on every read by `EligibilityConfigLoaderService`.
 
 Migration `0183_eligibility_audit_trail` (LOA-3160 / EDU-30.2) adds three nullable columns to record which staged bundle produced this config row: `bundle_id` (text) is the bundle's stable ID, `bundle_version` (integer) is its version at apply time, and `content_hash` (text) is the SHA-256 of the bundle content. These three fields together form the **rules identity** referenced by `eligibility_results.rules_identity` (see [eligibility results](/data-model/result-tables#eligibility-results)). Rows written before this migration leave all three `NULL`; the derive-on-read fallback reads "rules version not recorded" for those rows.
 
@@ -163,6 +163,19 @@ Grid row band axes (LOA-1778 adds three new columns alongside the existing `fico
 | `creditEventTrack` | `"STANDARD"` \| `"RECENT_EVENT"` | Closed enum; `normalizeCreditEventTrack` maps to exactly these tokens. |
 
 Omitting an axis makes the row a wildcard for that dimension. Using `dscrNoRatio: true` alongside numeric DSCR bounds is a validation error at the persistence boundary.
+
+#### ltvModifiers additions (LOA-3160)
+
+Four optional fields added to `ltvModifiers` in LOA-3160 correct First Colony and Luxury eligibility to the lender guidelines (LTV R1):
+
+| Field | Meaning |
+|---|---|
+| `requirePropertyDiscriminators` | `boolean`. When `true`, the engine requires rural, non-warrantable-condo, and condotel status to be resolved before composing overlays. An unresolved discriminator emits NEEDS_INFO rather than grading with a gap. |
+| `condoCapByPurpose` | `Record<"PURCHASE"\|"RATE_TERM"\|"CASH_OUT", Record<program, maxLtv%>>`. Per-purpose condo cap. Takes precedence over the scalar `condoCap` for the declared purpose; absent purposes fall through to `condoCap`. |
+| `multiUnitCapByPurpose` | `Record<"PURCHASE"\|"RATE_TERM"\|"CASH_OUT", Record<program, maxLtv%>>`. Per-purpose multi-unit LTV cap. Absent purposes retain the existing per-program scalar cap. |
+| `propertyIneligibility` | `{ rural?: string[], nonWarrantableCondo?: string[], condotel?: string[] }`. Explicit per-program property bars. Program codes listed here receive an outright INELIGIBLE finding for that property type (a bar, not an LTV reduction). Omitting a key preserves legacy grading. |
+
+**Geo-bar evaluation (LOA-3160).** `evaluateGeoBars` now collects all NEEDS_INFO findings rather than stopping at the first; a definite FAIL still short-circuits. Rural status in overlay resolution is now tri-state: `"Rural"` → `true`; `"Urban"`/`"Suburban"` → `false`; absent or unrecognized location → `undefined` (unknown). The `rural_property` and `property_type` axes are emitted from partial resolver results so the engine grades to NEEDS_INFO for unknown property discriminators rather than deferring the entire grade.
 
 <Note>
 `programClassifier` and `ficoStrategy` are schema-valid and persisted but **not yet consumed at runtime** (forward-staged, LOA-1763 §B4). `determineProgram` still uses in-code doc-type/name regexes; `selectRepresentativeFico` still uses the in-code `FIRSTCOLONY_FICO_STRATEGY`. Do not treat them as live overrides until a later ticket wires the processor plumbing.

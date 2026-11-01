@@ -172,7 +172,7 @@ Before an emission is appended, `evidence-append-gates.ts` validates four policy
 
 | Gate | What it checks |
 |---|---|
-| `producer_identity` | The emission's producer id and version must exactly match the pinned `URLA_DECLARATIONS_V1_REGISTRY` definition |
+| `producer_identity` | The emission's producer id and version must exactly match the pinned `URLA_DECLARATIONS_V5_REGISTRY_ID` definition |
 | `claim_basis` | Every assertion must carry `claimBasis = 'asserted'` |
 | `currency_state` | Amount-type values must carry `currency.state = 'unknown'` |
 | `coverage_enumeration` | The coverage manifest must enumerate exactly the registry-pinned codes — no missing, no extras |
@@ -184,6 +184,8 @@ A gate failure causes a `recordPublicationRejection` on the capture status and s
 The append is inside a database transaction that first locks the `audit_runs` row. A second concurrent attempt for the same `(audit_run_id, source_slot)` hits the `evidence_audit_source_pins` primary-key unique constraint and is detected as a `ConcurrentCaptureWinnerError` — the earlier commit won and the second attempt is a no-op.
 
 The `emission_id` is deterministic (`uuidv5(auditRunId:sourceId, EVIDENCE_EMISSION_ID_NAMESPACE)`), so a crashed-and-retried append re-derives the same id and the `evidence_emission_batches_emission_identity_unique` constraint deduplicates it.
+
+**LOA-3155 — promoted declaration snapshot (EDU-01.7c).** `PRODUCTION_REGISTRY_RESOLUTION` now exposes a `syntheticProducerSnapshotId` field set to `URLA_DECLARATIONS_SV_PROMOTION_REGISTRY_ID` (the v6 promotion registry, `urla-declarations.v6`). In non-prod environments the orchestration service can replay a committed URLA emission against either the production identity (`URLA_DECLARATIONS_V5_REGISTRY_ID`) or the synthetic identity (v6) to validate that the committed batch is byte-compatible with both. Replay reads an existing batch without authorization or writes; a missing committed batch skips replay. The production emission path is unchanged.
 
 ## Observation registry snapshots
 
@@ -218,6 +220,23 @@ adopter is EDU-29.
 8.1.0) — the stated-DSCR observation snapshot for the LTV shadow (EDU-30). Adds three rows to
 v3: `dscr.stated_ratio`, `dscr.stated_rent`, and `dscr.stated_pitia` (adopter EDU-30, subject
 `loan`, `pdf` locator). Every v3 row is unchanged.
+
+**`observation-first-proof.v5`** (`OBSERVATION_FIRST_PROOF_V5_REGISTRY`, LOA-3247 / shared-types
+9.0.0) — the DTI derived-input snapshot. Extends v4 with 16 `derived_input` definitions (adopter
+EDU-30, no period, no locator). Loan-scoped `rational_amount` rows: `dti.loan.direct_monthly_income`,
+`monthly_liabilities`, `proposed_housing`, `other_obligations`, `rental_profit`, `rental_loss`,
+`monthly_obligations`, `qualifying_monthly_income`. Loan-scoped `rational` rows:
+`dti.lender_ratio_percent`, `cltv.evidence_ratio`. Loan-scoped `decimal` row:
+`dti.cap.qualifying_fico`. Loan-scoped `boolean` rows: `dti.cap.has_subordinate_financing`,
+`dti.cap.has_itin`. Borrower-scoped `rational_amount` rows:
+`income.borrower.declared_monthly_total`, `dti.cap.borrower_qualifying_monthly_income`.
+Borrower-scoped `boolean` row: `dti.cap.residential_ownership_within_five_years`. Every v4 row
+is unchanged.
+
+`rational` is a new observation value kind: an exact rational number stored as a
+numerator/denominator integer pair in lowest terms (e.g. `30001/6` for a monthly amount derived
+from an annual total). `rational_amount` is a `rational` with a currency; it carries the
+`currency_amount` unit.
 
 The change ships as a **new snapshot, not an edit to v1**, following the EDU-01.5 precedent.
 Editing a published snapshot in place would allow one id to name two different schemas across
