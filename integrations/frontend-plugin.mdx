@@ -25,7 +25,7 @@ Under `app/`:
 
 | Route | Purpose |
 |---|---|
-| `/` | Home — routes to `NewAudit` / `AuditRunning` / `AuditError`, or redirects to `/audit/embed/` on `Complete`, based on `originResponse.auditDetail.auditState`. |
+| `/` | Home — routes to `NewAudit`, `AuditRunning`, or `/audit/embed/` on `Complete`, based on `originResponse.auditDetail.auditState`. When `auditState` is `Error` and `errorCode === "NO_DOCUMENTS"`, the running-audit screen shows a **"No documents to audit"** state instead of the generic error: the **Retry** button is replaced by a **Choose documents** button that clears the audit state and routes the user back to `NewAudit` so they can re-submit with documents attached. This code never polls, because polling would time out on the same `NO_DOCUMENTS` result and then report `CONNECTION_LOST`. |
 | `/audit/embed/` | Audit results — mints a one-shot exchange token via `GET /integrations/audits/:auditId/external-url?embedContext=iframe&layout=full`, then renders the full portal audit view inside a sandboxed `<iframe>`. Falls back to an `AgentNotRunCard` if minting fails, with a **Retry** button. See [Audit results embed](#audit-results-embed-loa-285629513019-3071). |
 | `/design-system` | Component gallery (non-prod). |
 

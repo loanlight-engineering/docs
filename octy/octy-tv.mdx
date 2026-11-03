@@ -52,35 +52,43 @@ Current catalog covers:
 
 ## Publishing to the portal
 
-Customer-audience explainers (`audience: "customer"`) can be published to the lender portal's **Training** page. Publishing delivers the explainer as data (manifest + narration clips + PDF page images), not a video file; the portal renders it with the `@loanlight-engineering/explainer-renderer` package.
+Customer-audience explainers (`audience: "customer"`) reach the lender portal's **Training** page as the **`@loanlight-engineering/training-videos`** npm package. The portal lists this package as a dependency; a portal deploy ships the videos, and a portal rollback rolls them back. There is no manual publish step in Octy.
 
-The publishing workflow lives in `src/lib/portal-training/`:
+### The training-videos package
 
-- **`publishToPortal(slug)`** — checks for blockers (`audience !== "customer"`, draft, unvoiced cues), uploads missing narration clips and assets to the API in batches, then calls `trainingVideos.publish(slug, publication)` to store the manifest. A `content_hash` (SHA-256 of the published manifest) changes on every republish so the portal can tell revisions apart.
-- **`portalStatus()`** — returns every customer video's portal standing: `not_published`, `current`, `out_of_date` (content hash mismatch), or `hidden`.
-- **`customerVideoFreshness(check?)`** — checks GitHub commit history against each story's `sources[]` list. Only called when the **Check for updates** button is pressed.
+`packages/training-videos/` in the Octy repository is the distribution package. It is built by `pnpm explainers:training-videos` and published automatically by `.github/workflows/publish-training-videos.yml` whenever a push to Octy's `main` branch changes what the package holds. Nobody bumps the version manually; the version is `1.0.<git commit count on main>`, so the registry always reflects `main`'s commit order.
 
-### PortalPublishPanel
+The package contains:
 
-Each customer-audience explainer in Octy TV includes a **Portal** panel below the player. The panel is the `PortalPublishPanel` component (`src/components/explainers/PortalPublishPanel.tsx`) and exposes:
-
-- **Status badge** — `Published · current`, `Published · out of date`, `Hidden in the portal`, or `Not in the portal`.
-- **Check for updates** — queries GitHub for commits touching the story's `sources[]` since the last publish; shows which files changed. Updates the `freshness` state for all customer videos at once (uses `GET /api/explainers/portal?check=1`).
-- **Publish** — uploads missing clips/assets and commits the manifest (`POST /api/explainers/portal/:slug`). Disabled with an explanation when a blocker exists (draft, unvoiced cues, wrong audience).
-- **Hide / Show** — toggles the video's `status` between `hidden` and `published` without re-uploading (`PATCH /api/explainers/portal/:slug`).
-
-When the connected LoanLight API predates the `training_videos` routes (migration `0158`), the panel shows a "feature unavailable" notice instead of erroring.
-
-### Portal API routes
-
-Octy's Next.js route handlers that back `PortalPublishPanel`:
-
-| Handler | Purpose |
+| Path | Contents |
 |---|---|
-| `GET /api/explainers/portal[?check=1]` | Returns each customer video's `publishing` status and optionally its GitHub `freshness` report. The two halves fail independently. |
-| `POST /api/explainers/portal/:slug` | Publish (or republish) a video. |
-| `PATCH /api/explainers/portal/:slug` | Toggle `hidden` / `published` status. |
-| `GET /api/explainers/portal/:slug` | Return one video's manifest and presigned clip URLs for playback in the portal. |
+| `catalog.json` | Every customer video: `slug`, `title`, `description`, `agentType`, `sortOrder`, `schemaVersion`, `contentHash`, `hidden`, and `manifest` path. Never show a video whose `hidden` is `true`. |
+| `videos/<slug>.json` | The video's manifest, rendered by `@loanlight-engineering/explainer-renderer`. |
+| `voice/<clip>.m4a` | Narration clips, named by content hash. |
+| `pages/...` | PDF page images at the paths the manifests reference. |
+
+Only voiced customer videos are included. Octy's CI fails a PR that would leave one unvoiced.
+
+### How a video reaches the portal
+
+1. An author pushes the updated story and built manifest to Octy `main`.
+2. `publish-training-videos.yml` builds the package (`pnpm explainers:training-videos`) and publishes a new `1.0.x` version to the npm registry.
+3. A bump PR in `loanlight-api` updates the portal's `packages/app/package.json` dependency on `@loanlight-engineering/training-videos` to the new version.
+4. The bump PR's CI runs `training-videos-check` (the `bin/training-videos-check` command in the package) against every shown video to confirm its features are live in prod and the portal's renderer version can draw its schema.
+5. The portal deploys with the new package; the **Training** page reads the catalog directly from the bundled package.
+
+### Bump PR check
+
+`training-videos-check --head "$GITHUB_SHA"` runs in `loanlight-api` CI for any PR that updates the training-videos package. It reads the package's `dist/catalog.json` and `dist/checks.json`, checks the portal's `packages/app/package.json` for the `@loanlight-engineering/explainer-renderer` range, and for each shown video:
+
+- Verifies all story `sources[]` commits are present in prod for the deployed app that ships each source path (Portal, API, Encompass, or Web App).
+- Verifies the portal's renderer schema supports the video's `schemaVersion`.
+
+The check token needs read access to `loanlight-api`, `octy`, and `loanlight-integrations` (Contents + Actions). CI's default token only covers `loanlight-api`, so the workflow mints one with `actions/create-github-app-token`.
+
+<Note>
+A video whose `hidden` field is `true` is never shown to customers, so the check skips it. Hidden videos appear in the catalog only to let the portal suppress them cleanly; they do not gate the bump PR.
+</Note>
 
 ## Authoring and refresh
 

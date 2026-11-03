@@ -1,14 +1,10 @@
 ---
-title: CDA eFolder delivery
-description: The end-to-end system that delivers completed CDA PDFs from loanlight-api into Encompass eFolders via EventBridge and loanlight-integrations.
+title: Report eFolder delivery (AVM / CDA / valuation)
+description: The end-to-end system that files AVM, CDA, and Clear Capital valuation report PDFs from loanlight-api into Encompass eFolders via EventBridge and loanlight-integrations.
 icon: send
 ---
 
-The CDA eFolder delivery system delivers completed collateral data audit (CDA) PDFs from `loanlight-api` into Encompass eFolders. It is split across two services: `loanlight-api` owns the **producer** (PDF identity, lender eligibility, publication outbox, and EventBridge emission), and `loanlight-integrations` owns the **consumer** (eFolder credentials, destination selection, provider delivery, and the consumer ledger).
-
-<Warning>
-**No lender is currently enabled.** No `cda_efolder_delivery_config` row is seeded. Do not enable a lender on either side until an approved provider adapter passes the provider contract suite and the per-lender preflight below is complete.
-</Warning>
+The report eFolder delivery system files three kinds of Clear Capital report PDFs from `loanlight-api` into Encompass eFolders: **AVM reports**, **CDA reports**, and **valuation reports** (inspection, appraisal, and evaluation orders). The system is split across two services: `loanlight-api` owns the **producer** (PDF identity, lender eligibility, publication outbox, and EventBridge emission) and `loanlight-integrations` owns the **consumer** (EPC transaction resolution, S3 streaming, DocumentPushService delivery, and the consumer ledger).
 
 ## How it works
 
@@ -58,6 +54,26 @@ AVM PDFs are stored in `pdf_s3_key` under the key `collateral-review/{loan_id}/a
 | `avm_efolder_event_last_error_code` | `text` | Most recent publication error. Same codes as the CDA path (`missing_encompass_loan_id`, `loan_lender_mismatch`, `invalid_encompass_loan_id`, `invalid_pdf_s3_key`, `invalid_pdf_sha256`, `eventbridge_rejected`, `eventbridge_transport_error`). |
 
 Two partial indexes on `collateral_review_orders` back the AVM publication sweep: `collateral_review_orders_avm_acquisition_due_idx` (pending acquisitions) and `collateral_review_orders_avm_efolder_due_idx` (pending publications).
+
+## Valuation report publication columns on `collateral_review_orders`
+
+Migration `0219_valuation_efolder_delivery_state.sql` (LOA-3416) adds five columns and a partial index to `collateral_review_orders`. Valuation delivery does not have an acquisition phase — a succeeded order is eligible by itself, no eligibility stamp needed.
+
+| Column | Type | Notes |
+|---|---|---|
+| `valuation_efolder_encompass_loan_id` | `text` | The Encompass loan GUID frozen at first claim. Non-blank when non-null. CHECK `BTRIM(...) <> ''`. |
+| `valuation_efolder_event_attempt_count` | `integer NOT NULL default 0` | Publication attempt counter. CHECK `>= 0`. |
+| `valuation_efolder_event_next_attempt_at` | `timestamptz` | When the next attempt is due. NULL before the first claim or after a successful publish. |
+| `valuation_efolder_event_published_at` | `timestamptz` | Set when EventBridge acknowledges. Does not mean eFolder delivery completed. |
+| `valuation_efolder_event_last_error_code` | `text` | Most recent publication error code (see below), or NULL when the last attempt succeeded or no attempt has been made. |
+
+Eligibility: `order_type IN ('pci', 'appraisal', 'evaluation')` and `status = 'succeeded'` and `valuation_efolder_event_published_at IS NULL` (and the lender's `valuation_efolder_delivery_enabled` flag is on and the order is not from a shadow audit). An inspection stores its kind as `pci` in the order type but its `reportKind` in the event is `inspection`; the S3 key uses `pci`.
+
+Error codes (same vocabulary as CDA/AVM): `missing_encompass_loan_id`, `loan_lender_mismatch`, `invalid_encompass_loan_id`, `invalid_pdf_s3_key`, `invalid_pdf_sha256`, `eventbridge_rejected`, `eventbridge_transport_error`. All retry with exponential backoff starting at five minutes, doubling, capped at six hours. None is terminal.
+
+The partial index `collateral_review_orders_valuation_efolder_due_idx` on `(COALESCE(valuation_efolder_event_next_attempt_at, resolved_at), id)` backs the publication sweep.
+
+For the runbook SQL, monitor descriptions, and flag / repair details, see `packages/api/docs/valuation-efolder-delivery-runbook.md` on `loanlight-api` main.
 
 ## Producer outbox columns on `collateral_review_orders` (CDA)
 
@@ -134,12 +150,12 @@ The following are owned by `loanlight-integrations` and are not configurable her
 ## Consumer side (loanlight-integrations)
 
 <Warning>
-The Developer Connect delivery module (`packages/encompass/src/cda-efolder-delivery/`) was **deleted in phase 1** and the remaining infrastructure was cleaned up in **phase 2** (#619, #610). The old `CdaEfolderDeliveryRule`, its event archive, the target DLQ, and the `cda_efolder_delivery` / `cda_efolder_delivery_config` tables were deleted in phase 2. The idle processing queue and its DLQ remain until the prod application stack stops importing their CloudFormation exports. `DocumentPushRule` is now the only rule that routes AVM and CDA delivery events.
+The Developer Connect delivery module (`packages/encompass/src/cda-efolder-delivery/`) was **deleted in phase 1** and the remaining infrastructure was cleaned up in **phase 2** (#619, #610). The old `CdaEfolderDeliveryRule`, its event archive, the target DLQ, and the `cda_efolder_delivery` / `cda_efolder_delivery_config` tables were deleted in phase 2. The idle processing queue and its DLQ remain until the prod application stack stops importing their CloudFormation exports. `DocumentPushRule` is now the only rule that routes AVM, CDA, and valuation report delivery events.
 </Warning>
 
 ### Route
 
-Both `loanlight.avm.efolder.delivery.requested.v1` and `loanlight.cda.efolder.delivery.requested.v1` events are now handled by **`DocumentPushRule`** (the same EventBridge rule that routes classified documents), which delivers them to the `document-push` SQS queue:
+`loanlight.avm.efolder.delivery.requested.v1`, `loanlight.cda.efolder.delivery.requested.v1`, and `loanlight.valuation-report.efolder.delivery.requested.v1` events are all handled by **`DocumentPushRule`** (the same EventBridge rule that routes classified documents), which delivers them to the `document-push` SQS queue:
 
 ```
 loanlight-api ──PutEvents──▶ EventBridge default bus
@@ -147,27 +163,28 @@ loanlight-api ──PutEvents──▶ EventBridge default bus
                                 │  source = loanlight.aus
                                 │  detail-type ∈ { loanlight.documents.classified,
                                 │                  loanlight.cda.efolder.delivery.requested.v1,
-                                │                  loanlight.avm.efolder.delivery.requested.v1 }
+                                │                  loanlight.avm.efolder.delivery.requested.v1,
+                                │                  loanlight.valuation-report.efolder.delivery.requested.v1 }
                                 ▼
                SQS document-push (visibility 900 s, 5 receives)
                                 │  └─▶ document-push-dlq after 5 failed receives
                                 ▼
      QueueConsumerService.handleDocumentPush
        read detail-type
-         ├─ AVM / CDA ──▶ handleReportDelivery
-         │                  └─▶ EfolderFileDeliveryService.deliver
-         │                        └─▶ DocumentPushService.push
+         ├─ AVM / CDA / valuation ──▶ handleReportDelivery
+         │                              └─▶ EfolderFileDeliveryService.deliver
+         │                                    └─▶ DocumentPushService.push
          └─ documents.classified ──▶ existing document-push path
 ```
 
 Each report message goes through these steps:
 
-1. **Parse** with the shared-types parser for the event kind (`parseAvmEfolderDeliveryRequestedEvent` or `parseCdaEfolderDeliveryRequestedEvent`). A parse failure is logged (`report_delivery.invalid_payload`) and consumed.
+1. **Parse** with the shared-types parser for the event kind (`parseAvmEfolderDeliveryRequestedEvent`, `parseCdaEfolderDeliveryRequestedEvent`, or `parseValuationReportEfolderDeliveryRequestedEvent`). A parse failure is logged (`report_delivery.invalid_payload`) and consumed.
 2. **Resolve the EPC transaction.** When `auditRunId` is present: `getTransactionRecordOwningStateOrThrow(auditRunId)` finds the record that owns that state even after a re-audit. When `auditRunId` is absent or null: `getTransactionRecordByEncompassLoanIdOrThrow(encompassLoanId)` finds the loan's earliest `transaction_record` with an `active transaction_state` whose status is not `cancelled` or `failed`. No row found by either path → `no_transaction` (message consumed, not retried).
 3. **Shadow check.** `transaction_record.is_shadow = true` → `shadow_skipped`.
 4. **Verify bytes.** The S3 object is streamed and re-hashed. Hash mismatch → `content_mismatch` (terminal). Object missing or stalled → `retriable` (SQS redelivers, up to 5 receives).
-5. **Push** via `DocumentPushService.push` with `documentId = orderId`, `contentHash = pdfSha256`, `classificationType = avm_report | cda_report`, `documentName = filename`.
-6. **Open validation.** On the `attached` transition, the push stores the PATCH's `X-Correlation-ID` and starts the validation clock (`validation_pending_since`, migration `041`).
+5. **Push** via `DocumentPushService.push` with `documentId = orderId`, `contentHash = pdfSha256`, `classificationType = avm_report | cda_report | appraisal_standard`, `documentName = filename`. Valuation reports set `keepDocumentName` so the event's `filename` is kept regardless of any lender `fileNameTemplate`.
+6. **Open validation.** On the `attached` transition, the push records the PATCH result and starts the validation clock (`validation_pending_since`, migration `041`).
 
 <Note>
 `auditRunId` (the EPC correlation id, i.e. `transaction_state.id`) is included in event payloads as of shared-types 2.5.0 (LOA-2921). When present, the consumer resolves the transaction record via `getTransactionRecordOwningStateOrThrow(auditRunId)`, which finds the record that owns that state **even if a re-audit has since superseded it**, then files the report against the record's newest active (non-cancelled, non-failed) state. When `auditRunId` is absent or `null`, the lookup falls back to `getTransactionRecordByEncompassLoanIdOrThrow(encompassLoanId)` (earliest active record, unchanged from the previous behaviour). The `encompassLoanId` field is always used for final loan-id verification regardless of which lookup path resolved the record.
@@ -184,6 +201,12 @@ Migration `040_seed_collateral_report_routing.sql` seeds two entries in `documen
 
 A lender that wants a different folder gets a per-lender override row in the same table, edited through the routing-config editor. The file name is not configurable: both keys are `GENERATED_DOCUMENT_CLASSIFICATION_TYPES`, so the resolver ignores any `fileNameTemplate` and uses the event's `filename` field directly.
 
+Valuation reports (inspection, appraisal, evaluation orders) use **`appraisal_standard`** — the same routing rule a lender's own appraisal uses (seeded by migration 017 as the **Appraisal** document, `appraisalStandard`). This means a lender's appraisal-routing override moves all three valuation report kinds with it. The `keepDocumentName` flag is always set on valuation reports, so the event's `filename` (`{inspection|appraisal|evaluation}-{orderId}.pdf`) is kept regardless of any lender `fileNameTemplate` on that rule.
+
+<Note>
+Valuation reports refuse to file when the resolved transaction's lender has no `api_lender_id` mapping — the message redelivers as `retriable` until the lender is mapped, then reaches the DLQ. AVM and CDA reports file even with an unmapped lender (logged `efolder_file_delivery.lender_unmapped`). Map the lender before enabling valuation delivery.
+</Note>
+
 ### Replay safety
 
 Two layers apply (same as any document push):
@@ -195,9 +218,9 @@ Two layers apply (same as any document push):
 
 An `attached` record enters open validation (added by migration `041`). Validation closes on:
 
-- **`validated`** — both a `response:updated` listing the `epc_resource_id` and a `response:processed` matching the `epc_correlation_id` are on file and the processed status is success.
-- **`processing_failed`** — the `response:processed` event reports failure. The delivery claim is released so a republish re-files.
-- **`timed_out`** — no terminal events within 30 minutes of `validation_pending_since`. The claim is kept for dedup.
+- **`validated`** — a transaction event (`epc_event.resource_type = 'urn:elli:epc:transaction:event'`, `type = 'created'`) lists the record's `epc_resource_id` with `status.type: "Success"` and an `assignedTo` folder. The match is by resource id; the event carries no correlation id. `validated_at` is set.
+- **`processing_failed`** — a transaction event lists the resource with `status.type: "Failure"`. The delivery claim is released so a republish re-files.
+- **`timed_out`** — still `pending` more than 30 minutes after `validation_pending_since`. The claim is kept for dedup.
 
 ### DLQ and monitoring
 
@@ -242,6 +265,19 @@ Nine monitors cover the AVM producer path (`packages/api/observability/datadog/a
 | `avm-efolder-sweep-missing` | No publication heartbeat for 15 minutes. Staged reports for enabled lenders stop publishing. Check scheduler and task health, then the publication advisory lock holder. |
 
 The acquisition and publication sweeps run every five minutes under their own Postgres advisory locks (`6203841597264833` and `6203841597264834` respectively). For operational details and read-only runbook SQL, see `packages/api/docs/avm-efolder-delivery-runbook.md` on `loanlight-api` `main`.
+
+## Valuation eFolder Datadog monitors
+
+Six monitors cover the valuation report producer path (`packages/api/observability/datadog/valuation-efolder-*.json`, added LOA-3416):
+
+| Monitor | Threshold / Trigger |
+|---|---|
+| `valuation-efolder-backlog-aged` | Oldest due, unpublished valuation report for an enabled lender has waited beyond the threshold. Leased and backed-off rows read 0. Run the publication SQL from `valuation-efolder-delivery-runbook.md` and read each row's error code. A page soon after a flag enable means the sweep is not draining (also check `valuation-efolder-sweep-missing`). |
+| `valuation-efolder-retry-backlog-stuck` | A row keeps retrying under one reason for the full window. Run the publication query for that reason. Missing or invalid Encompass loan IDs go through the admin repair (see "Encompass loan ID repair" above). |
+| `valuation-efolder-expired-claim` | A publication lease ran out with no retry code written. This is the duplicate-risk path; the integrations consumer deduplicates on `orderId`. Check task health; never clear a live lease or bump a generation by hand. |
+| `valuation-efolder-metrics-observation-failed` | The backlog query failed; gauge monitors go quiet instead of alerting. Investigate database health and read durable state with the publication query until this clears. |
+| `valuation-efolder-publication-stuck` | EventBridge rejected the event. Check the producer account, region, default bus, `PutEvents` permission, and confirm the consumer accepts `loanlight.valuation-report.efolder.delivery.requested.v1`. The row retries once fixed. |
+| `valuation-efolder-sweep-missing` | No publication-sweep heartbeat for 15 minutes; collected valuation reports stop publishing. Check scheduler and task health, then the sweep's advisory lock holder (`VALUATION_EFOLDER_SWEEP_LOCK_KEY`). |
 
 ## Querying the producer outbox
 

@@ -45,6 +45,14 @@ The `urlaCompleteness` field is tri-state: `null` (not run) vs `{rules_engine_re
 
 A short-lived exchange token is swapped for a view cookie at `/results/audits/[auditId]/exchange`. See [results and access URLs](/partner-api/results-and-access-urls) for the partner-facing exchange flow.
 
+### Per-audit view cookies (LOA-3464)
+
+Each `/results/audits/[auditId]` session now keeps its own view cookie scoped to that specific `auditId`. When a user has two or more audit tabs open, each tab reads and writes only its own cookie, so switching between tabs never invalidates another tab's session. The cookie name is still `RESULTS_VIEW_COOKIE` (`"ll_results_view"`), but the value carried by the exchange step is specific to the requested audit ID and expires with the view token TTL.
+
+### Staff view URL prefix
+
+The staff internal-view path for `/results` audits now lives under its own URL prefix (LOA-3464). Staff-facing reads go through a separate middleware rewrite so the staff and partner surfaces can be managed independently. The partner-facing exchange and view flows are unchanged.
+
 ## BFF data routes
 
 The viewer's data API proxies the portal-audits BFF. Each sub-section maps to a Next.js API route under `app/api/v2/audits/[auditRunId]/<section>/route.ts`. The `appraisal` section was added in LOA-1994: `GET /api/v2/audits/[auditRunId]/appraisal` proxies `portalApiClient.get(".../appraisal", ...)` via `proxyPortalAuditsRoute(request, context, "appraisal")`.
