@@ -533,6 +533,31 @@ The intended output changes (prior with NULL id → `unknown [prior_unreadable]`
 
 **`URLA_DECLARATIONS_V8_REGISTRY`.** Extends v7 with one additional declaration row: `loan.borrower_inventory` — a `multi` relationship from `loan` to `borrower`, sourced from `PARTIES/PARTY/ROLES/ROLE` containers and their `ROLE_DETAIL/PartyRoleType` classification in the MISMO XML. It lets a reader of the evidence ledger alone determine whether every borrower named on the loan is present. A borrower member is linked only under `present`. v7 is unchanged. No loanlight-api consumer adopts v8 in this release.
 
+## LOA-3160 — interest-only loan terms in declarations (shared-types 9.3.0)
+
+`@loanlight-engineering/shared-types` 9.3.0 adds `URLA_DECLARATIONS_V9_REGISTRY` (`urla-declarations.v9`).
+
+**`URLA_DECLARATIONS_V9_REGISTRY`.** Extends v8 with two loan-level declaration rows needed for the LTV eligibility inputs:
+
+- `loan.interest_only` — boolean; `true` when the loan is interest-only. `subjectKind: "loan"`, `cardinality: "single"`, `sensitivity: "restricted"`.
+- `loan.interest_only_term_months` — integer (months); the interest-only period. `subjectKind: "loan"`, `cardinality: "single"`, `sensitivity: "restricted"`.
+
+Both are sourced from the MISMO `LOAN` element. v8 is unchanged. No loanlight-api consumer adopts v9 in this release.
+
+## LOA-3160 / LOA-3247 — refinance, citizenship, and prepayment codes in declarations (shared-types 9.4.0)
+
+`@loanlight-engineering/shared-types` 9.4.0 adds `URLA_DECLARATIONS_V10_REGISTRY` (`urla-declarations.v10`).
+
+**`URLA_DECLARATIONS_V10_REGISTRY`.** Extends v9 with five additional declaration rows, all needed for LOA-3160/LOA-3247 LTV inputs. Every v9 row is included by reference; no earlier snapshot changes.
+
+- `loan.refinance_cash_out_type` — enum `"CashOut" | "NoCashOut" | "LimitedCashOut"`; the MISMO `RefinanceCashOutDeterminationType`. `subjectKind: "loan"`, `cardinality: "single"`, `sensitivity: "restricted"`, `adopter: "EDU-03"`.
+- `borrower.citizenship_residency_type` — enum `"USCitizen" | "PermanentResidentAlien" | "NonPermanentResidentAlien"`; one leaf per identified borrower. `subjectKind: "borrower"`, `sensitivity: "restricted_personal"`.
+- `borrower.intent_to_occupy_primary_residence` — boolean; maps `IntentToOccupyType` explicit Yes/No only. `subjectKind: "borrower"`, `sensitivity: "restricted_personal"`.
+- `loan.prepayment_penalty_indicator` — boolean; read from `extractor.ts` MISMO path. `subjectKind: "loan"`, `sensitivity: "restricted"`.
+- `loan.prepayment_penalty_expiration_months` — integer (months); read independently from the indicator. `subjectKind: "loan"`, `sensitivity: "restricted"`.
+
+Borrower leaves use the v7 source-bound borrower subject: one leaf per identified borrower, not an ordinal or loan-level aggregate. Conflicting duplicates and unresolved source values are preserved.
+
 ## Related
 
 <Columns cols={2}>

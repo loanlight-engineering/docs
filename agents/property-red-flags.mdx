@@ -94,11 +94,11 @@ config of `false` is disabled; `true` or an object is enabled. Thresholds come f
 | Rule | Severity | Trigger |
 |---|---|---|
 | `INELIGIBLE_PROPERTY_TYPE` | CRITICAL | property type in the program matrix `ineligible_property_types`, or lot acreage > `max_acreage` |
-| `ZESTIMATE_MISMATCH` | HIGH | list price vs zestimate percent diff > `thresholds.zestimate_variance_percent` (default 10) |
+| `ZESTIMATE_MISMATCH` | HIGH | list price vs estimated value (`valuation.underwritingValue`: Zillow → Redfin → AVM in priority order) percent diff > `thresholds.zestimate_variance_percent` (default 10); returns `not_applicable` for a purchase when no list price is available and a site confirmed `isListedForSale === false` (LOA-3472) |
 | `NOT_LISTED_FOR_SALE` | HIGH | PURCHASE and subject is not listed for sale; also fires when the subject is listed for rent only (LOA-3129) |
 | `LISTED_FOR_SALE` | HIGH | REFINANCE and `isListedForSale` is true; no longer fires when subject is for-rent only (LOA-3129) |
 | `HOME_VALUE_CHANGE` | MEDIUM | PURCHASE only: list price vs Zillow last-sold price (within 24 months) exceeds `thresholds.home_value_change.percent` in either direction (LOA-2090); enabled under `rules.loan_purpose.PURCHASE` in lender YAML |
-| `RENTAL_VALUE_CHANGE` | MEDIUM | rental price-history change exceeds the tier |
+| `RENTAL_VALUE_CHANGE` | MEDIUM | rental price-history change exceeds the tier; returns `not_applicable` (reason code `no_rental_listings`) when a price-history source provided data but contained no rental events — stays `missing` when no source supplied a history, the history is empty, no tiers are configured, or a rental event cannot be compared (LOA-3472) |
 || `ACTIVE_FORECLOSURE` | CRITICAL | Missing when the subject parcel is not verified or ATTOM preforeclosure coverage is false; Failed when any preforeclosure record is recent (within 3 years); Passed otherwise. The finding message names the lender, a positive opening bid, and calendar dates (LOA-3319). |
 || `ZONING_MISMATCH` | HIGH | `lot.zoning` is not residential |
 || `RAPID_RESALE` | HIGH | two most recent ownership transfers within `months` (default 6); financing recordings (mortgages, stand-alone finance, quit-claims with no price/seller) are excluded |

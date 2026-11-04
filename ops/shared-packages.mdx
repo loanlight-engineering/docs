@@ -448,6 +448,8 @@ constructs), `environment` (`parseEnvironment`), and `common`
 - `public readonly scaling: ScalableTaskCount` — the service's auto-scaling handle is now exposed so consumers can attach additional policies (e.g. an SQS backlog step-policy) without calling `autoScaleTaskCount()` a second time (which CDK rejects as "AutoScaling of task count already enabled").
 - `disableUtilizationScaleIn?: boolean` — when `true`, the built-in CPU and memory target-tracking policies become scale-out-only safety nets. Use this on services scaled by an external signal (e.g. queue backlog): a target-tracking policy that sits far below its target continuously requests `minCapacity`, which conflicts with a step-policy scale-out between alarm breaches. The consumer is responsible for providing scale-in via its own policy attached to `scaling`.
 
+**`LoanLightApiGateway` additions (v2.0.5, LOA-3324, #213):** Consumers can now override the CloudWatch access-log retention period for the API Gateway stage via a new `accessLogRetentionDays` prop on `LoanLightApiGateway`. The default retains the previous CDK-managed behavior when the prop is omitted. Each repo's `infra/` app passes its environment-specific retention value directly rather than relying on the CDK-default. `shared-cdk`'s snapshot tests are updated to reflect the new prop.
+
 ## shared-local: LocalStack tooling
 
 `shared-local` standardizes the LocalStack bootstrap so api, integrations, and

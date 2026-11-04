@@ -249,10 +249,11 @@ Controller: `portal-appraisal-ssr/portal-appraisal-ssr.controller.ts` at `api/v1
 Controller: `portal-appraisal-comments/portal-appraisal-comments.controller.ts` at `api/v1/portal/appraisal/:runId`. Class throttle 10/min. This module produces an AI comment summary and a chat experience over the appraisal's comments.
 
 | Method / path | Purpose |
-|---|---|
-| `GET /api/v1/portal/appraisal/:runId/comment-summary` | AI-generated comment summary; returns a `ConflictException` payload (with `status`) if not yet ready |
-| `POST /api/v1/portal/appraisal/:runId/comment-chat/turn` | Create a chat turn (free-form `unknown` body); returns the turn id |
-| `GET /api/v1/portal/appraisal/:runId/comment-chat/turn/:turnId/stream` | SSE stream (`text/event-stream`) |
+||---|---|
+|| `GET /api/v1/portal/appraisal/:runId/comment-summary` | AI-generated comment summary; returns a `ConflictException` payload (with `status`) if not yet ready |
+|| `GET /api/v1/portal/appraisal/:runId/sales-comparables-summary` | LLM-generated sales-comparables summary paragraph; always 200 with `{ summary: string }` or `{ unavailable: true }`; `Cache-Control: private, no-store`; subject to a per-lender daily budget feature. Served from the cached `appraisal_runs.sales_comparables_summary` column; the write path generates on first request and re-generates when the input hash or prompt version changes. BFF proxy: `GET /api/appraisal/[runId]/sales-comparables-summary`. An audit-scoped twin exists at `GET /api/v1/portal/audits/:auditId/appraisal/runs/:runId/sales-comparables-summary` (scope-checked; same response shape). (#5081) |
+|| `POST /api/v1/portal/appraisal/:runId/comment-chat/turn` | Create a chat turn (free-form `unknown` body); returns the turn id |
+|| `GET /api/v1/portal/appraisal/:runId/comment-chat/turn/:turnId/stream` | SSE stream (`text/event-stream`) |
 
 The stream sends a 15-second heartbeat (`COMMENT_STREAM_HEARTBEAT_INTERVAL_MS`), aborts via `AbortController` on client close, and terminates with `data: [DONE]`. Pre-stream errors return JSON; a `403` ends silently. Supporting modules: `budget-guard.service.ts`, `citation-validator.ts`, `context-window-guard.ts`, `keyword-extractor.ts`, `risk-terms.ts`, `comment-chat.prompts.ts`, `comment-summary.prompts.ts`, `comment-field-registry.ts`.
 

@@ -849,6 +849,38 @@ The fields were renamed between spec and as-built: LOA-1368/1374 spec'd `improve
 `cost_approach.adu_sqft`. Grepping `has_adu` finds nothing.
 </Note>
 
+#### Deephaven HELOC appraisal bundles (LOA-3505, #5331)
+
+Deephaven's HELOC client (`deephaven-uat-avm-only-demo` in INT) receives its appraisal rules as
+two staged bundles applied together:
+
+- **`deephaven-heloc`** — 34 copies of Deephaven DH rules adapted for the Equity Advantage HELOC
+  guide (DH WHSL EA HELOC Guidelines 10.13.2026), rule codes `CUST_DEE1NNNN` / template prefix
+  `DHH_NNN`. Each copy is independent of its main Deephaven sibling; later edits to the main
+  `deephaven` bundle never reach the HELOC client.
+- **`deephaven-heloc-checklist`** — 14 checklist checks (all WARNING) covering checklist items
+  107, 109, 300, 502, 700, 702, 803, 1107, 1203, 1208–1210, 1305, and lender/client identity (105).
+  Every finding names its checklist item number. Missing data reports `needs_info`, never pass or
+  fail.
+
+The two-bundle split is required: RuleOps scans a bundle's canonical definition before
+registering it and refuses any fragment carrying an `in`/`not_in` JSON list when a bundle
+exceeds 32 KB. Combined, the HELOC content was 37,899 characters; split, `deephaven-heloc` is
+25.9 KB and `deephaven-heloc-checklist` is 12.1 KB. `bundle-registration-content-scan.spec.ts`
+now runs the registration scan over every registered bundle in the unit lane so the next bundle to
+cross 32 KB fails there rather than only in container-backed reconcile tests.
+
+`compound-walker.ts::MAX_TRACKED_CONDITIONAL_GATE_RULES` was raised from 1,024 to 2,048 to
+accommodate the HELOC bundle's rule codes.
+
+Key rule decisions:
+- **Hard stops in the guide stay FAIL**: row, log, and modular homes (`DHH_029`–`DHH_031`), which the main Deephaven bundle only warns on.
+- **DHH_003** counts only closed comparable sales (≥3 within 12 months); active and pending listings never count.
+- **Rural CLTV caps** (`DHH_056`, `DHH_057`) and **Texas 50(a)(6) LTV/CLTV caps** (`DHH_064`, `DHH_065`) apply lender-wide; the HELOC client has no loan programs.
+- **DHH_043** (comps inside and outside the subdivision) applies to new-construction only.
+
+Apply via `/admin/staged-rules` → Deephaven → dry-run → promote.
+
 #### First Colony (Sharp Advantage) bundle updates (LOA-1713 / LOA-2188)
 
 <Note>
@@ -906,6 +938,8 @@ Luxury Mortgage Corp (`luxury-mortgage-corp`, `luxury-wse`) is declared in the p
 
 Operational note: the first reconcile is expected to produce no rule-count or version changes, provided the hand-applied state has not drifted. A named human watcher is required at first automated reconcile; the Luxury-scoped forward-stop procedure is documented in the handoff plan attached to LOA-2561.
 
+**Luxury LTV grids — 2026 guides (Luxury v7, LOA-3160, #5345).** The Luxury bundle is rebaselined to the 2026 program guides (ruling LUX-2026-IN-FORCE-1): Simple Access v9.2 Exhibits B–E (including new $4.5M and $5M loan-amount rows, with each grid cell citing its exhibit) and Prime Access v9.0 Exhibit A. Where every 2026 guide is silent (for example Graduate), the v8.x program highlight rule stays. Bundle version 7 is the open version for the next production deploy. A super_admin Apply of Luxury v7 is needed after deploy; First Colony is unchanged. The EDU-30.2 shadow LTV feature described in [the portal feature map](/portal/feature-map) tracks the live eligibility results against these grids.
+
 ## Review summary export
 
 `POST /:id/export` (`PortalAppraisalController.export`) renders the appraisal **Review summary**
@@ -947,7 +981,7 @@ cross-document validation step, migration `0264_appraisal_runs_cross_doc_validat
 `0114`/`0115`, LOA-2425; null on normal runs), `unsupported_form_kind` text (nullable —
 `'appraisal'` or `'non-appraisal'`; both columns are null or both are non-null per pair CHECK), and
 `iris_facts` jsonb (IRIS aggregated analysis results, migration `0297`, nullable — null until
-the `appraisalIris` entitlement runs). The jsonb includes a `reconcile` subkey written by `IrisReconcileService.mergeReconcile` (LOA-2333): `{ status: "waiting_for_extraction" | "ready" | "error", narrative?: IrisReconcileNarrative, photosCandidates?: number }`. Alerts themselves are never stored here; they are derived at read time from `appraisal_photos`, `extracted_data`, and the operator configuration.
+|the `appraisalIris` entitlement runs). The jsonb includes a `reconcile` subkey written by `IrisReconcileService.mergeReconcile` (LOA-2333): `{ status: "waiting_for_extraction" | "ready" | "error", narrative?: IrisReconcileNarrative, photosCandidates?: number }`. Alerts themselves are never stored here; they are derived at read time from `appraisal_photos`, `extracted_data`, and the operator configuration. `sales_comparables_summary` text nullable and `sales_comparables_summary_hash` text nullable (migration `0230_add_sales_comparables_summary_to_appraisal_runs`, LOA-#5081): cache the LLM-generated sales-comparables paragraph and its input hash + prompt-version key so a correction or model update regenerates without invalidation hooks. The write never touches `updated_at` and cannot race the Comments summary. Both are withheld from the run-detail DTO; `GET /:id/sales-comparables-summary` is their only reader.
 <Note>
 `photo_manifest` (the legacy 8-value photo category column) is scheduled for removal after the
 `appraisal_photos` migration fully propagates. Do not write new code that reads it.
@@ -1025,9 +1059,10 @@ All under `api/v1/portal/appraisals` (`PortalAppraisalController`). Selected rou
 | GET | `/:id/audit-events` | Run audit trail |
 | GET / POST / DELETE | `/:id/rule-overrides[/:ruleCode]` | Rule overrides |
 | GET / PATCH | `/:id/key-field-reviews[/:fieldId]` | Key-field reviews |
+| GET | `/:id/sales-comparables-summary` | LLM-generated sales-comparables paragraph; always 200 with `{ summary }` or `{ unavailable }`; `private, no-store`; daily budget feature; audit-scoped twin at `api/v1/portal/audits/:auditId/appraisal/runs/:runId/sales-comparables-summary` (#5081) |
 
-Separate modules handle related concerns: `portal-appraisal-rules`,
-`portal-appraisal-comments`, and `portal-appraisal-ssr`.
+Separate modules handle related concerns: `portal-appraisal-comments`,
+`portal-appraisal-ssr`.
 
 ## Reliability and recovery
 

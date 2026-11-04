@@ -28,10 +28,10 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/dscr-agent` | DSCR calculator; gated on `flags.dscrAgent`. |
     | `/statement-analyzer` (+ `/[runId]`) | Qualifying-assets review; gated on `flags.statementAnalyzer`. Renders a "not enabled" message when off. See [statement analyzer](/portal/statement-analyzer). |
     | `/classification` | Document classification (upload zone + results table). |
-    | `/training` | Customer training videos catalog; gated on the lender's `training_videos` feature flag or LoanLight staff in their own org. The API returns 403 `FEATURE_DISABLED` for lenders without the flag. Videos that require a newer renderer schema version than the portal ships are silently excluded; they appear once the portal upgrades its `@loanlight-engineering/explainer-renderer` package. Backed by `GET /api/v1/portal/training-videos` (catalog) and `GET /api/v1/portal/training-videos/:slug` (manifest + presigned clip/asset URLs). |
-    | `/training/[slug]` | Single training video player. Presigned narration clip URLs expire at `expiresAt`; the page re-fetches them on expiry. |
+    | `/training` | Customer training videos catalog; gated on the lender's `trainingVideos` feature flag or LoanLight staff in their own org. Since LOA-3473 (#5311) the catalog and player read directly from the pinned `@loanlight-engineering/training-videos` npm package installed at build time (`lib/training-videos/server.ts::readShownVideos`). A `hidden: true` video is never listed, played, or served; a video needing a newer renderer schema version than this build ships is silently excluded. Files (clips, page images) are served from a dedicated BFF route: `GET /api/training-videos/files?file=...` (access-checked; `private, max-age=31536000, immutable`; file name is in the query string because `middleware.ts`'s matcher skips `.jpg`/`.png` paths). The `GET /api/v1/portal/training-videos` and `GET /api/v1/portal/training-videos/:slug` API endpoints still exist and are not yet retired. |
+    | `/training/[slug]` | Single training video player. Clip and page-image URLs point to the BFF `files` route. |
 
-    **`training_videos` table (migration `0158`).** The LoanLight API stores published training videos in a `training_videos` table (PK `slug`). Columns: `title`, `description`, `agent_type` (nullable — null for non-agent videos), `sort_order`, `status` (`published | hidden`), `schema_version` (the explainer renderer version the video was built for), `manifest` (JSONB — the full story manifest), `content_hash` (SHA-256 of the published manifest, changes on every republish), `duration_seconds`, `published_by`, `published_at`, `created_at`. An index on `(status, sort_order)` drives the catalog listing.
+    **`training_videos` table (migration `0158`).** The LoanLight API stores published training videos in a `training_videos` table (PK `slug`). Columns: `title`, `description`, `agent_type` (nullable — null for non-agent videos), `sort_order`, `status` (`published | hidden`), `schema_version` (the explainer renderer version the video was built for), `manifest` (JSONB — the full story manifest), `content_hash` (SHA-256 of the published manifest, changes on every republish), `duration_seconds`, `published_by`, `published_at`, `created_at`. An index on `(status, sort_order)` drives the catalog listing. This table is not read by the portal since LOA-3473; retirement is tracked separately.
   </Tab>
   <Tab title="settings">
     Tenant settings (`SectionTabNav` of visible tabs). `/settings` redirects to the first visible tab.
@@ -137,6 +137,13 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     **LTV shadow view (LOA-3160 / EDU-30.2, super-admin only).** An `EligibilityLtvShadow` component renders beside the eligibility card exclusively for `super_admin` viewers (hidden entirely for all lender roles). The shadow view reads from the new `/api/evidence/loans/[loanId]/ltv-shadow` route and shows the allowed-LTV value alongside today's LTV, plus an allowed-LTV trail derived from the eligibility structured trail (`eligibility_results.structured_trail`). Trail steps map to prose via `composeEffectiveMaxLtv`: caps/reductions, the grid row, axis values with sources, open checks, and overlay outcomes. Rows written before migration `0183` derive the trail at read time and display "rules version not recorded". The G1 global/per-lender toggle and the D5 post-switch state are not in this build.
 
     **Luxury non-warrantable condo cap fix (LOA-3160).** The purchase path for a Luxury lender non-warrantable-condo property now applies the published purchase cap (80%) instead of the cash-out cap (75%) that was incorrectly used before this change. Cash-out still uses 75% on every cap except that one; `SCF_NON_WARRANTABLE` retains 70% for both purposes.
+
+    **Audit overview summary tiles (#5326).** The `AuditOverviewBody` on the Issue Summary page now shows summary tiles for Properties, Credit, Appraisal, and Income. The tiles are rendered by `shared-ui` components:
+    - `PropertiesOverviewTiles` — property check results at a glance.
+    - `CreditOverviewTiles` — credit findings overview; replaces the previous `CreditLabelChip`-based layout. `CreditOverviewCard` and the outer wrapper are updated to use the new tile structure.
+    - `AppraisalOverviewTiles` — appraisal rule-outcome summary. The appraisal labelled-rules table (`AppraisalLabelledRulesTable`) is updated to co-exist with the tiles.
+    - `IncomeOverviewTiles` (`packages/app`) — income step summary.
+    A new `FindingsTile` component in `shared-ui` provides the shared tile primitive used by all four implementations.
   </Tab>
 </Tabs>
 
@@ -155,7 +162,7 @@ The `FeatureFlags` object (`src/lib/feature-flags.ts`) has these keys:
 
 `classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`.
 
-The `training_videos` flag is **not** in this object. It is a per-lender flag resolved server-side when the portal calls the API catalog endpoint. A 403 `FEATURE_DISABLED` response causes `TrainingNotice` to render an "unavailable" state rather than an empty list.
+The `training_videos` flag is **not** in this object. It is a per-lender flag resolved server-side by `lib/training-videos/access.ts::canWatchTraining` (or for LoanLight staff in their own org). Since LOA-3473 the portal no longer calls the API catalog endpoint to resolve access.
 
 <Note>
 The **eligibility card** is **not** in this `FeatureFlags` object. Its visibility depends on both the lender's `eligibility_card` flag (a tri-state `off` / `internal` / `on` stored in `feature_value` on `lender_feature_flags`) and the viewer's super-admin status. It is resolved server-side via `GET /api/eligibility-card-access`, separate from the env-default `FeatureFlags` flow. See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements).
