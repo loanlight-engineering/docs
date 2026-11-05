@@ -374,6 +374,28 @@ LOA-2180 builds a portable rule-state representation:
 - **Canonical encoding and diff.** Each service produces a canonical byte representation of a lender's active rule set that is stable across database replicas and time. A canonical diff (`RuleChangeRecord[]`) between two snapshots shows exactly which rules, severities, and thresholds changed. This is the same `RuleChangeRecord` shape used by apply preview; the canonical diff is a library without a production consumer until a later ticket wires it.
 - **Dev-only import.** An authenticated HTTP endpoint accepts a serialized export envelope and atomically replaces the destination service's active rule sets. Import admission runs before body parsing and validates envelope shape, content, destination lender/program identity, byte limits, and row counts. For appraisal, the import is refused over an existing current-version export gap. **Production startup rejects an enabled import flag** — imports are a development/test-only capability and cannot run in a live environment.
 
+### Versioned portable policy transport (LOA-3047)
+
+LOA-3047 adds a versioned portable export format (format 1, canonical schema 3) and an authenticated manual export HTTP endpoint:
+
+```
+GET /api/v1/portal/internal/ruleops/appraisal/rule-sets/:setId/versions/:version/export?lender=<slug>
+```
+
+Requirements for export:
+- An explicit rule-set ID and version number (zero or negative versions are refused).
+- A `lender` query parameter identifying the lender by slug — must be lowercase, single value.
+- A verified internal actor (`RuleOpsActorVerifier`). Non-internal `super_admin` callers are refused.
+- An authenticated session (enforced by the existing `PortalAuthGuard`).
+
+Responses are throttled and sent with `Cache-Control: private, no-store`. Portable hashes exclude local UUIDs, local versions, and the export envelope, while retained source bindings remain in the document.
+
+The dev-only import path (see [canonical export above](#canonical-export-diff-and-development-import-loa-2180)) now validates destination state more strictly: import refuses destination UAD-state mismatches, missing program identities, and program-state mismatches. **Production startup still rejects an enabled import flag** — import is a development/test-only capability.
+
+<Note>
+The CLI entrypoint for portable transport remains deferred. Attempt provenance and producer coverage retain the LOA-2178/LOA-3049 boundaries.
+</Note>
+
 ### Catalog built-in automatic delivery (LOA-3248)
 
 `APPRAISAL_BUILTIN_RELEASES` (in `modules/portal-appraisal-rules/appraisal-rule-catalog.ts`) is the declaration for automatic delivery of selected built-in appraisal rules. Each entry names a rule id, the rule codes it supplies, the target population (`"all-lenders-all-active-appraisal-sets"`), a genesis type (`"selected-rules-only"`), and the permitted changes (`"insert-missing-selected-rules"`). The reconcile task supplies declared entries as insert-only templates and delivers them to every lender via the existing RuleOps engine — preserving lender edits and deletions, with atomic history/change/snapshot and no-op handling.

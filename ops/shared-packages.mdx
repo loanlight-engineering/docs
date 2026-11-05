@@ -29,7 +29,7 @@ looks missing.
 | Package | Role | Version (repo HEAD) |
 |---|---|---|
 | `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, evidence contracts, revision contracts, AVM eFolder delivery events, roles, declaration evidence, observation registries) | 9.0.0 |
-| `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 1.18.0 |
+| `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 2.0.6 |
 | `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | 0.1.0 |
 | `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.6.0 |
 | `@loanlight-engineering/shared-api-auth` | NestJS WorkOS auth module (incl. WorkOS Connect M2M and user-lifecycle methods) | 0.3.0 |
@@ -97,6 +97,8 @@ The `cd.yml` publish matrix covers **six** packages: `shared-types` first
 is skipped. `shared-ui` (`packages/ui`) was removed from the matrix in LOA-3084;
 it is no longer published from this repo.
 </Note>
+
+**`FargateTaskDefinitionWithDataDog` hostname and tag fix (v2.0.6, LOA-3535):** The Fargate Datadog agent sidecar previously sent no container hostname and formatted `DD_TAGS` as space-separated values, which the agent rejected. Version 2.0.6 sets a stable hostname from the task ARN and formats `DD_TAGS` as comma-separated key:value pairs (`env:<env>,service:<svc>,version:<sha>,...`) matching what the Datadog agent expects. Consumers must upgrade `shared-cdk` and redeploy the affected Fargate services.
 
 ### Local dev override
 

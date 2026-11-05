@@ -267,21 +267,23 @@ API's `label` field rather than legacy `hasIssue` / outcome heuristics. Two new 
 `rendersRow(row, preLabelFilter)` combines both paths: returns the pre-label filter result when
 `selectByLabel` is `"fallback"`, otherwise follows `selectByLabel`.
 
-**`label-display.ts`** — defines display text and pill colours for the six known labels:
+**`label-display.ts`** — defines display text and pill colours for the six known labels (LOA-3509
+aligned these colours with the portal's `ResultPill` component):
 
 | Label | Pill colour | Text |
-|---|---|---|
-| `passed` | green | Passed |
-| `failed` | red | Failed |
-| `missing` | amber | Missing |
-| `incomplete` | amber | Incomplete |
-| `warning` | gray | Warning |
-| `not_applicable` | gray | Not applicable |
+||---|---|---|
+|| `passed` | green | Passed |
+|| `failed` | red | Failed |
+|| `warning` | amber | Warning |
+|| `missing` | light grey | Missing |
+|| `incomplete` | light grey | Incomplete |
+|| `not_applicable` | dark grey (light text) | Not applicable |
 
-Severity order (most severe first): `failed` → `missing`/`incomplete` (tied) → `warning` →
-unknown labels → `not_applicable` → `passed`. An unknown label renders as a gray pill with its
-own text. `groupLabel(labels)` picks the most severe known label in a group, or the first label
-when all are unknown.
+Severity order (most severe first): `failed` → `warning` → `missing` → `incomplete` → `passed` →
+`not_applicable`. Unknown labels render last as a light-grey pill with their own text.
+`groupLabel(labels)` picks the most severe known label in a group, or the first label
+when all are unknown. Business Verification now uses the shared label pill; unfamiliar results
+display their own text, and blank results display "Unrecognised."
 
 The "all-clear" banner and accompanying-appraisal-report handling that previously appeared in
 `audit-content.ts` were moved to the API side; the `pdf_check_labels` mode no longer renders

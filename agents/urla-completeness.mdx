@@ -63,6 +63,8 @@ SECTION_8_DEMOGRAPHICS
 </Accordion>
 <Accordion title="Section 1E / 2A–2D — income, assets, liabilities">
 `OTHER_INCOME_SOURCES`, `ASSETS_ACCOUNT_DETAILS`, `OTHER_ASSETS_DETAILS`, `LIABILITIES_DETAILS`, `OTHER_LIABILITIES_DETAILS`
+
+`LIABILITIES_DETAILS` (Section 2c) explicitly excludes liabilities whose `type` is `MORTGAGE` or `HELOC` from both findings and fresh extractions (LOA-2715). Cached extraction responses are filtered on read, with finding `field_path` values remapped to the surviving rows. All other liability types remain in scope.
 </Accordion>
 <Accordion title="Section 3 — real estate owned (REO)">
 `REO_REFINANCE_SUBJECT_PROPERTY`, `REO_PURCHASE_SUBJECT_PROPERTY`, `REO_OWNED_ADDRESSES_MATCH` (deprecated), `REO_CURRENT_ADDRESS_MATCH`, `REO_FORMER_ADDRESSES_MATCH`, `REO_PROPERTY_DETAILS`, `REO_INVESTMENT_RENTAL_INCOME_REQUIRED`, `REO_PROPERTY_VALUE_REQUIRED`

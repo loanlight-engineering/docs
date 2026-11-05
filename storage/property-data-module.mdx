@@ -25,7 +25,11 @@ Returns `Promise<PropertyDataResponse[]>`.
 
 - Reads `property_data_results` filtered by `audit_run_id`, ordered `asc(property_type), asc(created_at), asc(id)`. The deterministic ordering is load-bearing — these tables have no unique constraints, so the `created_at, id` tiebreakers must stay.
 - In parallel it calls the private `getConsolidatedByAuditRun(auditRunId)` to load the latest consolidated blob.
-- Throws `HttpException 404` (`"No property data found for the given audit run"`) when there are zero rows.
+- Returns an **empty array** (not 404) when property rows will not arrive — specifically when the
+  `propertyData` agent ledger row is present and in a terminal state (`complete`, `failed`, or
+  `skipped`). The service re-reads the rows immediately before returning empty to avoid a race with
+  the agent's final write (LOA-3478). 404 is still returned for legacy runs with no ledger rows at
+  all; the endpoint also remains "pending" (not yet empty) while the agent is `pending` or `processing`.
 - Per row, it picks the matching consolidated blob by `property_type`:
 
 | `property_type` | Consolidated source | Zillow URL |
@@ -88,7 +92,7 @@ Red flags from `getRedFlagsByAuditRun`.
 Always `true` on a 200 (`GetPropertyDataResponseDto`).
 </ResponseField>
 
-The controller calls `getPropertyDataByAuditRun` and `getRedFlagsByAuditRun` in parallel and returns 404 when there are no property rows.
+The controller calls `getPropertyDataByAuditRun` and `getRedFlagsByAuditRun` in parallel. It returns 404 when there are no ledger rows at all; it returns 200 with an empty `data[]` when the `propertyData` agent has reached a terminal state but produced no rows (LOA-3478). This prevents URLA-only deliveries from timing out.
 
 ### GET /internal/v1/audit-results/:auditRunId
 

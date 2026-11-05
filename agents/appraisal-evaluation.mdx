@@ -852,9 +852,9 @@ The fields were renamed between spec and as-built: LOA-1368/1374 spec'd `improve
 #### Deephaven HELOC appraisal bundles (LOA-3505, #5331)
 
 Deephaven's HELOC client (`deephaven-uat-avm-only-demo` in INT) receives its appraisal rules as
-two staged bundles applied together:
+three staged bundles applied together:
 
-- **`deephaven-heloc`** — 34 copies of Deephaven DH rules adapted for the Equity Advantage HELOC
+- **`deephaven-heloc`** — 30 copies of Deephaven DH rules adapted for the Equity Advantage HELOC
   guide (DH WHSL EA HELOC Guidelines 10.13.2026), rule codes `CUST_DEE1NNNN` / template prefix
   `DHH_NNN`. Each copy is independent of its main Deephaven sibling; later edits to the main
   `deephaven` bundle never reach the HELOC client.
@@ -862,6 +862,10 @@ two staged bundles applied together:
   107, 109, 300, 502, 700, 702, 803, 1107, 1203, 1208–1210, 1305, and lender/client identity (105).
   Every finding names its checklist item number. Missing data reports `needs_info`, never pass or
   fail.
+- **`deephaven-heloc-checklist-extraction`** — 23 extraction-dependent checklist items (all WARNING),
+  fed by Clear Capital XML when available (LOA-3506). XML-sourced fields take precedence over PDF
+  extraction when both are present. Missing data reports `needs_info`. The bundle is applied together
+  with the other two HELOC bundles.
 
 The two-bundle split is required: RuleOps scans a bundle's canonical definition before
 registering it and refuses any fragment carrying an `in`/`not_in` JSON list when a bundle
@@ -876,8 +880,14 @@ accommodate the HELOC bundle's rule codes.
 Key rule decisions:
 - **Hard stops in the guide stay FAIL**: row, log, and modular homes (`DHH_029`–`DHH_031`), which the main Deephaven bundle only warns on.
 - **DHH_003** counts only closed comparable sales (≥3 within 12 months); active and pending listings never count.
-- **Rural CLTV caps** (`DHH_056`, `DHH_057`) and **Texas 50(a)(6) LTV/CLTV caps** (`DHH_064`, `DHH_065`) apply lender-wide; the HELOC client has no loan programs.
 - **DHH_043** (comps inside and outside the subdivision) applies to new-construction only.
+
+<Note>
+The rural CLTV caps (`DHH_056`, `DHH_057` / `CUST_DEE10056`, `CUST_DEE10057`) and Texas 50(a)(6)
+LTV/CLTV caps (`DHH_064`, `DHH_065` / `CUST_DEE10064`, `CUST_DEE10065`) were removed from the
+`deephaven-heloc` bundle in LOA-3532. These four loan-data-driven caps depended on fields not
+available in the HELOC eval context. The bundle dropped from 34 to 30 rules at that point.
+</Note>
 
 Apply via `/admin/staged-rules` → Deephaven → dry-run → promote.
 
