@@ -80,6 +80,16 @@ assembler will silently drop the field for SQS-delivered messages.
     sent. A blank or unrecognized value on either field is not a real answer. `loanlight-api` reads
     the resolved value as `Y` = accepted. Each field must be registered in the Partner Connect
     product's field list before it reaches LoanLight. Only one field should be mapped per lender.
+  - `avmConfidence` (string, optional) and `avmFsdScore` (string, optional) — the Hitch AVM confidence
+    score and forecast standard deviation, carried for the HELOC valuation decision (LOA-3425).
+    Deephaven maps `CX.DH.AVM.CONFIDENCE` → `AVMConfidence` and `CX.AVM.FSD.SCORE` → `FSDScore`
+    in `loanExtensionDataSchema`; `loanlight-integrations` copies them to `avmConfidence` /
+    `avmFsdScore` on `loanMetadataSchema`. Both are whole numbers: confidence is 0–100,
+    FSD is a percent (8 means 8%). A numeric value sent unquoted is accepted and kept as a string;
+    any other non-string wire type is dropped rather than failing the parse. These fields are the
+    only AVM source for the HELOC valuation decision — the AVM document is no longer read. A
+    request where either field is absent records `needs_input / avm_fields_missing` and orders
+    nothing.
   - `transactionId` (string, optional) — the EPC transaction id (`transaction.id`). Added by LOA-2838; used by loanlight-api to correlate the audit run back to the Encompass EPC transaction.
   - `encompassLoanId` (string, optional) — the Encompass loan GUID, parsed from the EPC entity ref (`entityRef.entityId`). Added by LOA-2838. Stored on `loans.encompass_loan_id`. The CDA eFolder delivery producer binds this identifier to each `collateral_review_orders` row at claim time.
 

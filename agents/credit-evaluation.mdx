@@ -327,6 +327,22 @@ against the current window, the veto, and the corrections, without a new vendor 
 a **CRED_022-only** "Edit Rule" dialog accepts whole months between 36 and 60 (the only rule
 with a working per-row editor — no generic rule editor exists).
 
+### Payment history lookback windows (LOA-3111)
+
+CRED_004 (Late Payments 12mo), CRED_005 (Late Payments 24mo), CRED_017 (Housing Payment History),
+CRED_026 (Aggregate Collections Cap), and the delinquency summary flags all use **whole-calendar-month
+boundaries**. A window of M months opens at 00:00 UTC on the first day of month M-N and closes
+inclusively on the report date. A September 2024 late therefore counts for any September 2026
+report, including one pulled on September 14.
+
+Both the portal credit-review table and the shared-UI results table derive date and window display
+from a shared `lookbackWindow` helper, so both surfaces reflect the same boundary. Inquiry
+windows, seasoning, and account-age display are unaffected by this change.
+
+For re-evaluated audits: summary flags are recomputed from tradelines on each evaluation pass. The
+boundary change can turn a `PASS` into `WARNING`/`FAIL`/`NEEDS_INFO` (or vice versa) when the
+only late falls exactly on the previously open but now-included boundary month.
+
 **CRED_017 — Housing Payment History (LOA-2722)**
 
 CRED_017 previously could silently `PASS` a borrower with no payment history on any housing tradeline — or could `PASS` one who had delinquencies. Root cause: `summarizeIncidentMonths` set `sawUsableIncidentDate` only inside the incident loop, so an empty incident list left the flag unset, and OR-accumulation across tradelines let a single undated late cancel abstention. Fix: the rule now tracks two new signals — `unplaceableLateCount` (lates with no usable date) and `hasUnboundedHousingLates` (an undated late at or above the severity floor). A borrower with housing tradelines but no payment history abstains as `NEEDS_INFO`. A borrower with an undated late surfaces as `FAIL`; the rule never PASS-es silently again.

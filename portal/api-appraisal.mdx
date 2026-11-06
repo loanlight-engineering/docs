@@ -133,6 +133,8 @@ The BFF forwards to `GET /api/v1/portal/collateral-review/appraisals/:runId`. Th
 
 **HELOC valuation decision outcomes (LOA-3456):** `avm_used`, `order_appraisal`, `order_evaluation`, `order_inspection`, `shadow_would_order_appraisal`, `shadow_would_order_evaluation`, `shadow_would_order_inspection`, `needs_input`, `manual_order_required`, `product_not_available`, `skipped_before_effective_date`. The `order_inspection` and `shadow_would_order_inspection` outcomes were added when an accepted passing AVM now triggers an exterior property inspection order (`collateral_review_decisions` CHECK widened by migration `0196`). `avm_used` remains a valid outcome on existing rows.
 
+**`avm_fields_missing` reason code (LOA-3425, migration `0235`).** The HELOC valuation decision reads the Hitch AVM exclusively from the `AVMConfidence` and `FSDScore` Encompass Partner Connect fields (via `loanMetadata.avmConfidence` / `avmFsdScore`). When either field is absent, the decision records `outcome: "needs_input"` / `reason_code: "avm_fields_missing"` and orders nothing. The `inputs.avm` block carries `kind: "fields_missing"` and a `missing` array naming the absent field(s) (`"avmConfidence"` or `"avmFsdScore"`). This outcome is surfaced in Octy's valuation decision list as "AVM fields missing" (never as "Unrecognized reason"). The AVM document is no longer read by the HELOC decision; `avm_report` classification still runs and the document is still filed in the eFolder.
+
 Order statuses: `pending`, `awaiting_callback`, `succeeded`, `failed`, `no_hit`, `declined`, `abandoned`.
 
 **Appraisal, evaluation, and inspection ordering via Clear Capital (LOA-3411, LOA-3415, LOA-3465).**

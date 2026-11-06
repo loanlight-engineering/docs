@@ -183,7 +183,7 @@ Each report message goes through these steps:
 2. **Resolve the EPC transaction.** When `auditRunId` is present: `getTransactionRecordOwningStateOrThrow(auditRunId)` finds the record that owns that state even after a re-audit. When `auditRunId` is absent or null: `getTransactionRecordByEncompassLoanIdOrThrow(encompassLoanId)` finds the loan's earliest `transaction_record` with an `active transaction_state` whose status is not `cancelled` or `failed`. No row found by either path → `no_transaction` (message consumed, not retried).
 3. **Shadow check.** `transaction_record.is_shadow = true` → `shadow_skipped`.
 4. **Verify bytes.** The S3 object is streamed and re-hashed. Hash mismatch → `content_mismatch` (terminal). Object missing or stalled → `retriable` (SQS redelivers, up to 5 receives).
-5. **Push** via `DocumentPushService.push` with `documentId = orderId`, `contentHash = pdfSha256`, `classificationType = avm_report | cda_report | appraisal_standard`, `documentName = filename`. Valuation reports set `keepDocumentName` so the event's `filename` is kept regardless of any lender `fileNameTemplate`.
+5. **Push** via `DocumentPushService.push` with `documentId = orderId`, `contentHash = pdfSha256`, `classificationType = avm_report | cda_report | valuation_inspection_report | appraisal_standard | valuation_evaluation_report`, `documentName = filename`. The classification type for valuation reports is selected by `reportKind` (see "Where the file lands" below). Valuation reports set `keepDocumentName` so the event's `filename` is kept regardless of any lender `fileNameTemplate` on that rule.
 6. **Open validation.** On the `attached` transition, the push records the PATCH result and starts the validation clock (`validation_pending_since`, migration `041`).
 
 <Note>
@@ -194,14 +194,26 @@ Each report message goes through these steps:
 
 Migration `040_seed_collateral_report_routing.sql` seeds two entries in `document_push_routing_config`:
 
-| Routing key | Folder (`nameTemplate`) | EPC type (`typeTemplate`) |
-|---|---|---|
-| `avm_report` | `AVM Report` | `avmReport` |
-| `cda_report` | `CDA Report` | `cdaReport` |
+|| Routing key | Folder (`nameTemplate`) | EPC type (`typeTemplate`) |
+||---|---|---|
+|| `avm_report` | `AVM Report` | `avmReport` |
+|| `cda_report` | `CDA Report` | `cdaReport` |
 
 A lender that wants a different folder gets a per-lender override row in the same table, edited through the routing-config editor. The file name is not configurable: both keys are `GENERATED_DOCUMENT_CLASSIFICATION_TYPES`, so the resolver ignores any `fileNameTemplate` and uses the event's `filename` field directly.
 
-Valuation reports (inspection, appraisal, evaluation orders) use **`appraisal_standard`** — the same routing rule a lender's own appraisal uses (seeded by migration 017 as the **Appraisal** document, `appraisalStandard`). This means a lender's appraisal-routing override moves all three valuation report kinds with it. The `keepDocumentName` flag is always set on valuation reports, so the event's `filename` (`{inspection|appraisal|evaluation}-{orderId}.pdf`) is kept regardless of any lender `fileNameTemplate` on that rule.
+Valuation reports (inspection, appraisal, evaluation orders) route by `reportKind` (LOA-3416, migration `051_seed_valuation_report_routing.sql`):
+
+|| `reportKind` | Routing key | Global folder (EPC type) | Seeded by |
+||---|---|---|---|
+|| `inspection` | `valuation_inspection_report` | Property Inspection Report (`valuationInspectionReport`) | migration 051 |
+|| `appraisal` | `appraisal_standard` | Appraisal (`appraisalStandard`) | migration 017 |
+|| `evaluation` | `valuation_evaluation_report` | Residential Evaluation Report (`valuationEvaluationReport`) | migration 051 |
+
+All three keys are `GENERATED_DOCUMENT_CLASSIFICATION_TYPES`, so the `keepDocumentName` flag is always set and the event's `filename` (`{inspection|appraisal|evaluation}-{orderId}.pdf`) is kept regardless of any lender `fileNameTemplate`. A lender's `appraisal_standard` override now moves only appraisals — inspections and evaluations go to their own global folders unless the lender adds per-kind overrides.
+
+<Note>
+Before LOA-3416 all three valuation report kinds filed under `appraisal_standard`. Existing rows filed that way remain where they are — the routing change affects new deliveries only.
+</Note>
 
 <Note>
 Valuation reports refuse to file when the resolved transaction's lender has no `api_lender_id` mapping — the message redelivers as `retriable` until the lender is mapped, then reaches the DLQ. AVM and CDA reports file even with an unmapped lender (logged `efolder_file_delivery.lender_unmapped`). Map the lender before enabling valuation delivery.
