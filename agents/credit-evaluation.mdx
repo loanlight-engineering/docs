@@ -214,6 +214,13 @@ Selected enums:
 | `InquiryTypeEnum` | `hard`, `soft`, `unknown` |
 | `AlertTypeEnum` | `fraud_alert`, `active_duty_alert`, `id_theft_statement`, `ofac_notice`, `file_freeze`, `other` |
 
+**Charge-card liability counting (LOA-3316 — counting rule v2).** `charge_card` tradelines use
+**5% of the balance** as the monthly liability instead of the printed minimum payment. A zero or
+credit balance contributes zero; when the balance cannot be read, the agent falls back to the
+printed payment. All other account types retain their printed payments. Authorized-user exclusions
+are unchanged. Both tradeline summary tables in the portal show a "5% of balance" basis line for
+eligible charge-card rows.
+
 `ScoreSchema.score_value` is an integer 300–900 with a refine for FICO ≤ 850. The `summaries`
 block carries `liabilities` (`total_monthly_debt`, housing/installment/revolving debt, secured
 and unsecured balances), `delinquencies`, `utilization`, `counts`, `score`

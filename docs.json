@@ -94,7 +94,8 @@
               "agents/appraisal-evaluation",
               "agents/liabilities-assessment",
               "agents/bank-statement-income",
-              "agents/business-verification"
+              "agents/business-verification",
+              "agents/adverse-media-screening"
             ]
           }
         ]

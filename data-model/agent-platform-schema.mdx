@@ -41,6 +41,8 @@ Migration `0203` seeds the catalog with `ON CONFLICT DO NOTHING` (idempotent). P
 | `appraisalEvaluation` | Appraisal Evaluation | `true` | `true` | standalone | `queue_worker` |
 | `liabilitiesAssessment` | Liabilities Assessment | `true` | `false` | standalone | `inproc_graph` |
 | `bankStatementIncome` | Bank Statement Income | `false` | `false` | `null` | `queue_worker` |
+| `businessVerification` | Business Verification | `true` | `true` | standalone | `queue_worker` |
+| `adverseMedia` | Adverse Media | `true` | `true` | standalone | `queue_worker` |
 
 <Note>
 `liabilitiesAssessment` is seeded `active=false` — it never appears in a plan. Liabilities and DTI live inside `creditEvaluation`. `bankStatementIncome` is also seeded `active=false` (migration `0264`); the full audit-pipeline dispatch path is reserved for LOA-1696. `urlaCompletenessRulesEngine` is deliberately absent: it is an embedded subgraph of `urlaExtraction` and is never scheduled or billed alone. There is no `income` catalog agent.

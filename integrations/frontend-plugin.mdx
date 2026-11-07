@@ -85,6 +85,31 @@ All popup-opening failures are logged to Datadog via `logError` with a structure
 `opener`, or `timeout`) so failures are traceable without exposing one-shot token URLs
 in error messages.
 
+## Unonboarded lender handling (LOA-3543)
+
+When Encompass is configured for general availability (not an allow list), any Encompass lender can
+open the LoanLight plug-in or submit an order. Lenders LoanLight has not set up see a **"LoanLight
+isn't set up for {company} yet"** screen with a **Book a call** button instead of the generic
+"Connection Failed" message, in exactly three cases:
+
+| Case | Where decided | Response code |
+|---|---|---|
+| No LoanLight credentials in Encompass | Auth Lambda (`infra/lambda/auth/encompass.ts`) | 403 `{ code: "LENDER_NOT_SET_UP", reason: "no_credentials", companyName }` |
+| Credentials rejected by Encompass OAuth | Auth Lambda | 403 `{ code: "LENDER_NOT_SET_UP", reason: "credentials_rejected", companyName }` |
+| Valid credentials but no `client` row in the DB | `POST /integrations/origin` | 403 `{ code: "LENDER_NOT_SET_UP", reason: "lender_not_on_file" }` |
+
+The frontend reads the signal through `services/lender-not-set-up.ts::lenderNotSetUpFrom`. It
+shows `LenderNotSetUp` without retrying, including when the 403 arrives on the origin retry after
+a token refresh. Book a call opens `about:blank` then navigates to `https://loanlight.com/book-a-call`
+and cuts the opener (LOA-3210 open-then-navigate-then-sever sequence).
+
+For unonboarded lenders who submit an **order** (webhook), the integrations service patches the
+EPC transaction Failed with a standard message, acks it, and logs one `unknown_lender` Datadog
+event. No `audit_runs` row is created and nothing is published to loanlight-api.
+
+Any case that does not set `code: "LENDER_NOT_SET_UP"` — disallowed origin, auth-server outage,
+network error — still shows "Connection Failed".
+
 ## Component conventions
 
 From the package `CLAUDE.md`:

@@ -99,6 +99,30 @@ Key design decisions:
 - **Org-scoping verified client-side.** Before linking a newly discovered `client_id`, the service confirms the WorkOS application belongs to the expected org. Mismatched orgs are logged and not linked.
 - **Telemetry.** The metric `epc_credential_reconciliation_complete` carries `{ healed, conflicts, mismatched, errors, lendersScanned }` for each sweep run. Conflicts arise when `mintEpcCredential` finds a pre-existing row for the same `client_id` during healing; they are logged but not treated as errors.
 
+## EPC host selection (LOA-3548)
+
+All calls from `EpcApiClientService` to the Encompass API use a host selected **from the deployment
+environment** via `isEpcUatDeployment()`, not from a per-call `isUat` flag in the request payload
+or stored records. The function reads the `DEPLOYED_ENVIRONMENT` env var.
+
+This prevents an incoming webhook payload or a stored transaction record from switching the host
+that partner tokens are sent to. When a caller passes an `isUat` flag that disagrees with the
+deployment, the service logs a warning and uses the deployment host anyway. Resource refs
+(webhook-payload URLs) have their path kept but their origin replaced with the deployment host.
+
+## Auth Lambda error responses (LOA-3547)
+
+The Encompass API Gateway Lambda authorizer (`infra/lambda/auth/encompass.ts`) returns structured
+error bodies on credential failures:
+
+- **No credentials / credentials rejected** — returns 403 `{ code: "LENDER_NOT_SET_UP", ... }` so
+  the plug-in can show the Book-a-call screen (see [frontend plug-in](/integrations/frontend-plugin)).
+- **Other 400/403 OAuth errors** (bad scope/audience) — returns 502 without a `code` field;
+  treated as an infrastructure error, not a sales surface.
+
+All previously generic 502 responses from the Lambda are now classified into the two buckets above
+so the plug-in can distinguish a configuration gap from an infrastructure failure.
+
 ## Internal test shim
 
 An internal HTTP shim, `POST /api/v1/integration-events/process`, validates the same Zod

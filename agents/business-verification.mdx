@@ -1,10 +1,14 @@
 ---
 title: Business Verification agent
-description: Secretary of State lookup via Cobalt Intelligence for self-employed borrowers and vesting entities.
+description: Secretary of State lookup via Cobalt Intelligence for self-employed borrowers and vesting entities. Forms the "Secretary of State Validation" half of the portal's Entity Health Check page.
 icon: building-2
 ---
 
 The Business Verification agent (`businessVerification`) checks whether each self-employed borrower and the loan's vesting entity are registered and active with their state's Secretary of State, using the Cobalt Intelligence provider.
+
+<Note>
+In the portal this agent's results are combined with [Adverse Media Screening](/agents/adverse-media-screening) on a single **Entity Health Check** page. The two sections — "Secretary of State Validation" and "Public Records Check" — each show their own agent state independently, so one part never changes the other's cards.
+</Note>
 
 <Note>
 This agent is **entitlement-gated**: it runs only for lenders holding an explicit `enabled=true` entitlement row. The router's zero-rows fallback (all active agents for an un-seeded lender) does not grant it. See `requiresExplicitGrant` in [Agent catalog and pipeline](/agents/catalog-and-dependencies).

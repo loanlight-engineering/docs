@@ -1,0 +1,189 @@
+---
+title: Adverse Media Screening agent
+description: Automated public-records search via Google/SerpApi for self-employed borrowers and vesting entities.
+icon: search
+---
+
+The Adverse Media Screening agent (`adverseMedia`) runs targeted Google searches — via SerpApi — for
+self-employed borrowers and vesting entities, then uses HasData to fetch and analyse news articles
+from every result that looks like a possible hit. It replaces the manual Google check and the paid
+LexisNexis negative-news search that lenders previously ran before closing.
+
+<Note>
+This agent is **entitlement-gated**: it runs only for lenders holding an explicit
+`enabled=true` entitlement row for `adverseMedia`. The router's zero-rows fallback does not
+grant it. It is currently available on EPC and partner lanes only. See
+`requiresExplicitGrant` in [Agent catalog and pipeline](/agents/catalog-and-dependencies).
+</Note>
+
+<Warning>
+v1 is inert until the live-vendor probe has run (real SerpApi / HasData fixtures, confirmed
+word-count behaviour, legible screenshots). No lender is granted it until that probe completes
+and open legal items (FCRA, O1) are resolved. Merging the code changes nothing for any lender.
+</Warning>
+
+## Trigger and subject selection
+
+The agent runs on **the same trigger as Business Verification**: a loan is screened only when at
+least one borrower's current 1003 job is a named self-employed business, or the loan file names a
+vesting entity. A loan with neither is skipped as `no_business` (not applicable) before any paid
+call is made.
+
+For each loan that meets the trigger, the agent builds a plan of **subjects**:
+
+- **Self-employed borrowers** — each borrower whose current 1003 employment is self-employed
+  contributes two subjects: the person and the business they own. W-2 borrowers and their employers
+  are never searched.
+- **Vesting entity** — the MISMO vesting entity produces one subject unless its cleaned name
+  matches a self-employed borrower's business (deduplicated).
+
+Each subject is searched as either `person`, `business`, or `vesting_entity`.
+
+## Search strategy
+
+For each subject the agent runs multiple Google searches across risk areas, using SerpApi.
+
+### Risk areas by subject type
+
+**People** (4 risk areas):
+- Fraud and financial crime
+- Legal and criminal
+- Property and title (narrowed to what neither the credit report nor ATTOM covers)
+- Possible undisclosed obligation
+
+**Businesses** (5 risk areas):
+- Fraud and financial crime
+- Legal and criminal
+- Financial distress
+- Property and title (including foreclosure)
+- Business conduct
+
+Each risk area runs searches on the name alone, then again anchored to city (people) or state
+(businesses). People are additionally searched with name + their business.
+
+### Query construction
+
+Queries use valid Google syntax: quoted names, uppercase `OR`, noise exclusions including
+people-finder sites. A 32-word limit applies — a term that cannot fit beside a long name on its own
+query is skipped, but all other terms are still searched.
+
+<Note>
+**Fair-lending guardrails.** `\"divorce\"` and `\"palimony\"` are never searched (ECOA/Reg B).
+Obligation hits are labelled `\"Possible undisclosed obligation\"`, never `\"adverse\"`.
+Only names, city, state, and business names go to Google; only an approximate age (never the
+date of birth) is sent to the LLM. No vendor name appears in any lender-facing output,
+enforced by a test.
+</Note>
+
+## Two-phase judgment
+
+**Phase 1 — Mark each search.** An LLM reads SerpApi's page-1 organic results plus Top Stories
+against the subject's profile. Every result is judged exactly once. An unjudged search is never
+marked Clear.
+
+**Phase 2 — Deep-dive Possible hits.** For every subject with at least one Possible hit, HasData
+fetches up to 5 articles. The LLM decides whether each is the same person, what happened, when, and
+the stage (alleged, charged, convicted, etc.), then writes a plain-English summary per subject.
+
+Screenshots of every Google results page (hit or not) are rendered offline in Chromium, with
+JavaScript off and all outbound network requests aborted, and stored in S3 as evidence.
+
+## Safety properties
+
+- **Fails closed.** A failed, unjudged, or never-run search never upgrades a subject to Clear or
+  "likely a different person". A subject that couldn't be checked shows every completed result under
+  a "Some searches could not be completed" notice.
+- **Checkpoint-and-resume.** Every step is checkpointed so a retried or resumed job never repeats
+  a completed paid search, render, or LLM call whose result was saved.
+- **Bounded run.** A 10-minute cap for searches, then any screenshot backlog, then a 4-minute Phase
+  2 budget from when Phase 2 starts.
+- **Tenant isolation.** The screenshot endpoint serves only a search's own key, scoped by audit and
+  lender.
+- **Privacy.** Only names, city, state, and business names go to Google. Only an approximate age
+  reaches the LLM.
+
+## Portal presentation — Entity Health Check
+
+In the portal the agent's results are **merged with Business Verification** on a single page called
+**Entity Health Check** (`/results/audits/[auditId]/business-verification`). The page has two
+independent sections:
+
+- **Secretary of State Validation** — Business Verification's state-filing results.
+- **Public Records Check** — Adverse Media Screening results, one card per screened subject.
+
+Each section shows its own agent state (results, still running, didn't finish, not applicable)
+independently. A section whose agent was not granted, not run, or skipped is omitted entirely. The
+nav badge sums both agents' rows to look at; `!` appears when a part failed with nothing to count.
+
+The overview card on the audit overview page counts findings from both agents under the **Entity
+Health Check** entry. Either agent failed or still running keeps the entry from reading complete.
+
+<Note>
+There is no separate Adverse Media page, nav entry, or overview card. Adverse media findings are
+surfaced only through the Entity Health Check section.
+</Note>
+
+## Data model
+
+Three tables are created by migration `0246_adverse_media_tables.sql`. All have
+`ON DELETE CASCADE` FKs to `audit_runs`.
+
+### adverse_media_subjects
+
+One row per screened subject per audit run. Position is stable per audit.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `audit_run_id` | uuid NOT NULL | FK → `audit_runs` (cascade) |
+| `lender_id` | uuid NOT NULL | FK → `lenders` |
+| `loan_id` | uuid | Nullable; FK → `loans` ON DELETE SET NULL |
+| `position` | integer NOT NULL | Stable ordinal; unique per audit |
+| `kind` | text NOT NULL | `person`, `business`, or `vesting_entity` |
+| `borrower_label` | text | `Borrower` / `Co-Borrower` (null for entities) |
+| `profile` | jsonb | Name, city, state, and approximate age used in searches |
+| `summary` | jsonb | LLM-written plain-English summary after Phase 2 |
+| `unusable_reason` | text | Set when the subject could not be searched |
+
+### adverse_media_searches
+
+One row per individual Google search. Each row belongs to one subject and one audit run.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `subject_id` | uuid NOT NULL | FK → `adverse_media_subjects` |
+| `audit_run_id` | uuid NOT NULL | Composite FK with `subject_id` to `adverse_media_subjects` |
+| `risk_area` | text NOT NULL | `fraud_financial_crime`, `legal_criminal`, `financial_distress`, `property_title`, `business_conduct`, or `undisclosed_obligation` |
+| `anchor` | text NOT NULL | `name_only`, `name_city`, `name_state`, or `name_business` |
+| `query` | text | Exact query string sent to Google |
+| `status` | text NOT NULL | `pending`, `answered`, `failed`, `skipped` |
+| `triage` | text | `clear`, `possible_hit`, `needs_review` |
+| `evidence` | jsonb | Screenshot S3 key, HTML S3 key, SHA-256 fingerprints |
+
+### adverse_media_articles
+
+One row per article fetched via HasData for a Possible hit subject.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `subject_id` | uuid NOT NULL | FK → `adverse_media_subjects` |
+| `url` | text NOT NULL | Unique per subject |
+| `title` | text | |
+| `source` | text | Publisher or domain name |
+| `analysis` | jsonb | LLM verdict, event stage, date, and summary |
+
+The agent catalog row is seeded by migration `0247_seed_adverse_media_agent.sql`:
+`agent_type = 'adverseMedia'`, `display_name = 'Adverse Media'`, `is_billable = true`.
+
+## Related
+
+<Columns cols={2}>
+<Card title="Business Verification agent" href="/agents/business-verification">
+  The Secretary of State Validation half of Entity Health Check.
+</Card>
+<Card title="Agent catalog and pipeline" href="/agents/catalog-and-dependencies">
+  How entitlement grants and the trigger model work.
+</Card>
+</Columns>

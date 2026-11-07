@@ -133,9 +133,19 @@ Two accounts sharing the same last-4 merge into a single group (documented same-
   `warning_days` after the baseline. `business_days` mode skips weekends.
 - A special case adopts a different `expiration_days` only if it is **more restrictive**.
 
-`issueKind` enum: `expired | expiring_soon | date_missing | date_invalid | valid |
+|`issueKind` enum: `expired | expiring_soon | date_missing | date_invalid | valid |
 missing_document | closing_date_inconsistent`. This enum must remain a subset of the DB check
 constraint `doc_expiration_results_issue_kind_check`.
+
+**Government ID, passport, and visa expiration (LOA-863).** For document types that carry a
+printed expiration date (government IDs, foreign passports, visas, and visa/residency documents),
+expiration is determined solely by the document's own printed date against the audit date — the
+closing-date delta that applies to other doc types is not used. `expiryIsBeforeClosing` delegates
+to `expiresBeforeClosing` for all other types and applies `isExpired === true` for printed-date ID
+types. A 30-day warning window is lender-configurable via `warning_days`; expired IDs produce a
+blocking `expired` finding, and missing or unreadable dates produce `date_missing` (requires
+review). `isPrintedDateIdType(documentType)` in `printed-date-id-types.ts` lists the eligible
+types.
 
 <Warning>
 **Appraisals emit TWO results.** When `documentType === "appraisal"`, the node emits a primary
@@ -211,6 +221,16 @@ storage-shaped name never matched any expiration row. A DB backfill (migration
 LOA-1948 added a built-in check registry that turns URLA Section 1/4/5 declaration answers into
 conditional document requirements. The evaluator runs once per borrower (and once loan-wide for
 `loanContextField` triggers) inside `verify-required-documents`, after the program-required pass.
+
+**Alimony and family-law documents (LOA-2916).** When a borrower has an alimony obligation,
+alimony income, or a separated marital status, Document Health accepts **either** a divorce decree
+**or** a separation agreement — not both. The requirement is missing only when neither document is
+present, in which case one blocking `missing_document` finding names both document types. A
+**child support order** is required only when child support appears on the loan — specifically when
+`section1BorrowerInfo.otherIncomeSources[].otherIncomeSourceType === "CHILD_SUPPORT"` or
+`section2FinancialInfo.otherLiabilities[].otherLiabilityType === "CHILD_SUPPORT"`. A missing order
+produces the existing `conditional_document_unknown` level (non-blocking). Alternative satisfaction
+is modelled as a reusable mechanism in the requirement registry, not as a special case.
 
 ### Output families
 
