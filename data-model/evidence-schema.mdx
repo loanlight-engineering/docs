@@ -558,6 +558,38 @@ Both are sourced from the MISMO `LOAN` element. v8 is unchanged. No loanlight-ap
 
 Borrower leaves use the v7 source-bound borrower subject: one leaf per identified borrower, not an ordinal or loan-level aggregate. Conflicting duplicates and unresolved source values are preserved.
 
+## LOA-3160 — observation-credit.v2 (shared-types 9.5.0)
+
+`@loanlight-engineering/shared-types` **9.5.0** publishes `OBSERVATION_CREDIT_V2_REGISTRY`
+(`observation-credit.v2`). It carries every `observation-credit.v1` row unchanged and adds 13
+new credit-event codes. All new observations use `pdf` as their locator kind.
+
+`public_record` is a new valid subject kind on `ObservationDefinition.subjectKinds` and on
+emitted `ObservationSubject`. It is **observation-only**: `ObservationSubjectKind` itself is not
+widened, so the evidence views and `DeclarationSubjectKind` are unaffected.
+
+| Code | Kind | Subject | Value type |
+|---|---|---|---|
+| `credit.public_record.type` | observation | `public_record` | text |
+| `credit.public_record.status` | observation | `public_record` | text |
+| `credit.public_record.bankruptcy_chapter` | observation | `public_record` | text |
+| `credit.public_record.filed_date` | observation | `public_record` | date |
+| `credit.public_record.resolved_date` | observation | `public_record` | date |
+| `credit.report.public_records_section` | derived_input | `borrower` | boolean |
+| `credit.tradeline.account_type` | observation | `account` | text |
+| `credit.tradeline.late_30_count` | observation | `account` | decimal |
+| `credit.tradeline.late_60_count` | observation | `account` | decimal |
+| `credit.tradeline.late_90_count` | observation | `account` | decimal |
+| `credit.tradeline.history_window_months` | observation | `account` | decimal |
+| `credit.tradeline.late_incident_date` | observation | `account` | date (required period) |
+| `credit.tradeline.late_incident_severity` | observation | `account` | text (required period) |
+
+The two incident codes (`late_incident_date`, `late_incident_severity`) require a period qualifier.
+The derived `public_records_section` flag has no locator. All other rows use the `pdf` locator.
+
+All adopters are `EDU-30`. This snapshot is the registry the loanlight-api credit-events
+producer reads when emitting credit-event observations on the evidence ledger.
+
 ## Related
 
 <Columns cols={2}>

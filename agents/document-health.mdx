@@ -199,6 +199,19 @@ same key the reader uses. A rolled-back persist records `persist_failed`; a term
 records `audit_run_terminal`; a graph error the runner swallowed records `graph_failed`. No failure
 path records checks.
 
+**1003 per-signer signature verdicts (LOA-3338).** For `urla_1003` documents, the aggregate node
+resolves signature requirements before fan-out and stores per-signer decisions in
+`signer_decisions` on the result row. Each identified signer (every borrower on the URLA roster
+plus the loan originator) gets its own verdict — `signed`, `missing`, or `could_not_verify` — with
+a `severity` of `blocker` or `warning`, the signer's display name from the URLA roster, and the
+page numbers that were checked and unchecked. The aggregate merges copies of the same 1003 (by
+role and borrower index) so that signed evidence from one copy beats a missing verdict on another.
+An `audit_errors` row (`issueKind: "signature_missing"`) is written per missing signer, not per
+document — a 1003 missing two borrowers' signatures produces two `audit_errors` rows. Results
+written before LOA-3338 (where `signer_decisions IS NULL`) fall back to the legacy single-row
+behavior. The URLA roster is read from URLA extraction hand-off data; when the roster is
+unavailable, signer names fall back to numbered borrower labels.
+
 Emits `EVENTS.AGENT.DOCUMENT_HEALTH.COMPLETE` and returns `{ completed: true }` (even on error, to
 avoid loops).
 
@@ -533,6 +546,27 @@ One row per page-completeness result.
 One row per signature finding, written transactionally (confidence stored as string). Each
 `doc_signature_verification_evidence` row carries a `verification_failed` boolean (migration `0200`,
 LOA-1566) so a failed vision call is distinct from a real "no signature on this page" reading.
+
+**`signer_decisions` (migration `0248`, LOA-3338).** A nullable JSONB array column on
+`doc_signature_verification_results`. Present on `urla_1003` results only; null on all other
+document types and on results written before LOA-3338. Each element is a `SignerDecision`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `role` | `"borrower" \| "loan_originator"` | Which signer this record covers |
+| `borrowerIndex` | `integer \| null` | Borrower ordinal from the URLA roster; always null for `loan_originator` |
+| `verdict` | `"signed" \| "missing" \| "could_not_verify"` | Outcome for this signer |
+| `severity` | `"blocker" \| "warning"` | Whether the missing/unverifiable signature blocks the audit |
+| `displayName` | `string` | The signer's name as resolved from the URLA roster |
+| `pagesChecked` | `integer[]` | Pages vision actually examined for this signer |
+| `pagesUnchecked` | `integer[]` | Pages within scope that were not examined (incomplete coverage) |
+| `reason` | `string?` | Human-readable reason when verdict is not `signed` |
+
+Results written before the migration treat `signer_decisions = null` as the legacy single-row
+behavior: a single `doc_signature_verification_results` row per document with no per-signer
+breakdown. The `documentSignatureFindings` reader merges `signer_decisions` across copies of the
+same 1003 (by role + borrower index), with signed evidence winning over missing or unverifiable
+copies.
 </ResponseField>
 
 <ResponseField name="audit_errors" type="table">

@@ -189,6 +189,15 @@ The tables live in `database/schema/income-*.ts`. See
 `reviewState` (default `none`), `requiresReview`, `pendingReviewCount`, `totalMonthlyIncome`
 (numeric), `blockedActions` (jsonb), `failureReason`, `failureDetail`,
 `ruleSetId`/`ruleSetVersion`, `currentStage`, and `completedAt`.
+
+**Borrower entity binding (migration `0249`, LOA-3160):** two nullable columns bind a run to a
+declared borrower entity:
+- `borrowerEntityId` (uuid, nullable) — the evidence entity id of the bound borrower.
+- `borrowerEntityBoundBy` (uuid, nullable, FK → `portal_users`) — the portal user who set the binding.
+
+The API validates that the entity is a `role`-kind, `borrower`-kind `evidence_entities` row for
+the same loan; it rejects an entity from a different loan. Existing rows remain null; a null
+bind entity falls through to the `incomeRecordBorrower` attribution steps (see below).
 </ResponseField>
 
 <ResponseField name="income run children" type="tables">
@@ -197,6 +206,13 @@ The tables live in `database/schema/income-*.ts`. See
 `anomalies`), `income_extraction_corrections` (overlaid on recalc), `income_streams`,
 `income_findings`, `income_conditions`, and `income_rule_outcomes` (unique
 `(runId, ruleCode, ruleSetId)`).
+
+**`income_streams.method_version` (migration `0249`, LOA-3160):** a nullable `text` column that
+identifies which calculator version produced each stream. Each income-type calculator stamps the
+stream it writes with a code of the form `income.<type>.calculation.v1` (for example,
+`income.w2.calculation.v1`). A stream with no `method_version` reads as
+`unknown(method_unversioned)` in downstream eligibility consumers. All existing streams retain
+`null` and are treated as unversioned.
 </ResponseField>
 
 <ResponseField name="rule config and overrides" type="tables">
@@ -204,6 +220,25 @@ The tables live in `database/schema/income-*.ts`. See
 COALESCE unique on `(lenderId, ruleCode, loanProgramId)`), and `income_run_rule_overrides`
 (per-run, latest wins). Export PDFs are produced by the `income-export` module.
 </ResponseField>
+
+## Borrower attribution for income records (LOA-3160)
+
+`incomeRecordBorrower` in `audits/evidence/income/borrower-attribution.ts` is the single,
+shared function both the income-gate producer and the admission recompute use to determine
+which declared borrower entity an income run or bank-statement file belongs to. It applies
+these steps in order:
+
+1. **Declared borrower set unavailable** — returns `unknown(declared_borrowers_unknown)`. The
+   set is unavailable when EDU-06 declared-input read fails or the loan has no evidence.
+2. **Bound entity in the declared set** — returns `attributed` to that entity.
+3. **Bound entity not in the declared set** — returns `unknown(entity_not_declared)`.
+4. **File names a second borrower** (`namesMultipleBorrowers: true`) — returns `unattributed`.
+5. **Single declared borrower** — returns `attributed` to that entity; otherwise `unattributed`.
+
+Attribution is always through a declared borrower entity id, never through a name. For
+bank-statement files, the enqueue also refuses a bind on a file that names a co-borrower (a joint
+file cannot claim one borrower). The calculated income gate uses attribution from this function
+to organize income figures by borrower on the evidence ledger.
 
 ## HTTP endpoints
 

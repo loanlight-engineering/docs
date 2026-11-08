@@ -209,7 +209,7 @@ Selected enums:
 | `EvidenceSchema.source_method` | `pdf_rule_based`, `pdf_table_model`, `pdf_regex`, `pdf_ocr`, `mismo_xml`, `vendor_json`, `pdf_hil_confirmed`, `reducto_extract`, `reducto_table` |
 | `BureauNameEnum` | `experian`, `equifax`, `transunion` (+ `unknown`) |
 | `AccountTypeEnum` | `mortgage`, `installment`, `revolving`, `charge_card`, `student_loan`, `auto`, `credit_card`, `heloc`, `personal_loan`, `line_of_credit`, `collection`, `alimony`, `child_support`, `other` |
-| `AccountStatusEnum` | `open`, `closed`, `paid`, `charged_off`, `collection`, `foreclosure`, `repo`, `settled`, `deferred`, `unknown` |
+| `AccountStatusEnum` | `open`, `closed`, `paid`, `charged_off`, `collection`, `foreclosure`, `repo`, `settled`, `deferred`, `forbearance`, `unknown` |
 | `PublicRecordTypeEnum` | `bankruptcy`, `tax_lien`, `judgment`, `foreclosure`, `short_sale`, `deed_in_lieu`, `civil_claim`, `other` |
 | `InquiryTypeEnum` | `hard`, `soft`, `unknown` |
 | `AlertTypeEnum` | `fraud_alert`, `active_duty_alert`, `id_theft_statement`, `ofac_notice`, `file_freeze`, `other` |
@@ -220,6 +220,34 @@ credit balance contributes zero; when the balance cannot be read, the agent fall
 printed payment. All other account types retain their printed payments. Authorized-user exclusions
 are unchanged. Both tradeline summary tables in the portal show a "5% of balance" basis line for
 eligible charge-card rows.
+
+**Student-loan minimum-payment rule (LOA-3318 — counting rule v3).** New runs stamp
+`summaries.liabilities.counting_rule_version = 3` (stamped by `computeLiabilitySummary`,
+current default). An open student loan counts its **1% of balance** when any of the following
+apply: (a) no payment is printed or the printed payment is zero or negative, (b) the loan is
+`deferred`, or (c) the loan is in `forbearance`. When a positive printed payment exists on an
+open, non-paused student loan it counts that printed amount (`PRINTED` outcome). The 1% floor is
+`studentLoanFloor(tradeline)`. Every other account type retains the v2 rule.
+
+**Short-term exclusion rule (LOA-3317 — counting rule v4, current default).** The active
+`CURRENT_COUNTING_RULE_VERSION` is **4**. An open `mortgage`, `installment`, `auto`,
+`student_loan`, or `personal_loan` with 10 or fewer payments left counts **no monthly payment**
+(its balance still counts toward liabilities). Remaining payments are computed as
+`ceil(balance / v3_counted_payment)` in whole cents, using the student-loan minimum-payment as
+the divisor for deferred or forbearance student loans so they are never prematurely excluded.
+A `lease` is not in the excluded types — it always counts its payment. Non-student paused loans
+(`deferred`, `forbearance`) retain the v3 rule and count in full. Runs stamped v0–v3 keep their
+prior rules; a re-run uses the current rule version.
+
+**`forbearance` status.** `forbearance` is a recognized `AccountStatusEnum` value (LOA-3318)
+and counts as open everywhere `deferred` does: `isOpenAccountStatus` returns `true`, the
+Tradeline Summary tables treat it like `deferred`, and student loans in forbearance use the 1%
+floor. Existing runs cannot hold a `forbearance` row; it appears only on new extractions.
+
+**`lease` account type.** `lease` tradelines (LOA-3318) are counted as `installment` placement
+for the monthly-liabilities rollup and are labelled **"Installment"** in the portal. They are
+never a fixed-payment type and never excluded by the v4 short-term rule. Lease and
+`child_support` prompt mappings were added to the extraction instruction.
 
 `ScoreSchema.score_value` is an integer 300–900 with a refine for FICO ≤ 850. The `summaries`
 block carries `liabilities` (`total_monthly_debt`, housing/installment/revolving debt, secured
@@ -644,6 +672,37 @@ Returns a `CreditLoanView` assembled by `CreditLoanProjectionService`. Proxied f
 
 - **Reserves axis** (`documentedReserveMonths`): `lib/loan-context/reserves.ts` now computes this from URLA §2a liquid assets. The computation runs through `loan-context.service.ts::buildForAuditRun` and is threaded into `EligibilityContext` and `LoanContextAxes`. This field now has a producer and CRED_025's reserves evaluation can proceed.
 - **HPML gate** (`isHpml`, `annualPercentageRate`, FFIEC APOR table, rate-set lock date): all four required fields have **no producer**. `grep` over `packages/api/src` returns zero instances of `annualPercentageRate`, no APOR table or HPML computation, and only a `rateLockStatus` string (not a date). Until these producers are built, CRED_025's HPML branch evaluates to `NEEDS_INFO`.
+
+**Collection-status tradelines as collection items (LOA-3112).** CRED_015, CRED_021, and CRED_026
+now read collections from **both** sources a credit report uses to record them:
+
+1. **`facts.collections`** — the dedicated collections list (prior behavior).
+2. **`account.status === "collection"` tradelines** — a collection recorded with its own account
+   number is written as a collection-status tradeline. Before LOA-3112 it never triggered
+   CRED_015 or CRED_021; evidence showed 35 of 43 loans with an unpaid collection-status
+   tradeline receiving a false `PASS`.
+
+`buildCollectionItems(facts)` in `rules/definitions/collection-sources.ts` merges the two
+sources with a one-to-one matching algorithm:
+- **Decision A:** a tradeline qualifies when `account.status === "collection"` exactly. Its
+  amount is `current_balance` (0 included), or `past_due` only when the balance is missing.
+- **Decision B:** matching uses holder name and amount. Names are normalized (NFKC, uppercase,
+  runs of non-letter/digit to one space, trailing LLC/INC/CORP/etc. dropped). Amounts agree at
+  exact cents. `duplicate` = both keys agree; `distinct` = both disagree; `unknown` = neither
+  case. Only open list entries pair; no dedup within one source.
+- An unpaired tradeline is `uncertain` only when it has no `duplicate` relation and is `unknown`
+  against an open entry the matching left unmatched; otherwise `kept`.
+
+The three-way cap rule for CRED_021 and CRED_026: certain total ≥ cap → WARNING; full total
+< cap → PASS; otherwise NEEDS_INFO (a possible cross-source duplicate straddles the cap).
+Absent `tradelines` on a capped rule is NEEDS_INFO when `include_charge_offs` is set.
+
+All amounts are computed in exact integer cents (`Cents` opaque type in `collection-sources.ts`).
+Each threshold converts to cents once at the rule boundary; production thresholds (0, 2000,
+5000, 15000) are whole cents, so no rounding difference arises on list-only reports.
+
+A collection-status tradeline is **not** counted in Monthly Liabilities
+(`computeLiabilitySummary` reads only open/deferred tradelines; this card does not change that).
 
 **CRED_026 — Aggregate Collections Cap (Medical/Window Carve-out) (LOA-2391)**
 

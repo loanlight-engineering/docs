@@ -68,7 +68,13 @@ See the [Income agent](/agents/income-analysis). Income is a module pipeline (no
 
 Plus `borrower_name`, `requires_review`, `pending_review_count`, `failure_reason`, `failure_detail`, `rule_set_id` → `income_rule_sets` (set null), `rule_set_version`, `current_stage`, timestamps, `completed_at`.
 
-Run children (all FK `run_id` → `income_runs`, cascade): `income_run_sources` (links to `loan_documents` + `document_classifications`), `income_extractions` (unique `(run_id, source_id)`), `income_streams`, `income_findings`, `income_conditions`, `income_rule_outcomes` (unique `(run_id, rule_code, rule_set_id)`), `income_run_rule_overrides`, and `income_extraction_corrections` (FK to `income_extractions`). Lender-scoped overrides live in `income_lender_rule_overrides` (migration-only COALESCE unique `(lender_id, rule_code, loan_program_id)`).
+**Borrower entity binding (migration `0249`, LOA-3160):**
+- `borrower_entity_id` uuid, nullable — the evidence entity id the reviewer bound this run to.
+- `borrower_entity_bound_by` uuid, nullable, FK → `portal_users` — the user who set the binding.
+
+Run children (all FK `run_id` → `income_runs`, cascade): `income_run_sources` (links to `loan_documents` + `document_classifications`), `income_extractions` (unique `(run_id, source_id)`), `income_streams` (each with `method_version text` nullable — see below), `income_findings`, `income_conditions`, `income_rule_outcomes` (unique `(run_id, rule_code, rule_set_id)`), `income_run_rule_overrides`, and `income_extraction_corrections` (FK to `income_extractions`). Lender-scoped overrides live in `income_lender_rule_overrides` (migration-only COALESCE unique `(lender_id, rule_code, loan_program_id)`).
+
+**`income_streams.method_version` (migration `0249`, LOA-3160).** Each income-type calculator stamps the stream it writes with a calculator version identifier (`income.<type>.calculation.v1`, e.g. `income.w2.calculation.v1`). A null value means the stream was written before LOA-3160 and reads as `unknown(method_unversioned)` in eligibility consumers.
 
 `income_rules` matches `appraisal_rules` shape; its `source_template_id` → `appraisal_rule_templates` (set null), and it uses the **14-value** operator union (no `abs_less_than*` — income did not receive the migration `0190` parity widening that credit did).
 
@@ -132,6 +138,11 @@ Other columns: `name`, `created_by`, the `processing_*` progress columns, `incom
 - `self_employed` boolean NOT NULL DEFAULT false (migration `0243`, LOA-1687). When `true`, payroll-classified deposits are excluded from qualifying income. Opt-in, zero behavior change unless the reviewer checks it.
 - `borrower_name` text (migration `0245`, LOA-1690). Borrower name captured at enqueue time; seeds family/spousal P2P transfer matching.
 - `co_borrower_name` text (migration `0245`, LOA-1690). Co-borrower name; same purpose.
+
+**Borrower entity binding (migration `0249`, LOA-3160):**
+
+- `borrower_entity_id` uuid, nullable. The evidence entity id (`evidence_entities.id`) of the borrower this bank-statement file is bound to. The API validates it is a `role`-kind, `borrower`-kind entity for the same loan before accepting the bind.
+- `borrower_entity_bound_by` uuid, nullable, FK → `portal_users` (ON DELETE NO ACTION). The portal user who performed the binding. The enqueue refuses a bind on a joint file (one that names a co-borrower) since a joint file cannot claim a single borrower.
 
 <Note>
 `borrower_files.large_deposit_threshold_mode` is a **text + CHECK** column, distinct from the `large_deposit_threshold_mode` **pgEnum** on `asset_rule_sets`. The text version adds `pct_avg_qualifying_income`, which the asset enum lacks — see [enums reference](/data-model/enums-reference).
