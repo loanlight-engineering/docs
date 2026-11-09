@@ -55,6 +55,7 @@ Controller: `portal-audits/portal-audits.controller.ts` at `api/v1/portal/audits
 | `GET /api/v1/portal/audits/:auditId/checks-completed` | Checks-completed section |
 | `GET /api/v1/portal/audits/:auditId/credit` | Credit section |
 || `GET /api/v1/portal/audits/:auditId/eligibility` | `EligibilityFindingsResponse` — verdict fields (`auditRunId`, `findings[]`) from `eligibility_results`; surfaced as `effectiveMaxLtv`, `appliedCaps`, `appliedReductions`, `loanLtv`, and `gridBaseLtv` on each finding (LOA-1966). `loanLtv` is the loan's own LTV — present on every row of an evaluation that resolved one, the same value on each row. `gridBaseLtv` is the raw grid cell before caps and reductions. Both are reporting fields, never grading inputs. The underlying reads run in a `repeatable read` transaction (LOA-2193) so findings and readiness rows always describe the same evaluation. Consumed by the portal eligibility card (LOA-2032). |
+|| `GET /api/v1/portal/audits/:auditId/ltv-ledger` | LTV ledger projection for the audit (LOA-2947). Behind `isEvidenceOutputEnabled`; answers like an unmatched path (404) when the flag is off. See [LTV ledger read-back](#ltv-ledger-read-back-loa-2947) below. |
 | `GET /api/v1/portal/audits/:auditId/errors` | `PortalAuditErrorsResponse` |
 | `GET /api/v1/portal/audits/:auditId/documents/by-name/:filename/pdf` | Document PDF by name |
 
@@ -123,6 +124,26 @@ Every section the portal frontend reads is exposed under `api/v2/audits/:id/<sec
 
 <Warning>
 Each section the frontend reaches must have a matching Next.js proxy route in `packages/app`, or it 404s silently — the frontend absorbs the failure to `null`. This is how the `overview` section once shipped broken. When adding a new section, add both the NestJS handler and the proxy route.
+</Warning>
+
+## LTV ledger read-back (LOA-2947)
+
+`GET /api/v1/portal/audits/:auditId/ltv-ledger` reads the LTV ledger projection produced by the Evidence-Driven Underwriting (EDU) pipeline for the requested audit. The route is guarded by the same `PortalAuditsAuthGuard` class guards (results-view token) that protect the other per-section endpoints. It is behind a per-lender `isEvidenceOutputEnabled` gate: when the flag is off (the default for all current lenders), the route answers exactly as an unmatched path and never reads rules or ledger rows.
+
+The BFF proxy route lives at `packages/app/src/app/api/v2/audits/[auditRunId]/ltv-ledger/route.ts` using `proxyPortalAuditsRoute`.
+
+<ResponseField name="ledger" type="object | null">
+The LTV ledger projection (`version: 3`) scoped to this audit's own generation. `null` when the audit has no publication of its own (a sibling audit of the same loan that published state does not substitute — each audit answers only for itself).
+</ResponseField>
+<ResponseField name="stale" type="boolean">
+`true` when the audit's own inputs have changed since the ledger was computed. A newer sibling audit's id is named in `newerAuditId`. Shadow audits are never picked, so `newerAuditId` never names an experiment arm.
+</ResponseField>
+<ResponseField name="newerAuditId" type="string | null">
+When `stale` is `true`, the id of a newer audit of the same loan whose inputs supersede this audit's.
+</ResponseField>
+
+<Warning>
+A gate-read fault also answers 404 (not 500) on this route. This deliberately diverges from the `evidence` route, where a gate fault returns 500. A guard DB fault answers 500 (before the gate).
 </Warning>
 
 ## Related pages

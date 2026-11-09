@@ -849,7 +849,7 @@ The fields were renamed between spec and as-built: LOA-1368/1374 spec'd `improve
 `cost_approach.adu_sqft`. Grepping `has_adu` finds nothing.
 </Note>
 
-#### Deephaven HELOC appraisal bundles (LOA-3505, #5331)
+#### Deephaven HELOC appraisal bundles (LOA-3505, LOA-3506)
 
 Deephaven's HELOC client (`deephaven-uat-avm-only-demo` in INT) receives its appraisal rules as
 three staged bundles applied together:
@@ -858,14 +858,36 @@ three staged bundles applied together:
   guide (DH WHSL EA HELOC Guidelines 10.13.2026), rule codes `CUST_DEE1NNNN` / template prefix
   `DHH_NNN`. Each copy is independent of its main Deephaven sibling; later edits to the main
   `deephaven` bundle never reach the HELOC client.
-- **`deephaven-heloc-checklist`** — 14 checklist checks (all WARNING) covering checklist items
-  107, 109, 300, 502, 700, 702, 803, 1107, 1203, 1208–1210, 1305, and lender/client identity (105).
-  Every finding names its checklist item number. Missing data reports `needs_info`, never pass or
-  fail.
-- **`deephaven-heloc-checklist-extraction`** — 23 extraction-dependent checklist items (all WARNING),
-  fed by Clear Capital XML when available (LOA-3506). XML-sourced fields take precedence over PDF
-  extraction when both are present. Missing data reports `needs_info`. The bundle is applied together
-  with the other two HELOC bundles.
+- **`deephaven-heloc-checklist`** (v2) — checklist checks (all WARNING) covering checklist items
+  107, 109 (1007 rent schedule, `CUST_DEEC0109`), 300, 502, 700, 702, 803, 1107, 1203, 1208–1210,
+  1305, and lender/client identity (105). Every finding names its checklist item number. Missing
+  data reports `needs_info`, never pass or fail.
+- **`deephaven-heloc-checklist-extraction`** (v3) — extraction-dependent checklist items (all WARNING),
+  fed by Clear Capital XML when available and by Reducto PDF extraction (LOA-3506). XML-sourced fields
+  take precedence over PDF extraction when both are present. Missing data reports `needs_info`. The bundle is applied together with the other two HELOC bundles.
+
+**LOA-3506: 8 more items now read the appraisal PDF.** The following `deephaven-heloc-checklist-extraction` items moved from XML-or-manual to actively reading Reducto-extracted fields:
+
+| Item | Rule | What it checks now |
+|---|---|---|
+| 109 | `CUST_DEED0109` (new) | An investment loan or 1025 appraisal includes a Form 216 / Freddie 998 operating income statement (`exhibits.has_operating_income_statement_216`). |
+| 302 | `CUST_DEEC0302` (new) | Zoning is Legal Nonconforming: appraiser comments on whether improvements could be rebuilt (`site.rebuild_ability_commented`). |
+| 500 | `CUST_DEEC0500` | On a 1025, a blank page-2 comparable count now warns instead of needing info. |
+| 504 | `CUST_DEEC0504` | A listing comparable is used and adjusted for the list-to-sale price ratio, or the appraiser explains why not (`sales_comparison.listing_comps_list_to_sale_adjusted`). |
+| 702 | `CUST_DEEC0702` | Remaining economic life under 30 years passes when the appraiser comments to support it (`cost_approach.remaining_economic_life_commented`). |
+| 1204 | `CUST_DEEC1204` | On Form 1073, original use and conversion date now read from the PDF as well as the Clear Capital XML (`project_info.original_use`, `project_info.conversion_date`). |
+| 1302 | `CUST_DEEC1302` | On a developer-controlled PUD, appraiser also comments on physical condition of common elements (`project_info.common_elements_condition_commented`). |
+| 1304 | `CUST_DEEC1304` | When comparables are outside the PUD, the appraiser must analyze how deed restrictions affect marketability and value (`sales_comparison.deed_restrictions_analyzed`). |
+
+**New Reducto fields (LOA-3506).** The optimized 2.6 and generated 3.6 contracts gain:
+- `site.rebuild_ability_commented`
+- `exhibits.has_operating_income_statement_216`
+- `sales_comparison.listing_comps_list_to_sale_adjusted`
+- `sales_comparison.deed_restrictions_analyzed`
+- `cost_approach.remaining_economic_life_commented`
+- `project_info.common_elements_condition_commented`
+- `project_info.original_use` (1073 only)
+- `project_info.conversion_date` (1073 only)
 
 The two-bundle split is required: RuleOps scans a bundle's canonical definition before
 registering it and refuses any fragment carrying an `in`/`not_in` JSON list when a bundle

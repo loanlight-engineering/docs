@@ -137,10 +137,16 @@ The BFF forwards to `GET /api/v1/portal/collateral-review/appraisals/:runId`. Th
 
 Order statuses: `pending`, `awaiting_callback`, `succeeded`, `failed`, `no_hit`, `declined`, `abandoned`.
 
-**Appraisal, evaluation, and inspection ordering via Clear Capital (LOA-3411, LOA-3415, LOA-3465).**
+**Appraisal, evaluation, and inspection ordering via Clear Capital (LOA-3411, LOA-3415, LOA-3465, LOA-3552).**
 When the HELOC decision is `order_appraisal`, `order_evaluation`, or `order_inspection`, the
-collateral review module places the order directly with Clear Capital. The `collateral_review_orders`
-table is extended for these order types:
+collateral review module places the order directly with Clear Capital.
+
+<Note>
+**All Clear Capital calls send `x-tenant-id` (LOA-3552).** Every outbound Clear Capital request — AVM, CDA, valuation orders, export polling, document fetch, and product lookups — now carries the lender's tenant id as `x-tenant-id`. The header `x-customer-id` is never sent. Clear Capital's v1.51 spec defines only `x-tenant-id` for multi-tenant integrations; production orders bill to the named tenant. The production base URL is `https://api.clearcapital.com/property-valuation-api`.
+
+**Valuation-ordering shadow requires a customer ID.** A lender without a Clear Capital customer ID configured cannot enable valuation ordering in shadow mode. The settings screen refuses a save that would put valuation ordering in shadow without an ID, and the API (`collateral-review-admin.service.ts`) returns a guard error.
+</Note>
+The `collateral_review_orders` table is extended for these order types:
 
 | New column | Notes |
 |---|---|

@@ -198,7 +198,7 @@ The extracted facts conform to `CreditFactsSchema`
 level: `report`, `borrowers` (≥1), `bureaus` (1–3), and optional `disputes[]`, `tradelines[]`,
 `inquiries[]`, `public_records[]`, `collections[]`, `alerts[]`, and `summaries`. The report-level
 `disputes[]` array (`ReportDisputeSchema`: `status` in `active | resolved`, `creditor`,
-`raw_remark`) backs rule CRED_023, and `report.is_first_time_homebuyer` backs CRED_022.
+`raw_remark`) backs rule CRED_023. `report.is_first_time_homebuyer` stores the URLA §5 declaration as context and as the borrower correction slot; the CRED_022 outcome is derived from ownership evidence, not from this field (LOA-3315).
 `PublicRecordSchema.resolved_date` (the discharge/dismissal/satisfied date, extracted by the
 Reducto generator) drives the credit-event seasoning in CRED_018.
 
@@ -310,57 +310,34 @@ path (`/admin/staged-credit-rules`) before any lender can adopt it. CRED_028 (Pu
 FAIL-Default) is registered shared but adopted only by First Colony.
 </Note>
 
-**CRED_022 — First-Time Homebuyer Program Eligibility (LOA-2739 / LOA-3223)**
+**CRED_022 — First-Time Homebuyer Program Eligibility (LOA-3315)**
 
-CRED_022 is scoped to DSCR loans only. Previously it could fire on non-DSCR Purchase/PrimaryResidence loans when MISMO carried `<HomeownerPastThreeYearsType>No</HomeownerPastThreeYearsType>`, causing `deriveIsFirstTimeHomebuyer("NO") === true` and a false `FAIL`. The defect was scope, not derivation logic: the first-time homebuyer eligibility signal is an underwriting consideration only on DSCR programs. A non-DSCR loan where the borrower self-declares non-ownership yields `SKIPPED`.
+CRED_022 evaluates each borrower's first-time homebuyer status for programs where the lender has set `allow_fthb: false`. The verdict is derived entirely from **ownership evidence** at rule-evaluation time; the URLA §5 declaration is stored on `report.is_first_time_homebuyer` as context and the borrower correction slot, but is never an input to the outcome.
 
-**FTHB rebuttal from housing tradelines (LOA-2723).** `mergeCandidates` now runs a second
-pass — `rebutFirstTimeHomebuyerFromHousingTradelines()` (`lib/credit-pipeline/derivations/first-time-homebuyer.ts`) — after the URLA ownership-interest declaration check. When the borrower has at
-least one **open** housing tradeline (`account_type === "mortgage"` or `account_type === "heloc"`
-with `account_status === "open"`) on their credit report, the rebuttal overwrites
-`borrower.is_first_time_homebuyer` to `false`, regardless of what the URLA Section 5 declaration
-stated.
+**Scope.** The rule is `SKIPPED` (`does_not_apply`) when: (a) the loan is not DSCR; (b) the program does not ban first-time homebuyers (`allow_fthb` absent or `true`); or (c) the loan purpose is a refinance and the program bans first-time homebuyers.
 
-The rebuttal abstains — preserving the current FTHB value — in three cases:
-- `applicationBorrowerPartyCount` is absent (solo/portal credit path or URLA extraction failed).
-- `applicationBorrowerPartyCount` is greater than 1: a multi-borrower application may carry
-  housing tradelines that belong to a co-borrower, not the primary. The rebuttal does not attempt
-  to reconcile bureau `borrower_id`s against URLA ordinals.
-- The borrower has no open housing tradelines.
+**Decision hierarchy (per borrower).** Precedence order:
+1. **Underwriter correction** — a stored correction for `borrowers.N.identity.is_first_time_homebuyer` takes the highest precedence. A legacy correction value that is not exactly `"true"` or `"false"` resolves to `NEEDS_INFO`.
+2. **Qualifying ownership evidence (owner)** — an attributed owned mortgage, HELOC, or co-op credit-report row whose ownership span overlaps the lookback window; an in-window persisted deed; or a `current_owner` record from public records.
+3. **Unattributable evidence (unknown)** — evidence exists but cannot be dated or attributed reliably; contributes to `NEEDS_INFO` via `aggregateIsFirstTimeHomebuyer`.
+4. **No evidence found (first_time)** — no qualifying ownership evidence found within the window → FAIL.
 
-`applicationBorrowerPartyCount` is a graph state field, seeded by `urla-extraction-graph-runner.ts::
-buildUrlaHandoff` from the URLA extraction result and threaded into `mergeCandidates`.
+Outcomes from all borrowers feed `aggregateIsFirstTimeHomebuyer`: any `first_time` → FAIL; else any `unknown` → NEEDS_INFO; else PASS.
 
-**Configurable lookback (LOA-3223).** CRED_022 rows can carry an optional `fthb_lookback_months`
-threshold (integer 36–60). At the default of 36 (or absent), the rule grades on the persisted
-`borrower.is_first_time_homebuyer` flag from `mergeCandidates`, matching today's behavior.
-When set above 36, the rule computes an *effective* per-subject FTHB flag at evaluate time
-without mutating the persisted flag — CRED_025 and every other rule that reads
-`borrower.is_first_time_homebuyer` are unaffected.
+**Lookback window.** The `fthb_lookback_months` threshold (integer, default 36) defines the cutoff: `credit_report_date − fthb_lookback_months months`. A missing credit report date or audit clock produces no window; the check returns `NEEDS_INFO`.
 
-A subject is cleared (FTHB → not FTHB) by either of two evidence sources:
+**Evidence sources.**
+- **(A) Credit report** — an attributed owned mortgage, HELOC, or co-op tradeline (`classifyCreditRowSpan`) whose ownership span overlaps the window. Single-subject reports attribute rows when nothing suggests a second person. Two-subject reports use the WHOSE designator: `B` → first subject, `C` → second subject, `J` (joint) → both. A `deferred` owned mortgage counts as open.
+- **(B) Persisted deed** — an in-window recorded conveyance deed naming the borrower as a whole party, written from ATTOM sales history when `ownership_records_lookup: true`.
+- **(C) `current_owner` records** — owner blocks from ATTOM fetched and persisted during the public-records regrade. Only the match is persisted (borrower id, deed date, basis) — no names, raw addresses, or response payloads.
 
-- **A — credit report.** A mortgage, HELOC, or co-op tradeline attributed to that subject and
-  dated inside the extended window. Single-subject reports attribute tradelines only when nothing
-  suggests a second person was collapsed into the report. Two-subject reports use the
-  `WHOSE` designator (`B`/`C`/`J`) to assign rows: `B` → first subject, `C` → second subject,
-  `J` (joint) → both.
-- **B — public property records (ATTOM).** For subjects path A could not clear, `evaluateRules`
-  fetches ATTOM sales history (`AttomService.fetchSalesHistoryOnce`, one 15-second budget per
-  graph) and checks for a recorded conveyance deed naming the subject as a whole party at one of
-  their own addresses, dated inside the window. Only the match itself is persisted to
-  `facts.ownership_records` (borrower id, owner label, URLA extraction id, basis, deed date):
-  no names, addresses, or raw payloads.
+**Public records regrade.** Gated on `allow_fthb === false && ownership_records_lookup === true` on the CRED_022 row (the `ownership_records_lookup` boolean threshold is absent = false; off on all existing lender configurations). Candidates are non-`owner` borrowers. The regrade does not run on refinances.
 
-Clearing is blocked when a subject's §5 answer is "No" and any evidence (tradelines or deed)
-shows ownership within 36 months — CRED_022 stays `FAIL` regardless of the extended window.
-A subject whose FTHB flag an underwriter corrected is never cleared by evidence.
+**New 400 for boolean corrections.** `POST` credit corrections on any boolean-typed registry field — including `borrowers.N.identity.is_first_time_homebuyer` for borrowers 0 and 1 — returns **400** when the value is not exactly `"true"` or `"false"`.
 
-Correction replay never calls ATTOM. It re-checks each persisted `ownership_records` entry
-against the current window, the veto, and the corrections, without a new vendor call. The
-`fthb_lookback_months` threshold on CRED_022 is editable from the portal's credit rules table:
-a **CRED_022-only** "Edit Rule" dialog accepts whole months between 36 and 60 (the only rule
-with a working per-row editor — no generic rule editor exists).
+The `fthb_lookback_months` threshold on CRED_022 is editable from the portal's credit rules table (a CRED_022-only **Edit Rule** dialog, the only rule with a per-row editor).
+
+**Bundle changes (LOA-3315).** First Colony DSCR (`firstcolony-credit` v7) authors `fthb_lookback_months: 36`. Luxury (`luxury-credit` v3) authors separate per-program values on its Investor Cash Flow programs: PCF at 36 months, SCF at 60 months. Neither bundle sets `ownership_records_lookup`.
 
 ### Payment history lookback windows (LOA-3111)
 

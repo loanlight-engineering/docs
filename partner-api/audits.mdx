@@ -196,6 +196,40 @@ Four internal fields are stripped at the partner boundary: `interpretedLogic`, `
 also carries `coverage` over the labelled rule rows. This endpoint shares the same projection as
 `appraisalEvaluation` in the `/results` route. Status codes: `200`, `401`, `404`.
 
+## POST /api/v1/partner/ltv-evaluations (LOA-2947)
+
+<Note>
+This endpoint is excluded from the published partner OpenAPI (`@ApiExcludeController`). It evaluates LTV scenarios for internal tooling (Loan Lab) and is behind the same per-lender `isEvidenceOutputEnabled` gate as the portal LTV ledger route. When the gate is off, the endpoint answers exactly as an unmatched path (404).
+</Note>
+
+Evaluates a closed LTV scenario under the authenticated lender's **current** rules, without reading or writing any loan data. Useful for "what-if" LTV testing. The evaluation uses the same loan-path dispatcher as the EDU pipeline (`projectLtvEligibilityFacts`), but with stated values only and strict `{kind: "scenario", supplied_by: "tester"}` origins on every driver input.
+
+All body fields are optional. An omitted field resolves to `incomplete("absent")` in the evaluation, which may cause the grid result to be incomplete.
+
+<ParamField body="loanAmount" type="number">Stated loan amount.</ParamField>
+<ParamField body="appraisedValue" type="number">Stated appraised value.</ParamField>
+<ParamField body="ltv" type="number">Stated LTV. When omitted, the evaluator derives LTV from `loanAmount` and `appraisedValue` where possible.</ParamField>
+<ParamField body="state" type="string">Property state code.</ParamField>
+<ParamField body="declared.purpose" type="string">Declared loan purpose.</ParamField>
+<ParamField body="declared.occupancy" type="string">Declared occupancy type.</ParamField>
+<ParamField body="appraisal.units" type="number">Unit count.</ParamField>
+<ParamField body="appraisal.propertyType" type="string">Property type.</ParamField>
+<ParamField body="appraisal.condoWarrantability" type="string">Condo warrantability.</ParamField>
+<ParamField body="appraisal.rural" type="boolean">Rural property flag.</ParamField>
+<ParamField body="appraisal.declining" type="boolean">Declining market flag.</ParamField>
+<ParamField body="fico" type="number">Representative FICO score.</ParamField>
+<ParamField body="dscrRatio" type="number">DSCR ratio (non-negative finite).</ParamField>
+<ParamField body="listedForSale" type="boolean">Whether the property is listed for sale.</ParamField>
+<ParamField body="loanType" type="string">Loan type.</ParamField>
+<ParamField body="program" type="string">Program code.</ParamField>
+
+<ResponseField name="test" type="string">`"math"` — identifies this as a math-mode result, not a loan-evidence result.</ResponseField>
+<ResponseField name="lenderId" type="string">The lender whose current rules were used.</ResponseField>
+<ResponseField name="rules" type="object">Rule bundle metadata (`version`, `bundleVersion`, `bundleId`, `configSha256`, `catalogSha256`).</ResponseField>
+<ResponseField name="result" type="object">The LTV evaluation outcome in ledger-projection shape (same format as the portal LTV ledger route). No retained bundle or catalog content is included in the response.</ResponseField>
+
+Status codes: `200` (evaluation complete, possibly with absent/incomplete inputs); `400` (invalid input — non-finite number, unrecognised enum, extra key); `401`; `404` (gate off or rules unavailable).
+
 ## GET /api/v1/partner/audits/:auditId/classifications
 
 Document classifications for the run. `404` if not found/owned. Returns a `ClassificationsResponseDto` built by `buildClassificationsResponse(classifySplitPersistence.getClassificationsWithRun(auditId))`. See [classify-split](/subsystems/classify-split) for what classification produces.

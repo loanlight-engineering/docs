@@ -22,6 +22,21 @@ the latest publish, so cross-check the consumer's `package.json` when a contract
 looks missing.
 
 `shared-ui` is no longer published from this repo (LOA-3084). The portal consumes it as `packages/shared-ui`, a private workspace package inside `loanlight-api`, compiled through `transpilePackages`. The Encompass plug-in frontend was decoupled from `@loanlight-engineering/shared-ui` in the same change.
+
+**LOA-3510: shared-ui layer structure.** `packages/shared-ui` now organises its source into named layers enforced by its own ESLint boundary rule:
+
+| Layer | Contents |
+|---|---|
+| `primitives/` | Base UI components (shadcn, Radix, CVA variants, `cn` helper, table, badge, etc.) |
+| `patterns/` | Composed patterns (sidebar nav parts, drawers) |
+| `audit/` | Audit-domain views and utilities (agent pages, appraisal, credit, etc.) |
+| `legacy/catalyst/` | Frozen copies of Catalyst components for legacy audit views only |
+| `assets/` | SVG assets |
+| `styles/` | CSS tokens and theme stylesheets |
+| `lib/` | Shared library utilities |
+| `hooks/` | React hooks including image adapters (`SharedUiAdapters`) |
+
+The boundary lint rejects: `@/` and `next/*` imports, `process.env` reads, credentialed `fetch`, upward layer imports, legacy-to-primitives imports, and primitives-kit imports from `legacy/catalyst`. Credentials and Next.js dependencies reach the package via context (`SharedUiAdapters`, mounted once in the portal root layout). Legacy audit views read a frozen copy of Catalyst components under `legacy/catalyst/` and import nothing from `primitives/`.
 </Note>
 
 ## The packages
