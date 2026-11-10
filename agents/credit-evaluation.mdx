@@ -74,6 +74,25 @@ export const CREDIT_REPORT_CLASSIFICATION_TYPES = [
 [classify-split](/subsystems/classify-split) segment before enqueueing the agent, and the
 fan-out iterates over those documents.
 
+### Mode A intake (LOA-2947, EDU-22)
+
+Mode A is an alternative intake path where the caller pre-supplies credit products and a UAD XML intake document rather than relying on the LoanLight classify-split pipeline to discover and extract them from uploaded PDFs.
+
+In Mode B (the standard path), LoanLight classifies every uploaded document and fans out credit evaluation over whichever ones are classified as `credit_report`, `credit_report_trimerge`, or `credit_report_single`. In Mode A, a trusted caller delivers an S3-keyed **manifest** (`ModeAManifest`) at audit submission time that declares:
+- **`documents[]`** — the SHA-256 and S3 key of each document being supplied, with its declared `documentType`.
+- **`products[]`** — pre-extracted credit product objects keyed to their source document SHA-256.
+- **`xml`** — the S3 key and SHA-256 of the intake UAD XML.
+
+The `ModeAMarker` (written to the loan's metadata) tracks the manifest's state (`pending` → `ready`) and the borrower roster the caller declared. The routing predicate (`lib/credit-pipeline/mode-a/routing.ts`) verifies that every manifest document was classified into the expected family (credit or appraisal) with no cross-family segments or pending/failed segments. A `setRule` violation prevents Mode A dispatch.
+
+When the routing verdict is `ok`, `AuditAgentsExecutor` hands the pre-extracted credit products to the `mergeCandidates` node instead of running `extractStructured`. The appraisal agent receives its pre-supplied PDF via the same manifest-driven path, with the appraisal attach copying the designated document key into the portal bucket directly.
+
+Request body size for Mode A intake is bounded by `src/bootstrap/route-body-limits.ts`.
+
+<Note>
+Mode A is in shadow-only rollout under the `isEvidenceEnabled` gate. Its routing decisions do not affect Mode B runs at the same lender.
+</Note>
+
 ## The graph
 
 The graph is linear:

@@ -25,16 +25,18 @@ Evidence capture eligibility is enforced in `src/audits/evidence/evidence-eligib
 
 ### evidence_sources
 
-One row per unique URLA XML blob received for a given loan and lender. Deduplication is by `(lender_id, loan_id, raw_sha256)`: the same bytes submitted twice produce one row.
+One row per unique source blob received for a given loan and lender. Deduplication is by `(lender_id, loan_id, raw_sha256)`: the same bytes submitted twice produce one row. The table stores multiple kinds of source material — URLA XML for URLA declaration capture, and vendor JSON payloads for the EDU-29 property-data evidence adopter.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `uuid` PK | |
 | `lender_id` | `uuid` NOT NULL | FK → `lenders` |
 | `loan_id` | `uuid` NOT NULL | FK → `loans` |
-| `retained_xml` | `bytea` NOT NULL | The raw MISMO XML bytes, stored verbatim |
-| `raw_sha256` | `text` NOT NULL | Lowercase hex SHA-256 of `retained_xml`. CHECK: must equal `encode(digest(retained_xml, 'sha256'), 'hex')` |
-| `byte_size` | `integer` NOT NULL | CHECK: equals `octet_length(retained_xml)` |
+| `source_kind` | `text` NOT NULL | CHECK `evidence_sources_source_kind_check`: `xml` \| `pdf` \| `vendor_json` \| `loan_context` \| `ltv_rules_bundle`. Extended by migration `0250` to include `vendor_json`. |
+| `retained_xml` | `bytea` NOT NULL | The raw MISMO XML bytes, stored verbatim. Present for `xml` rows; `vendor_json` rows do not write here. |
+| `retained_json` | `bytea` | Nullable. The raw vendor JSON payload bytes (EDU-29, migration `0250`). Present when and only when `source_kind = 'vendor_json'` — enforced by `evidence_sources_vendor_json_payload_check`. |
+| `raw_sha256` | `text` NOT NULL | Lowercase hex SHA-256 of the retained bytes. For `vendor_json` rows, `evidence_sources_vendor_json_digest_check` enforces `raw_sha256 = encode(digest(retained_json, 'sha256'), 'hex')`. |
+| `byte_size` | `integer` NOT NULL | CHECK: equals `octet_length(retained_xml)` for `xml` rows. |
 | `media_type` | `text` NOT NULL | Default `application/xml` |
 | `source_profile` | `text` NOT NULL | e.g. `mismo-residential-2009-urla` |
 | `api_observed_origin` | `text` NOT NULL | The retrieval seam that produced the bytes (server-recorded, never client-supplied) |
@@ -43,6 +45,12 @@ One row per unique URLA XML blob received for a given loan and lender. Deduplica
 | `observed_at` | `timestamptz` NOT NULL | Default `now()` |
 
 Key constraints: `evidence_sources_scope_bytes_unique (lender_id, loan_id, raw_sha256)` and `evidence_sources_scope_identity_unique (id, lender_id, loan_id)`.
+
+**EDU-29 vendor JSON (migration `0250`, LOA-3000).** The property-data evidence adopter registers ATTOM and HasData responses as `vendor_json` sources. Two companion CHECKs enforce payload integrity:
+- `evidence_sources_vendor_json_payload_check` — `(source_kind = 'vendor_json') = (retained_json IS NOT NULL)`: exactly `vendor_json` rows have a payload and non-`vendor_json` rows do not.
+- `evidence_sources_vendor_json_digest_check` — when `source_kind = 'vendor_json'`, `raw_sha256` must equal the SHA-256 of `retained_json`.
+
+Both constraints are installed `NOT VALID` in migration `0250` and validated in migration `0251`.
 
 ### evidence_audit_source_pins
 

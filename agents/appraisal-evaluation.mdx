@@ -899,6 +899,15 @@ cross 32 KB fails there rather than only in container-backed reconcile tests.
 `compound-walker.ts::MAX_TRACKED_CONDITIONAL_GATE_RULES` was raised from 1,024 to 2,048 to
 accommodate the HELOC bundle's rule codes.
 
+**LOA-3508: loan-number cross-check (PCI_012, EVL_012).** Two new WARNING checks verify that the loan number printed on the appraisal report matches the loan's own `loans.loan_number`:
+
+| Rule | Code | Report section | Severity |
+|---|---|---|---|
+| PCI_012 | `CUST_DEEB0012` | `inspection.loan_number` | WARNING |
+| EVL_012 | `CUST_DEEE0012` | `evaluation.loan_number` | WARNING |
+
+The check compares only ASCII letters and digits (case-folded, all other characters ignored), so `ln 1001` matches `LN-1001`. A printed placeholder (`N/A`, `NA`, `None`, `Null`, `Unknown` — edge punctuation and dots stripped before recognition) always warns, even if the loan's own number normalises to the same letters. When the report prints no loan number, or the loan's own number was not read, the check emits `NEEDS_INFO`. The loan number comes from `loans.loan_number` read by the extraction job and is not placed in the shared loan-context eval bag. The derived fields `inspection.loan_number_matches_loan` and `evaluation.loan_number_matches_loan` are written by `withReportLoanNumberMatch` (`lib/appraisal-pipeline/report-loan-number-match.ts`) before the evaluator runs; both bundles move to version 2 with this change.
+
 Key rule decisions:
 - **Hard stops in the guide stay FAIL**: row, log, and modular homes (`DHH_029`–`DHH_031`), which the main Deephaven bundle only warns on.
 - **DHH_003** counts only closed comparable sales (≥3 within 12 months); active and pending listings never count.
