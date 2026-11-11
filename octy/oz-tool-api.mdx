@@ -83,6 +83,16 @@ Result handlers cap rows at `MAX_ROWS = 200`. Two exceptions: `loan-documents` c
 The registry groups tools into categories. The dataset id is the `[dataset]` path segment.
 
 <AccordionGroup>
+  <Accordion title="EDU (Evidence-Driven Underwriting)">
+    Four read-only datasets expose the loan's evidence capture, recompute, and LTV shadow history. All are `requiresAuditRun: true` and are accessible to both Oz cloud runs and MCP local runs (via `octy_query_dataset`). `edu-ltv-shadow` requires the `pii:read` scope because stored LTV generations can carry borrower and loan values. All four degrade gracefully: a missing declared EDU table or column returns `"unavailable"` rather than a 500 error.
+
+    | dataset | scope / params | notes |
+    |---|---|---|
+    | `edu-capture-attempts` | loan-scoped; `?offset=`, `?include_unattributed=` | Stored capture events for the audit's loan. `capture_status` holds terminal state per source slot for a loan-backed audit. Loanless coverage is always `unverifiable`. Pass `include_unattributed=true` at `offset=0` to also check lender-wide retained attempts that have missing origin associations. |
+    | `edu-recompute-attempts` | loan-scoped; `?offset=` | Completed recompute attempts, with outcome, failure class and reason, producer scope, and attempt count per scope and generation. |
+    | `edu-emission-batches` | loan-scoped; `?offset=` | Committed evidence batches: producer and registry versions, evidence revision, source `auditRunId`, and `committedAt`. No fact values. |
+    | `edu-ltv-shadow` | loan-scoped; `?offset=`; **requires `pii:read`** | LTV generations for the loan: inputs, outcome, and incomplete reasons. `comparisons` holds historical comparison records; `publication_state` holds current producer generation fences. `rules_freshness`, `effective_max`, and `grid_row_id` report `not_recorded` with the API ledger projection as owner — stored history is not a fresh evaluation. |
+  </Accordion>
   <Accordion title="Classify-Split">
     | dataset | `table` | scope / params |
     |---|---|---|

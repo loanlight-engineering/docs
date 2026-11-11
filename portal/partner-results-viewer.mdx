@@ -57,15 +57,23 @@ The staff internal-view path for `/results` audits now lives under its own URL p
 
 The viewer's data API proxies the portal-audits BFF. Each sub-section maps to a Next.js API route under `app/api/v2/audits/[auditRunId]/<section>/route.ts`. The `appraisal` section was added in LOA-1994: `GET /api/v2/audits/[auditRunId]/appraisal` proxies `portalApiClient.get(".../appraisal", ...)` via `proxyPortalAuditsRoute(request, context, "appraisal")`.
 
-Since LOA-2085 (#3227), a `POST` write route is also present:
+Since LOA-2085 (#3227), write routes are also present:
 
 | Route | Purpose |
 |---|---|
 | `POST /api/v2/audits/[auditRunId]/bank-statement-income/export` | Bank-statement income QI export for partner/staff audit surfaces. Proxies `proxyPortalAuditsWrite(request, context, "bank-statement-income/export")`. CSRF-gated; authenticates with the view token or session. |
+| `GET /api/v2/audits/[auditRunId]/bug-reports/agent-options` | Returns the selectable affected-area options for this audit run, derived from its agent plan and observed `agent_runs`. Proxies `GET /api/v1/portal/audits/:auditId/bug-reports/agent-options`. |
+| `POST /api/v2/audits/[auditRunId]/bug-reports` | Submits a bug report to Octy. Rate-limited to 5 per minute. Proxies via `BugReportService`. All viewer types (including EPC-view and read-only) may submit. |
 
-This route is used by the **Export** button on the `/results/audits/[auditId]` income section (LOA-2085). The button is visible on any `status === "completed"` audit, even when `editable: false`. For read-only viewers (read_only staff, EPC), the export modal hides the notes field (`canAuthorNotes={false}`) to prevent a 403 from the notes-write path; the export itself still works.
+The **Export** button on the income section is visible on any `status === "completed"` audit, even when `editable: false`. For read-only viewers (read_only staff, EPC), the export modal hides the notes field (`canAuthorNotes={false}`) to prevent a 403 from the notes-write path; the export itself still works.
 
-The section `"bank-statement-income/export"` is listed in `PORTAL_AUDITS_WRITE_SECTIONS` (the CSRF allowlist in `packages/app/src/lib/portal-audits-write-sections.ts`).
+The `"bank-statement-income/export"` and `"bug-reports"` sections are listed in `PORTAL_AUDITS_WRITE_SECTIONS` (the CSRF allowlist in `packages/app/src/lib/portal-audits-write-sections.ts`).
+
+## Report Bug
+
+The **Report Bug** button appears in the results viewer's sidebar (`ResultsSidebar.tsx`) for all viewer types — including EPC-view and read-only users. It opens a `BugReportDialog` where you select the affected area and describe the issue. Submitting files a report in the [Bug Reports console](/octy/bug-reports-console).
+
+The affected-area dropdown is populated by `GET /api/v2/audits/[auditRunId]/bug-reports/agent-options`, which returns the union of the audit's planned agents and its observed `agent_runs`. The submission (`POST /api/v2/audits/[auditRunId]/bug-reports`) is rate-limited to 5 per minute per submitter.
 
 ## Appraisal sidebar and badge
 

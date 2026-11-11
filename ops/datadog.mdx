@@ -113,8 +113,7 @@ container.
 - `DD_TAGS` always includes `env:<environment>`, `service:<serviceName>`,
   `version:<sha>`, `commit:<sha>`, plus `project:loanlight`, `component:ecs`.
 - Logs subscribe to the Datadog Forwarder Lambda via the CFN export
-  `DatadogIntegration-DatadogForwarderArn`. App log retention defaults to 30 days,
-  agent logs to 7 days.
+  `DatadogIntegration-DatadogForwarderArn`. **Application, access, and database log groups use 12 months** retention (`AUDIT_LOG_RETENTION`, LOA-3324 customer requirement). The Datadog agent sidecar log group uses 7 days. RDS slow-query logs additionally have `log_parameter_max_length = 0` so bind values (which may contain borrower data) are omitted.
 
 Octy is the exception: it uses the plain `FargateTaskDefinition` (no sidecar) and
 therefore has no APM, as noted above.

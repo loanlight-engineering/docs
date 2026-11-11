@@ -160,7 +160,11 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
 
 The `FeatureFlags` object (`src/lib/feature-flags.ts`) has these keys:
 
-`classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`.
+`classification`, `appraisal`, `agencyRules`, `chat`, `settingsPrograms`, `bankStatements`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`, `unifiedLoanUpload`.
+
+<Note>
+The **`unifiedLoanUpload`** flag (`unified_loan_upload` in the backend, LOA-3566) replaces the separate **New** buttons on the dashboard with a single **New Loan** screen where lenders start both full audit runs and single-product runs. Default-OFF with no environment override: only the lender's persisted `unified_loan_upload` row enables it.
+</Note>
 
 The `training_videos` flag is **not** in this object. It is a per-lender flag resolved server-side by `lib/training-videos/access.ts::canWatchTraining` (or for LoanLight staff in their own org). Since LOA-3473 the portal no longer calls the API catalog endpoint to resolve access.
 
@@ -175,7 +179,7 @@ The **new results UI** (Data Consistency, Document Health, 1003 Check, Propertie
 `getFeatureFlags(lenderId)` GETs the backend `/lenders/${lenderId}/feature-flags`, which returns `{ featureKey, enabled }[]`; the result is transformed via `KEY_MAP` onto an env-default base. An empty array or any failure falls back to `getEnvDefaults()`.
 
 <Warning>
-Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (opt-in), mirroring the backend resolvers — an absent per-lender row does NOT light up the UI: `appraisal`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`.
+Feature defaults were tightened (LOA-907). These flags are now **default-OFF** (opt-in), mirroring the backend resolvers — an absent per-lender row does NOT light up the UI: `appraisal`, `creditReview`, `keyFieldReview`, `enableGuidelineUploads`, `darkMode`, `updatedAppraisalEnabled`, `dscrAgent`, `statementAnalyzer`, `documentRouting`, `releaseNotes`, `unifiedLoanUpload`.
 </Warning>
 
 `feature-gates.ts` composes flags: `isChatEnabled(flags, canBypassFlags) = flags.chat === true || canBypassFlags`; `isAgencyRulesEnabled = appraisal && agencyRules`. The second parameter of `isChatEnabled` was renamed `isInternal` → `canBypassFlags` so chat respects impersonation — callers now pass `getEffectiveContext().bypassFeatureFlags` (`isInternal && !isImpersonating`), not raw `isInternal`. See [impersonation](/portal/impersonation).
