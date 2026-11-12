@@ -100,3 +100,31 @@ Encompass and the integrations service consume these to drive the spinner and co
 <Info>
 The partner audit create response also returns a `progressUrl` (`/api/v1/partner/audits/:auditId/progress`) for partners that prefer to poll the partner API rather than subscribe to SSE. See [Triggering an audit](/pipeline/triggers#partner-api-path).
 </Info>
+
+## Portal live refresh (LOA-3570)
+
+The portal drives a **background re-read** of in-flight audits rather than relying solely on SSE. The `useAuditRefresh` hook (`packages/app/src/lib/hooks/use-audit-refresh.ts`) implements an adaptive schedule:
+
+| Interval | Phase |
+|---|---|
+| 5 s | First interval |
+| 10 s | Second interval |
+| 20 s | Third interval |
+| 30 s (held) | All subsequent intervals, up to a 30-minute ceiling |
+
+The hook pauses while the browser tab is hidden and stops after 30 minutes or when the audit reaches a terminal state. At most one request is in-flight at a time.
+
+The `ResultsDataProvider` uses `load(signal, background)` for background refreshes: it never sets the loading spinner, registers as a load so targeted-refetch pins protect their sections, and keeps the last good data for any section whose read failed (`settleLoad`). A full re-fetch or navigation aborts the background refresh.
+
+## Audit status display labels (LOA-3570)
+
+The `audit_runs.status` column uses the values `pending | processing | complete | failed`. The portal maps two of these to friendlier labels:
+
+| DB status | Portal label |
+|---|---|
+| `pending` | **Queued** |
+| `processing` | **Running** |
+| `complete` | Complete |
+| `failed` | Failed |
+
+This mapping lives in a single `AUDIT_STATUS_LABEL` constant shared across the Dashboard table, the Dashboard filter chip, and the staff audit header. Colours are unchanged.

@@ -4,7 +4,7 @@ description: The portal's routes, feature flags, and redirects.
 icon: map
 ---
 
-The portal uses the Next.js App Router with four route groups under `src/app/`. This page maps the routes, the feature flags that gate them, and the redirects that catch legacy or non-page paths.
+The portal uses the Next.js App Router with five route groups under `src/app/`. This page maps the routes, the feature flags that gate them, and the redirects that catch legacy or non-page paths.
 
 ## Route groups
 
@@ -15,7 +15,8 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | Route | Purpose |
     |---|---|
     | `/` | redirect → `/loan-audits` |
-    | `/dashboard` | Client dashboard: summary cards, paginated audit table, filters, "New Loan" dropdown (Pre-Underwriting / Appraisal / Income). `PAGE_SIZE=25`, `REQUEST_TIMEOUT_MS=30_000`. Write controls hidden for `read_only`. |
+    | `/dashboard` | Client dashboard: summary cards, paginated audit table, filters. When `unified_loan_upload` is off: a "New Loan" dropdown (Pre-Underwriting / Appraisal / Income) launches individual product flows. When `unified_loan_upload` is on: a **New Loan** button links to `/loans/new`. `PAGE_SIZE=25`, `REQUEST_TIMEOUT_MS=30_000`. Write controls hidden for `read_only`. |
+    | `/loans/new` | New Loan screen (LOA-3573). Product, file, and detail cards; upload status; **Start** button and confirmation. Gated on `unified_loan_upload` (default-OFF). See [file uploads](/portal/file-uploads) and [bank-statement-upload](/portal/api-bank-statement-dscr#bank-statement-upload). |
     | `/appraisal-review` | Appraisal history list (`showInternal` for internal `client_admin`). |
     | `/appraisal-review/executive` | Appraisal executive dashboard (KPIs, value delta, geography, rules cards); day window 7/14/30/60/90. |
     | `/appraisal-review/metrics` | Appraisal metrics (internal-only tab): per-field accuracy, confidence chart. |
@@ -48,26 +49,40 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     | `/settings/key-field-review` | all roles |
     | `/settings/document-routing` | `client_admin`; gated on `flags.documentRouting` (default-OFF, env `FEATURE_DOCUMENT_ROUTING`). Lets client admins customize the eFolder name and description for each routed document type. Backed by `GET /api/v1/portal/routing-config/catalog` (doc-type categories + field labels; the catalog now also returns `categoryCodes`, a map of split-category code → display name) and the portal routing-config CRUD endpoints (LOA-1602). **When `bucket_routing` is enabled for the lender** (LOA-2961), the page also renders read-only fallback lines in each category group: "Other [category] documents → files with [type]" (the borrowed type's row reads "Also receives other [category] documents we can’t identify"). Fallback lines are hidden for lenders with `bucket_routing` off (integrations returns `effective.bucketRules` as `{}` for them). The no-category catch-all is labelled **"Unidentified documents"** everywhere on this page regardless of any lender eFolder rename of that bucket. |
     | `/settings/appraiser-deny-list` | all roles; hidden from a global super admin unless impersonating |
-    | `/settings/global-appraiser-deny-list` | `super_admin` + `requireInternal` |
+    | `/settings/global-appraiser-deny-list` | `super_admin` + `requireInternal` (moved to Platform Operations in LOA-3581) |
+
+    **Super admin only settings group (LOA-3581).** When a super admin views a client via **View as client**, `/settings` shows the client's own tabs followed by a divider and a **Super admin only** group. The tabs are visible to `super_admin` on any lender (including LoanLight's own); lender roles never see them. Each tab reads the lender from the viewing session via `ViewedLenderTab`, never from the URL:
+
+    | Tab | Purpose |
+    |---|---|
+    | **Feature Flags** | All lender feature flags plus the Qualifying score method select (lowest middle or primary wage earner). The select stays locked if the current value cannot load, to prevent overwriting a value that is simply slow to arrive. |
+    | **API Keys** | Partner API key management. |
+    | **EPC Credentials** | WorkOS M2M application credentials. One-time secret reveal on creation; the secret is never stored by LoanLight. |
+    | **Encompass ID Repair** | Repair mislinked Encompass loan IDs on the viewed client's loans (available only while viewing that client). |
+    | **Valuation Ordering & Review** | Collateral-review configuration (SSR Escalation / HELOC Valuation mode and thresholds). |
+    | **Guideline Admin** | Lender guideline document upload and management (`requireSuperAdmin`). |
+
     | `/settings/company` | **Removed (LOA-3074).** Was gated on `clear_capital_customer_id_self_service` per-lender flag. Backed by `CollateralReviewCompanyConfigController` (`GET/PUT /api/v1/portal/collateral-review/company-config`), which was deleted when collateral review configuration moved to the admin **Collateral Review** tab. |
   </Tab>
-  <Tab title="admin">
-    Internal global admin. Every route is `super_admin` + `requireInternal`.
+  <Tab title="(platform) — super admin workspace">
+    Internal global admin workspace (`ChromeShell area="platform"`). Every route is `super_admin` + `requireInternal`. Non-super-admins receive 404. Added in LOA-3581; replaces the retired `/admin/*` routes.
+
+    `/` redirects to a landing route that answers with a relative HTTP redirect by role (`lib/auth/landing.ts::landingPathFor`). Super admins land on `/platform`; all other roles land on `/dashboard`.
 
     | Route | Purpose |
     |---|---|
-    | `/admin` | Admin dashboard (stats + audit log). |
-    | `/admin/clients` (+ `/new`, `/[clientId]`) | Lender list + detail. Detail tabs: Overview, Users, Feature Flags, Loan Programs, Rules, Key Field Review, Usage, Guideline Admin, API Keys, EPC Credentials, **Valuation Ordering & Review** (LOA-3074, LOA-3410 — super admins only). Has an "Impersonate" button. The **EPC Credentials** tab (`client-epc-credentials-tab.tsx`) shows each lender's WorkOS M2M applications (client ID, secret hint, created/last-used), and lets admins mint new credentials (create dialog — one-time secret reveal, copy, or download). The secret is never stored by LoanLight. (LOA-1467) The **Valuation Ordering & Review** tab (`client-valuation-review-tab.tsx`) is the single entry point for all collateral-review configuration. It first lets a super admin select the active feature (none / SSR Escalation / HELOC Valuation), then shows the settings panel for that feature: **SSR Escalation** — mode (Off / Shadow / Live), risk score threshold, difference and confidence checks, CDA turn time, Clear Capital customer ID, AVM / CDA eFolder delivery switches, and a Mock CDA Completion switch (INT and local only); **HELOC Valuation** (`heloc_valuation` policy kind, LOA-3409) — mode, Clear Capital customer ID, evaluation effective-from date, full-appraisal loan-amount limit, AVM minimum confidence %, AVM maximum FSD, and the set of eligible evaluation states. Switching either feature to Live opens a confirmation that summarizes what will be ordered. The tab URL value stays `collateral-review` so existing `?tab=collateral-review` links keep working. Backed by `GET /api/v1/portal/admin/collateral-review/lenders/:lenderId/config` and `GET .../config/history`. |
-    | `/admin/users` | Cross-lender user admin. |
-    | `/admin/audit-log` | Global audit log. |
-    | `/admin/rule-sets` | Rule-set catalog/status. |
-    | `/admin/rule-explorer` | Read-only view of each lender’s materialized appraisal and credit rule rows, compared against the shared catalog. Shows drift counts, reachability assessment, and links to per-rule and per-set performance windows. Backed by the `GET /api/v1/portal/admin/rule-explorer/…` API (see [Portal API: internal admin](/portal/api-admin-observability)). |
-    | `/admin/staged-rules`, `/admin/staged-credit-rules` | Staged rule bundles. |
-    | `/admin/staged-eligibility-rules` | Staged eligibility rule bundles. Apply a pre-defined eligibility config + rule set to a lender; supports dry-run preview before committing. |
-    | `/admin/yaml-viewer` | YAML config viewer/editor (CodeMirror) with version history/diff. |
-    | `/admin/shadow-audit-diffs` (+ `/[id]`) | Shadow-audit diff list/detail + replay modal. |
-    | `/admin/appraisal-runs` | Cross-lender appraisal runs admin. |
-    | `/admin/release-notes` | "What's New" authoring UI. Create, edit, and manage the release-notes lifecycle. Requires `super_admin` + `requireInternal`. See [release notes](/portal/release-notes). |
+    | `/platform` | Platform dashboard — the client list. Search, **Add Client**, and **View as client** on each active client's row. Inactive and suspended clients show why they cannot be viewed. |
+    | `/platform/clients/[clientId]` | Client detail. Two tabs: **Client Details** (today's Overview — config, lender info) and **Usage** (audit volume, billing). |
+    | `/platform/audit-log` | Global audit log (unchanged from `/admin/audit-log`). |
+    | `/platform/rules` | Redirects to its first tab (rule-set catalog, staged bundles, rule explorer). |
+    | `/platform/operations` | Redirects to its first tab. Contains the **Global Appraiser Deny List** (moved from lender Settings) and other cross-lender operational tools. |
+    | `/platform/operations/yaml-configs` | YAML config viewer/editor with version history/diff (was `/admin/yaml-viewer`). |
+
+    **Platform top bar:** **Dashboard**, **Audit Log**, **Rules**, and **Operations** tabs. A **Platform** tag distinguishes it from the client top bar. The user menu keeps **Settings** (lender pages only), **Training**, and **Sign Out**.
+
+    <Warning>
+    All `/admin/*` routes return **404** after LOA-3581. No redirects were added — existing bookmarks to `/admin/...` will not forward. The `/platform/operations/yaml-configs` path replaces `/admin/yaml-viewer`; the **Rule Explorer** API link was updated from `/admin/yaml-viewer` to `/platform/operations/yaml-configs` in the same deploy.
+    </Warning>
   </Tab>
   <Tab title="(detail) — audit viewer">
     Staff loan-audit detail viewer (`ChromeShell mode="fixed"`). `/loan-audits/[auditRunId]` with an `AuditSidebar` (LOA-3287, #4974).
@@ -84,6 +99,12 @@ The portal uses the Next.js App Router with four route groups under `src/app/`. 
     - Business Verification (`/business-verification`) — appears only when the `businessVerification` agent ran or was enrolled (entitlement-gated; see [Business Verification](/agents/business-verification))
     - Income Analysis (`/income/[runId]` — was "Income")
     - Appraisal Review (`/appraisal/[runId]` — was "Appraisal")
+
+    **Not-run sections (LOA-3570, behind `unified_loan_upload`).** When every agent the audit ticked for a section was `skipped`, the sidebar shows a **"Not run"** entry for that section with a human-readable reason sentence. The sentence derives from `notRun[].reasonCode` on the overview (allowlisted machine codes from `NOT_RUN_REASON_CODES`; unknown codes produce a generic "didn't run" line). The overview cards on Issue Summary use the same sentence. When `unified_loan_upload` is off, skipped sections appear as usual without the extra label.
+
+    **Loan-audit appraisal link (LOA-3570).** The sidebar Appraisal entry for a loan audit now opens the **audit's own** appraisal run (the newest of its revision chain). Only an audit with no own appraisal promotes the loan's newest *standalone* appraisal run. The `standalone` boolean flag on the linked-run shape distinguishes these; another audit's appraisal stays under Linked Runs.
+
+    **Credit actions on the loan-audit credit page (LOA-3570, behind `unified_loan_upload`).** When `creditActionsEnabled` is `true` on the overview, per-report credit actions — rule override and revert, key-field review with Correct, mark reviewed, revert approval — mount under each current credit report on the staff loan-audit credit page. These actions do not appear on the partner results viewer or the Encompass plug-in.
 
     The top nav also renames **Credit** to **Credit Review**. The Pre-Underwriting rows have no icons. Only **Issue Summary** shows a red issue count, using the `issueSummaryOf` rule that backs the page's "N issues found" banner; it shows ✓ only when every section has really run. If any section is still pending, the hero reads "No issues found yet" rather than giving a false all-clear.
 

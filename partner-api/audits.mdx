@@ -53,7 +53,16 @@ If the resolved plan is empty (`plannedAgentRuns.length === 0`), the freshly-min
 
 ### Background execution
 
-Execution is fire-and-forget: `executeAudit(loan, auditId, lenderId, lenderCode, options)`. Its `.catch` calls `auditService.failAuditRun(auditId, "executeAudit", message)` (idempotent — only touches `pending`/`processing` rows) so a pre-try throw never strands the run in `processing`. `executeAudit` resolves the expected closing date (override → estimated → scheduled → closing) and calls `orchestration.processAuditForPartner({...})`, which runs the [audit pipeline](/pipeline/overview).
+`createAudit` has two execution paths, selected by the per-lender `partner_audit_queue` feature flag (see [feature flags](/lender-config/feature-flags-and-entitlements)):
+
+- **Queued path** (`partner_audit_queue` resolves to `on` or `internal` for the lender): `createAudit` inserts the audit row as `pending` with a caller-reserved id, records the `expected_closing_date`, and publishes a message to the `loan-audit-requested-events` SQS queue. A dedicated worker process picks up the message, calls `claimAudit` (a single conditional UPDATE that moves the row from `pending` to `processing`), then runs the pipeline. Redeliveries are idempotent — a second delivery for an already-claimed row skips the agents rather than running them twice.
+- **Fire-and-forget path** (`partner_audit_queue` resolves to `off`, or the flag row is absent for an external lender): the existing path runs the pipeline inline, fire-and-forget. Its `.catch` calls `auditService.failAuditRun` (idempotent) so a pre-try throw never strands the run.
+
+In both cases `executeAudit` resolves the expected closing date (override → estimated → scheduled → closing) and calls `orchestration.processAuditForPartner({...})`, which runs the [audit pipeline](/pipeline/overview).
+
+<Note>
+The `partner_audit_queue` flag is tri-state: `on` always routes to the queue; `off` always uses fire-and-forget; `internal` routes to the queue only for internal lenders. A lender with no flag row resolves to `internal`. A failed flag read falls back to `off` with a warning. See [partner_audit_queue flag](/lender-config/feature-flags-and-entitlements#feature-flags).
+</Note>
 
 <Note>
 **`bottomRatioPercent` must reach the orchestrator** or DTI threshold findings in [credit evaluation](/agents/credit-evaluation) are silently skipped. The controller forwards it as part of `loanMetadata`.
@@ -65,13 +74,17 @@ Execution is fire-and-forget: `executeAudit(loan, auditId, lenderId, lenderCode,
 {
   "auditId": "uuid",
   "loanId": "uuid",
-  "status": "pending",
+  "status": "processing",
   "agents": ["piiValidation", "documentHealth"],
   "denied": [],
   "startedAt": "<iso>",
   "progressUrl": "/api/v1/partner/audits/<auditId>/progress"
 }
 ```
+
+<Note>
+When the queued path is active, the row is internally `pending` until a worker claims it, but all external surfaces — the create response, the detail endpoint, results, and the access-URL conflict — map `pending` to `processing`. Partners always see `processing`, never `pending`.
+</Note>
 
 `denied` lists requested agents filtered out by the entitlement gate. It is always present (empty when nothing was denied).
 
@@ -89,14 +102,14 @@ Audit status and metadata. `getAuditRunByLender`; `404` if not found or not owne
 {
   "auditId": "uuid",
   "loanId": "uuid",
-  "status": "pending|processing|complete|failed",
+  "status": "processing|complete|failed",
   "startedAt": "<iso>",
   "completedAt": "<iso|null>",
   "runNumber": 1
 }
 ```
 
-Poll this until `status` is `complete` before fetching results.
+Poll this until `status` is `complete` before fetching results. The internal `pending` status (queued but not yet claimed by a worker) is mapped to `processing` on this endpoint.
 
 ## GET /api/v1/partner/audits/:auditId/results
 

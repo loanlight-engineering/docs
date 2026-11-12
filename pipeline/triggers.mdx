@@ -106,6 +106,13 @@ The HTTP endpoint `POST /api/v1/integration-events/process` (`IntegrationEventsC
 
 A lender or LOS calls `POST /api/v1/partner/audits` on a loan they have already uploaded. The endpoint (`PartnerAuditsController.createAudit`, `@HttpCode(202)`) is guarded by `PartnerAuthInterceptor` and `PartnerRateLimitInterceptor` (default 100 requests/min/partner).
 
+`createAudit` has two execution paths controlled by the per-lender `partner_audit_queue` flag:
+
+- **Queued** (`on` or `internal` for the lender): the audit row is inserted as `pending` with a caller-reserved id, an `expected_closing_date` is recorded, and a message is sent to the `loan-audit-requested-events` SQS queue (with its own DLQ). A dedicated loan-audit worker (concurrency: 2 by default) picks up the message, claims the row via a single conditional UPDATE (`pending` → `processing`), then runs `processAuditForPartner`. Redeliveries are idempotent — a second claim attempt on an already-started row is a no-op. The worker protects the message for 200 minutes (outlasting the stuck-audit cleanup deadline plus one renewal interval).
+- **Fire-and-forget** (`off`, or no row for an external lender): the existing path; execution runs in the background via `processAuditForPartner → AgentOrchestrator.run`.
+
+All external surfaces (create response, detail, results, audit list, and access-URL conflict) map the internal `pending` status to `processing`, so partners always see `processing`.
+
 ### Request shape — `CreatePartnerAuditDto`
 
 <ParamField path="loanId" type="string (UUID)" required>

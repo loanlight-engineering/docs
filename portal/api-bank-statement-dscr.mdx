@@ -25,6 +25,17 @@ The portal no longer sends all bank-statement PDFs in one form-data request. Ins
 | `POST /api/v1/portal/bank-statements/uploads/:id/submit` | Submit the completed batch for analysis |
 | `DELETE /api/v1/portal/bank-statements/uploads/:id` | Cancel an open session |
 
+#### Session kind
+
+`bank_statement_uploads.kind` distinguishes two session types (migration `0253`, LOA-3568):
+
+| `kind` | Purpose |
+|---|---|
+| `bank_statement` (default) | Income / asset bank-statement analysis (the original upload flow). `income_qualification` is NOT NULL. |
+| `new_loan` | New Loan screen upload (`/loans/new`). `income_qualification` is nullable; `result` jsonb holds the processed outcome. |
+
+A CHECK constraint (`bank_statement_uploads_income_qualification_check`) enforces that `bank_statement` rows always carry a non-null `income_qualification`. An index `bank_statement_uploads_answered_originals_idx` covers answered `new_loan` sessions (`kind = 'new_loan' AND state = 'submitted' AND result IS NOT NULL AND files <> '[]'::jsonb`) for efficient session lookup.
+
 #### Session state machine
 
 `bank_statement_uploads.state` follows this lifecycle:

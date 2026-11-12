@@ -55,15 +55,23 @@ The `chat` flag was the lone feature that internal staff bypassed, so this value
 
 <Steps>
   <Step title="Start">
-    A super admin starts via the command palette (⌘K, which searches lenders via `/api/admin/clients`) or the "Impersonate" button on a client detail page. The app calls `POST /api/admin/impersonate` → backend `/auth/impersonate`.
+    A super admin clicks **View as client** on an active client's row in the Platform dashboard (`/platform`). Inactive or suspended clients do not show the button. The app calls `POST /api/admin/impersonate` → backend `/auth/impersonate`.
+
+    When a super admin views LoanLight's own client, the API refuses internal impersonation. The portal ends any existing viewing session, then shows a **"Your own organization"** banner with no countdown.
+
+    Clicking **View as client** on a second lender while already viewing one replaces the first session — there is at most one active viewing session per sign-in.
   </Step>
   <Step title="While active">
-    The `ImpersonationBanner` shows "Viewing as: &lt;lender&gt;" with a 60-minute countdown and an "Exit Impersonation" action.
+    The `ImpersonationBanner` shows the signed-in user's name, a note that changes are recorded under that name, the time remaining of the 60-minute session, and an **Exit to Platform** action. The top bar shows the client's branding while viewing.
   </Step>
   <Step title="Exit">
-    `DELETE /api/admin/impersonate` → backend `/auth/impersonate`. Logout (`/api/auth/logout`) best-effort issues `DELETE /auth/impersonate` first, because the impersonation row outlives WorkOS sign-out. A `403` for a non-super-admin is silently absorbed.
+    **Exit to Platform** calls `DELETE /api/admin/impersonate` → backend `/auth/impersonate`, then redirects to `/platform`. Logout (`/api/auth/logout`) best-effort issues `DELETE /auth/impersonate` first, because the impersonation row outlives WorkOS sign-out. A failed exit (not `DELETE`) shows an error without leaving the page.
   </Step>
 </Steps>
+
+<Warning>
+One viewing session per sign-in. Clicking **View as client** on a second lender replaces the first; any tab still open on the first lender's pages sends its next save to the second lender's session.
+</Warning>
 
 ## Backing store and gate
 

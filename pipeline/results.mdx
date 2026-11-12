@@ -76,6 +76,13 @@ See [Partner API results and access URLs](/partner-api/results-and-access-urls).
 - `GET /api/v1/audit_runs/:id/appraisal` — `PortalAppraisalPayload` or `{ data: null }` (never 404); thin projection from `appraisal_runs` via `AppraisalAuditProjectionService`. Added in LOA-1675 to surface the EPC-triggered appraisal run on the audit sidebar. Manual-override overlay is applied (LOA-1685).
 - `GET /api/v1/audit_runs/by-loan/:encompassLoanId/latest-completed`
 
+**Not-run sections and credit actions (LOA-3570, behind `unified_loan_upload`).** `GET /api/v1/portal/audits/:auditRunId/overview` now returns two additive fields when the lender's `unified_loan_upload` flag is on:
+
+- `notRun: { section: string, reasonCode: string | null }[]` — a section is listed here when every agent the audit ticked for it was `skipped`. The `reasonCode` is the first skip reason from `COALESCE(skip_reason, errors->>'reason')` on the first agent in `HEADER_AGENTS` order, mapped through the `NOT_RUN_REASON_CODES` allowlist (`lib/not-run-reason-codes.ts`) so only machine-readable codes — never prose — reach the client. An unknown code, prose text, or null result maps to the generic "section didn't run" message in the portal.
+- `creditActionsEnabled: boolean` — when `true`, per-report credit actions (rule override and revert, key-field review with Correct, mark reviewed, revert approval) are available on the staff loan-audit credit page.
+
+The portal sidebar shows a "Not run" entry with the human-readable sentence for each listed section. Overview cards use the same sentence. These fields are absent (not null) when the flag is off.
+
 **Check labels, coverage, and checks (LOA-3287, "Show the Work" epic).** Seven portal section endpoints and five `audit_runs` routes now return additive fields on their rule/finding rows:
 
 - `label` — a `CheckLabel` string (`passed` | `failed` | `missing` | `incomplete` | `warning` | `not_applicable`) or `null` when labelling does not apply (for example a rule the lender has disabled). `label: null` is distinct from `label: "not_applicable"`.

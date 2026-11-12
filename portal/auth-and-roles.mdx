@@ -43,7 +43,7 @@ Roles come from `Role` in `@loanlight-engineering/shared-types` (`src/lib/auth/r
 
 | Role | Scope |
 |---|---|
-| `super_admin` | Internal global admin. Required by all `/admin/*` routes and `/settings/global-appraiser-deny-list`. |
+| `super_admin` | Internal global admin. Required by all `/platform/*` routes. Signs in to the Platform dashboard (`/platform`), not `/dashboard`. |
 | `client_admin` | Tenant admin: manages users, programs, and rules within their lender. |
 | `client_user` | Tenant user: runs and reviews tools. |
 | `read_only` | View-only tenant access. |
@@ -52,11 +52,15 @@ Roles come from `Role` in `@loanlight-engineering/shared-types` (`src/lib/auth/r
 The role is `read_only`, NOT `reviewer` (a common misconception called out in the App `CLAUDE.md`). `read_only` is unranked: RBAC uses exact role-set membership, not a hierarchy, so `read_only` only matches routes that explicitly list it. The `constants.ts` `VALID_ROLES` set (the three tenant roles) is what invite flows offer.
 </Warning>
 
+<Note>
+`/admin/*` routes were retired in LOA-3581 and return 404. The super-admin workspace is now `/platform`. See [route and feature map](/portal/feature-map#platform-route-group) for the full route list.
+</Note>
+
 ## Route-level RBAC
 
 `ROUTE_ROLES` maps gated routes to `{ roles, requireInternal? }`:
 
-- All `/admin/*` and `/settings/global-appraiser-deny-list`: `["super_admin"]` + `requireInternal: true`.
+- All `/platform/*`: `["super_admin"]` + `requireInternal: true`.
 - `/settings/users`: `client_admin` + `super_admin`.
 - View routes (`loan-programs`, `rules`, `key-field-review`, `appraiser-deny-list`): all four roles; their `/new` create routes are `client_admin` + `super_admin`.
 
@@ -65,6 +69,15 @@ Helpers:
 - `canSee(route, role, isInternal)` enforces `requireInternal`, then role membership.
 - `isHiddenFromGlobalSuperAdmin(route, role, isImpersonating)` is a presentation rule (not an authz change): it hides `/settings/appraiser-deny-list` from a global super admin who is not impersonating; it reappears while impersonating.
 - `canManagePrograms(role)` = `client_admin || super_admin`, mirroring the backend `@Roles("client_admin")`.
+
+## Landing routes
+
+Sign-in redirects to a role-specific landing page via `lib/auth/landing.ts::landingPathFor`:
+
+| Role | Landing |
+|---|---|
+| `super_admin` | `/platform` (the Platform dashboard / client list) |
+| All other roles | `/dashboard` |
 
 <Note>
 The `/settings/users` role dropdown (`components/settings/users-table.tsx`) keys the **Client Admin** option off the acting user's role — `currentUserRole === "client_admin" || currentUserRole === "super_admin"` — not `isInternal` (#1564). Because `isInternal` is forced `false` during impersonation, keying off it had hidden the option from real client admins and from an impersonating super admin; the role check fixes both. `isInternal` still gates whether the **Super Admin** option is offered at all. The RBAC role model itself is unchanged.

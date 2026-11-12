@@ -41,6 +41,19 @@ The portal accepts large document uploads for appraisal, credit, income, and ban
     The bank-statement **Loan ID** is free-text (≤255 chars), not a UUID (#2426, LOA-1577). On enqueue, `resolveLoanLink` links a real `loan_id` only when the value is a UUID matching a loan in the tenant; otherwise the raw value is stored verbatim in `borrower_files.loan_reference` with `loan_id` left null (migration `0195`).
     </Note>
   </Tab>
+  <Tab title="New-loan upload sessions (New Loan screen)">
+    The **New Loan** screen at `/loans/new` (LOA-3568, LOA-3573) uses the same chunked multipart session infrastructure as bank-statement uploads but creates a session with a different purpose. It is gated on the `unified_loan_upload` per-lender feature flag (default-OFF).
+
+    Sessions created via the New Loan screen set `bank_statement_uploads.kind = 'new_loan'` (migration `0253`) instead of the default `'bank_statement'`. Key differences:
+
+    - The same `POST /api/v1/portal/bank-statements/uploads` endpoint creates the session; the portal sends the product, file, and detail selections from the `/loans/new` form.
+    - Files are slotted by format: a `loan_application` file (URLA/MISMO XML) satisfies the application requirement (`hasApplication`). An appraisal XML file cannot substitute.
+    - `income_qualification` is nullable for `new_loan` rows (migration `0253`); it retains its NOT NULL guarantee for `bank_statement` rows via a CHECK constraint.
+    - The session carries a `result` jsonb (nullable) written when the worker processes the uploaded batch. A `Start` confirmation step in the portal submits the session and shows the result.
+    - `DocumentPreparationService` (LOA-3569, `src/modules/bank-statement/document-preparation.service.ts`) is the extracted partner document preparation step that runs before the audit begins, shared by both the portal and the partner queue worker.
+
+    A cleanup index `bank_statement_uploads_answered_originals_idx` covers answered `new_loan` sessions (`kind = 'new_loan' AND state = 'submitted' AND result IS NOT NULL AND files <> '[]'::jsonb`) for efficient session lookup.
+  </Tab>
 </Tabs>
 
 ## Body-size limits
