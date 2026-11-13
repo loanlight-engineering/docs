@@ -56,6 +56,51 @@ The database is KMS-encrypted. App credentials come from Secrets Manager (`LLInt
 </Accordion>
 </AccordionGroup>
 
+## CloudWatch log retention (LOA-3324)
+
+As of LOA-3324 the following CloudWatch log groups retain logs for **12 months (365 days)**, up
+from the previous 30-day default. The change is implemented through a single constant
+`AUDIT_LOG_RETENTION` in `packages/encompass/infra/lib/utils/constants.ts` and applied
+via `shared-cdk`'s `LoanLightApiGateway.accessLogRetentionDays` prop (added in `shared-cdk` 2.0.5).
+
+| Log group | Stack |
+|---|---|
+| Aurora `postgresql` slow-query log group | `DatabaseStack` |
+| Encompass ECS task container logs | `ApplicationStack` |
+| API Gateway stage access logs | `ApiGatewayStack` |
+| Public authorizer Lambda logs | `ApiGatewayStack` |
+| Encompass authorizer Lambda logs | `ApiGatewayStack` |
+| Shared-services API access logs | `SharedServicesStack` |
+
+Left at their existing shorter retention: the DB init-user and migration Lambda logs (30 days) and
+the Datadog agent sidecar (7 days). `SharedServicesApiLogs` keeps `RemovalPolicy.DESTROY` because
+its fixed `logGroupName` would block re-creation of the stack on the same name.
+
+### Log security improvements
+
+Extending retention to a year exposed several credential and personal-data leaks that were fixed
+in the same change:
+
+- **Request logs** no longer include the query string. Event-stream bearer tokens sent as
+  `?token=<bearer>` were previously logged in full (`src/common/logger-config.ts`).
+- **Encompass auth Lambda** (`infra/lambda/auth/encompass.ts`) now logs header names and
+  body length instead of header values and the body. It masks `x-origin-id` and
+  `x-partner-access-token` as `Secret-length-<n>-<last four>` (no tail when ≤ 8 characters)
+  and reads headers only through the new `request-headers.ts::RequestHeaders` class, which
+  also validates `x-session-id` format and allowlists the origin before logging it.
+- **Slow-query logs** no longer include bind values (`log_parameter_max_length: "0"` on the
+  Aurora parameter group).
+- **EPC payload** in `epc.service.ts::saveEvent` now logs only event IDs and type, not the
+  full payload.
+- **Webhook middleware** (`verify-elli-signature.middleware.ts`) no longer logs the
+  unauthenticated request body.
+
+<Note>
+The DB init Lambda puts role passwords in `CREATE/ALTER ROLE` statement text, so a failed or
+slow init statement is logged with the password into the now year-long Postgres log.
+`log_parameter_max_length` does not cover statement text; the fix is tracked as LOA-3513.
+</Note>
+
 ## SQS DLQ Datadog monitors
 
 Since LOA-2363 the SQS dead-letter queues are monitored in both `int` and `prod`. Monitor JSON files live in `packages/encompass/observability/datadog/` and are applied with `apply-monitors.ts`. The prod variants are named `aus-update-dlq-depth.prod`, `aus-update-queue-age.prod`, and `document-push-dlq-depth.prod`.

@@ -598,6 +598,75 @@ The derived `public_records_section` flag has no locator. All other rows use the
 All adopters are `EDU-30`. This snapshot is the registry the loanlight-api credit-events
 producer reads when emitting credit-event observations on the evidence ledger.
 
+## LOA-3160 — observation-income.v1 (shared-types 9.6.0)
+
+`@loanlight-engineering/shared-types` **9.6.0** publishes `OBSERVATION_INCOME_V1_REGISTRY`
+(`observation-income.v1`). It carries one definition: `income.borrower.calculated_monthly_total` v1.
+
+The row is a per-borrower **derived input** — the income agent's finished qualifying monthly total
+copied onto the EDU ledger with provenance. EDU does not classify, sum, or recompute income; it only
+records whatever the income agent finalised.
+
+| Code | Kind | Subject | Value type | Unit |
+|---|---|---|---|---|
+| `income.borrower.calculated_monthly_total` | `derived_input` | `borrower` | `decimal_amount` | `currency_amount` |
+
+No period qualifier, no locator kinds. Adopter `EDU-30`.
+
+## LOA-3160 — observation-credit.v3 (shared-types 9.7.0)
+
+`@loanlight-engineering/shared-types` **9.7.0** publishes `OBSERVATION_CREDIT_V3_REGISTRY`
+(`observation-credit.v3`). It carries every `observation-credit.v2` row unchanged and adds four
+dated credit-event descriptors. All new rows are PDF-sourced observations with no unit.
+
+| Code | Subject | Value type |
+|---|---|---|
+| `credit.public_record.discharged_date` | `public_record` | date |
+| `credit.public_record.dismissed_date` | `public_record` | date |
+| `credit.tradeline.modification_date` | `account` | date |
+| `credit.tradeline.brought_current_date` | `account` | date |
+
+All adopters are `EDU-30`. Credit-event seasoning windows are measured from the event's completion,
+discharge, or dismissal date; these descriptors give the API a registered place to record those
+dates as evidence. Nothing consumes these descriptors yet — the extraction commits the dates;
+the ledger producer that would emit them is not built yet.
+
+## LOA-3160 — observation-entity-owners.v1 (shared-types 9.8.0)
+
+`@loanlight-engineering/shared-types` **9.8.0** publishes `OBSERVATION_ENTITY_OWNERS_V1_REGISTRY`
+(`observation-entity-owners.v1`). It carries five rows for explicit member ownership shares and
+subject-loan guaranties. All rows are PDF-sourced observations on a `borrower` subject with an
+`entity_loan` relationship qualifier.
+
+| Code | Value type |
+|---|---|
+| `entity.person.name` | text |
+| `entity.person.borrowing_entity` | text |
+| `entity.person.ownership_share` | text |
+| `entity.person.guarantor` | boolean |
+| `entity.person.guaranteed_loan` | text |
+
+A source-local person label establishes no application identity. Entity and loan references qualify
+the relationship; they never serve as a person identifier. All adopters are `EDU-30`.
+
+The parser requires an `entity_loan` qualifier for every owner row, distinguishes two relationships
+for the same member, and rejects true duplicates. A generic parser guard additionally requires an
+allowed origin on present observations with declared locator kinds.
+
+## LOA-3160 — PDF document origins in evidence contracts (shared-types 9.9.0)
+
+`@loanlight-engineering/shared-types` **9.9.0** tightens the evidence-contract locator layer.
+
+**Matching source manifest required.** `pdf_document` assertions now require a matching, non-null
+source manifest document binding. An emission-supplied MIME type, source ID, or hash cannot
+manufacture that binding — the locator must resolve to a real, matched document in the source
+manifest.
+
+**Page-less PDF source refs.** The shared evidence-view contract now accepts page-less PDF source
+references. These preserve the exact document ID and SHA-256 and the extraction revision without
+inventing a page position, so a producer that observes a document attribute without a page reference
+can cite it correctly.
+
 ## Related
 
 <Columns cols={2}>

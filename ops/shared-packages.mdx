@@ -43,7 +43,7 @@ The boundary lint rejects: `@/` and `next/*` imports, `process.env` reads, crede
 
 | Package | Role | Version (repo HEAD) |
 |---|---|---|
-| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, evidence contracts, revision contracts, AVM eFolder delivery events, roles, declaration evidence, observation registries) | 9.0.0 |
+| `@loanlight-engineering/shared-types` | Cross-repo TypeScript contracts (audit/finding shapes, credit contract, Octy bug-report contract, EPC document events, evidence contracts, revision contracts, AVM eFolder delivery events, roles, declaration evidence, observation registries) | 9.9.0 |
 | `@loanlight-engineering/shared-cdk` | Reusable AWS CDK L2/L3 constructs | 2.0.6 |
 | `@loanlight-engineering/shared-local` | LocalStack dev tooling (queues, buckets, bus, rules) | 0.1.0 |
 | `@loanlight-engineering/shared-auth` | WorkOS AuthKit wrapper for Next.js apps | 0.6.0 |
@@ -238,6 +238,27 @@ and `observation-credit.v1` (EDU-26 — see the accordion below). The contract-b
     - `evidence-contract-reader` — public snapshot reader.
 
     Ships a frozen `URLA_DECLARATIONS_V1_REGISTRY` with 7 attribute definitions (codes, schemas, subjects, cardinalities, units, sensitivity, producer identity) and a fixture suite of 10 vectors (7 MISMO XML variants, golden JSON, PDF-page locator, legacy intake). Unknown top-level keys are rejected (strict mode, unlike the CDA/AVM delivery contracts). Published as `shared-types@2.1.0`.
+  </Accordion>
+  <Accordion title="LOA-3160 observation-income.v1, credit.v3, entity-owners.v1, and PDF origins (shared-types 9.6.0–9.9.0)">
+    Four releases shipped as part of LOA-3160 (EDU LTV). See the full definitions in
+    [Evidence capture schema](/data-model/evidence-schema#loa-3160--observation-incomev1-shared-types-960).
+
+    **9.6.0** (`observation-income.v1`): `income.borrower.calculated_monthly_total` — per-borrower
+    calculated monthly income as a derived input (adopter `EDU-30`). The income agent copies its
+    finished per-borrower qualifying total onto the EDU ledger; EDU does not recompute it.
+
+    **9.7.0** (`observation-credit.v3`): four dated credit-event descriptors
+    (`credit.public_record.discharged_date`, `dismissed_date`,
+    `credit.tradeline.modification_date`, `brought_current_date`), all PDF-sourced observations
+    on `public_record` or `account` subjects, adopter `EDU-30`. Extends v2 unchanged.
+
+    **9.8.0** (`observation-entity-owners.v1`): five rows for explicit ownership shares and
+    subject-loan guaranties (`entity.person.name`, `borrowing_entity`, `ownership_share`,
+    `guarantor`, `guaranteed_loan`). All PDF-sourced, subject `borrower`, `entity_loan`
+    relationship qualifier, adopter `EDU-30`.
+
+    **9.9.0**: `pdf_document` assertions now require a matching, non-null source manifest document
+    binding. Adds page-less PDF source refs to the evidence-view contract.
   </Accordion>
   <Accordion title="LOA-3247 DTI subject kinds, urla-declarations.v7 and observation-first-proof.v5 (shared-types 9.0.0)">
     Major release (`9.0.0`). Breaking: widens the closed `DeclarationSubjectKind` union with four new members that expand exhaustive `switch` / `Record<DeclarationSubjectKind, …>` usages in consumers.

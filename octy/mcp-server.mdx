@@ -169,6 +169,53 @@ Each toolset corresponds to a domain in `src/lib/mcp/toolsets/`. The toolset's `
 
 IDs can be bare UUIDs or pasted Octy links (`/bug-reports?issue=<id>`). Investigation tools (**no browsing**): you need the report's ID; data needs a run token.
 
+## EDU audit datasets (LOA-3160)
+
+Use `octy_list_datasets` and `octy_query_dataset` with `audits:read` and a named `audit_run_id`
+to query EDU datasets. EDU datasets are MCP-only — they are not exposed through the HTTP dataset
+route.
+
+### edu-ltv-shadow
+
+Requires `audits:read` and `pii:read`. Preserves stored LTV shadow generations, comparisons,
+and publication state from the database.
+
+As of LOA-3160, it also fetches the **LTV ledger** from loanlight-api
+(`GET internal/v1/edu/ltv-ledger/:auditRunId`, using `LOANLIGHT_API_URL` and
+`OCTY_INTERNAL_API_KEY`). The ledger is the same response the portal LTV card renders and
+contains the read-time decisions Octy does not recompute: `rules_freshness`, `effective_max`,
+and `grid_row_id`. The result carries the ledger as a `ledger` field alongside `gate` and
+`newerAuditId`.
+
+If the ledger call fails or the response does not parse, the dataset returns
+`ledger.state: "unavailable"` with a closed reason code (never an empty result). Distinct
+reason codes cover authentication, permission, missing-record, rate-limit, and
+`invalid_response` failures. No error text or borrower values appear in those codes. Each
+request retries the API; no failure is cached. An API response with `gate: "off"` or
+`ledger: null` is returned explicitly as-is.
+
+<Note>
+The API route requires loanlight-api to be deployed at the compatible version. Until then,
+`edu-ltv-shadow` returns `ledger.state: "unavailable"` with reason `upstream_not_found`.
+Stored history rows remain usable regardless of ledger availability.
+</Note>
+
+### edu-emission-batches
+
+Requires `audits:read` only. Returns committed emission batch metadata without borrower values.
+Batch IDs from this dataset can identify batches from other audits of the same loan and are the
+input to `edu-observation-items`.
+
+### edu-observation-items (new, LOA-3160)
+
+Requires `audits:read` and `pii:read`. Requires a `batch_id` parameter (a batch UUID). Lists the
+stored `evidence_observation_items` values and locators for that batch, paged by ordinal.
+
+The query is scoped: it returns rows only when the batch and items match the audit's lender and
+loan **and** the batch belongs to the requested audit run. A batch from a different audit run, a
+different loan, or a different lender returns no rows. Observation values are not exposed through
+the HTTP dataset route.
+
 ## The run token — same mechanism as Oz
 
 A local run is an ordinary `octy_runs` row with `oz_run_id = "mcp:<operator>"` (`src/lib/mcp/run-source.ts`). It carries the same token columns an Oz run does. `octy_start_run` mints both tokens exactly like the cloud `oz-run` route and stores only their SHA-256 hashes. `validateOzToken` validates them on every tool call.

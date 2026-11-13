@@ -163,7 +163,7 @@ All values are pre-formatted display strings resolved by loanlight-api; an absen
 
 When the Business-Verification agent ran for a loan, `AuditReportPdfService` fetches results from
 `GET /api/v1/audit_runs/:id/business_verification` and passes them to `buildAuditContent` as a
-separate argument. The section is omitted when the agent did not run or its run was absent or skipped.
+separate argument.
 
 For each business in the result, the section lists:
 
@@ -178,8 +178,9 @@ State-record screenshots are included **only when the checks identify a matched 
 or unmatched records do not include screenshots. Screenshots are rendered with a caption identifying
 the source and capture timestamp.
 
-When the run is `failed` or `pending`, the section states that nothing could be verified for that
-business. A run that is absent or skipped is simply not rendered.
+When the run is `failed` or `pending`, the section shows one status line, requests no screenshots,
+and does not read all-clear. A not-applicable or skipped run is not counted and its section is not
+rendered in the coverage-only paths.
 
 <Note>
 **Coverage Appendix (LOA-3299).** When `epc_show_the_work` is on, a Coverage Appendix is appended to the
@@ -190,6 +191,21 @@ The section is built by `audit/sections/business-verification.ts` in `packages/a
 consumed by `AuditReportPdfService` in `packages/encompass`. Optional data fetching is gracefully
 degraded: a fetch failure logs a warning and the section is omitted rather than failing the PDF
 render.
+
+**Recorded checks in the labelled PDF (LOA-3421).** When `pdf_check_labels` is on and the API
+serves a `checks` array alongside the Business Verification result:
+
+- An absent `checks` key (older API payload) falls back to the legacy rows with no recorded
+  coverage claim.
+- An empty `checks` array prints no rows.
+- A row missing `checkId` or `subjectId` is dropped; the section is marked unavailable so it
+  cannot read all-clear when a verdict is unknown (`droppedRows` flag).
+- A blank label is kept and renders as "Unrecognised."
+
+When a whole `checks` list is present, the section's rows, summary line, headline count, and
+findings verdict all come from it, even when the legacy rows or counts disagree. A recorded row
+whose subject is not a listed business still prints in its own table. The legacy PDF path is
+untouched.
 
 **State filings in the PDF (LOA-3354).** When a business's lookup matched a record and the state returned filing documents, the PDF renders a filings block beneath that business's checks table (`filingsBlock`). The block lists:
 
@@ -321,7 +337,9 @@ reads "N problems recorded in …". An unavailable section reads "Section unavai
 
 Each counted agent's section closes with one coverage note: a line stating how many checks ran and
 how many passed (or an unavailable/degraded variant when the section did not load). This closes the
-1003 Check, Document Health, Data Consistency, Properties, and Credit sections.
+1003 Check, Document Health, Data Consistency, Properties, Credit, and Business Verification
+sections. A failed or pending Business Verification run is an unavailable section and its closing
+note is omitted.
 
 ### Coverage Appendix
 
@@ -331,6 +349,7 @@ every check in every counted section, including `not_applicable` rows. Sections:
 
 - **1003, Data Consistency, Properties, and Credit** — one row per check, with its label and reason.
 - **Document Health** — a matrix: documents on rows, check types (missing, expiration, etc.) as columns.
+- **Business Verification (LOA-3421)** — when recorded checks are present, one row per decision keyed by `checkId`, with its business and label. A run whose checks arrived without recorded coverage prints only the served problem rows with no recorded claim. A failed or pending run shows an unavailable section block with no appendix rows.
 
 The appendix is omitted when the entire model is unavailable (for example, when the audit's API
 calls all failed). When individual sections are missing, only their block is degraded; the others
@@ -345,8 +364,8 @@ to the pre-LOA-3299 baseline.
 
 | Module | Contents |
 |---|---|
-| `audit/` | `build-audit-doc`, `audit-content`, `label-selection`, `label-display` |
-| `audit/sections/` | `loan-details`, `summary`, `expiration-strip`, `document-issues`, `document-health-model`, `document-health-phrasing`, `data-consistency`, `check-1003`, `credit`, `properties` |
+| `audit/` | `build-audit-doc`, `audit-content`, `label-selection`, `label-display`, `recorded-tally` (LOA-3421 — tally model for recorded checks) |
+| `audit/sections/` | `loan-details`, `summary`, `expiration-strip`, `document-issues`, `document-health-model`, `document-health-phrasing`, `data-consistency`, `check-1003`, `credit`, `properties`, `business-verification` |
 | `property/` | `build-property-doc`, `property-content` |
 | `combine` | PDF merge logic |
 | `page-break`, `logo`, `types` | layout helpers and shared types |
