@@ -1,0 +1,100 @@
+---
+title: Rental Income agent
+description: Per-unit rent resolution and lease extraction for DSCR loans. Feeds the DSCR agent.
+icon: home
+---
+
+The Rental Income agent (`rentalIncomeAgent`) extracts and resolves per-unit rent figures from classified lease and worksheet documents, then hands the result to the DSCR agent. It runs only for DSCR-entitled lenders. The agent itself produces no audit findings visible to the underwriter; it is a data-preparation step whose sole consumer is the [DSCR agent](/agents/dscr-agent).
+
+<Note>
+`rentalIncomeAgent` is **entitlement-gated**: it runs only for lenders holding an explicit `enabled=true` entitlement row. The router's zero-rows fallback does not grant it. See `requiresExplicitGrant` in [Agent catalog and pipeline](/agents/catalog-and-dependencies). Granting `rentalIncomeAgent` also activates the lease and DSCR worksheet metadata extractors inside the [pre-audit classification](/agents/pre-audit-classification) phase.
+</Note>
+
+<Note>
+`rentalIncomeAgent` is **not billable**. Lenders are billed for the DSCR agent, not for the upstream rent-resolution step.
+</Note>
+
+## What it does
+
+For each unit on the subject property, the agent:
+
+1. Reads the loan's classified lease and DSCR worksheet documents from the `rental_extraction_ledger`.
+2. Resolves a qualifying rent per unit (market rent, long-term lease rent, short-term figures, or none), following the same rent-rule logic the DSCR engine uses.
+3. Builds a per-audit `rental_income_runs` row that the DSCR agent reads.
+4. Queues the DSCR agent once it settles.
+
+No LLM is involved; the agent is deterministic given the same extraction inputs.
+
+## Triggers
+
+The agent has three trigger types that share a single BullMQ queue (`rental-income-agent`):
+
+| Trigger | When it fires |
+|---|---|
+| `initial` | At EPC or partner plan time, after phase 0 completes (URLA extraction available). |
+| `appraisal` | When the appraisal result lands — the appraisal supplies the subject property's market rent. The appraisal module re-opens the agent's row and queues a refresh job. |
+| `sweep` | The periodic ledger sweep re-queues orphaned `processing` rows whose refresh job was lost. |
+
+A run settled before the appraisal lands produces a stated result. The appraisal refresh replaces it once the appraisal is available. If the refresh throws, the last stated result is kept and the DSCR agent is still queued — a stated result is never discarded by a failed upgrade.
+
+## Extraction settlement gate
+
+Leases and worksheets are extracted by the pre-audit classification phase, which may still be running when the initial `rentalIncomeAgent` job fires. When the agent reads and finds extraction not yet settled, the job is deferred (`moveToDelayed`, no attempt spent) until the extractor's projected settle time, plus a clock-skew margin. The row stays `processing` for the duration. If the deferral window exceeds `RENTAL_INCOME_MAX_SETTLE_DEFER_MS`, the job proceeds and fails normally rather than deferring indefinitely.
+
+## Data model
+
+### rental_income_runs
+
+One row per audit run (UNIQUE on `audit_run_id`). Migration `0266_add_rental_income_runs.sql`.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `audit_run_id` | uuid NOT NULL → `audit_runs` (cascade). UNIQUE. |
+| `lender_id` | uuid → `lenders` (no action). |
+| `loan_id` | uuid → `loans` (no action). |
+| `transaction` | jsonb NOT NULL — the `RentalIncomeTransaction` (transaction type, etc.) from the MISMO parse. |
+| `units` | jsonb NOT NULL (default `[]`) — `RentalIncomePerUnitResult[]`: rent-to-be-utilized per unit with the rule that fired, rent basis, and LTV reduction flag. |
+| `qualified` | jsonb — `RentalIncomeQualified`: the qualifying total and per-unit breakdown; `null` while needs-info codes are present. |
+| `leases` | jsonb NOT NULL (default `[]`) — `RentalIncomeLease[]`: extracted lease records with their placement decisions. |
+| `worksheet` | jsonb — `DscrWorksheet`: the extracted DSCR worksheet fields; `null` when no worksheet was classified. |
+| `documents_skipped` | jsonb NOT NULL (default `[]`) — `SkippedRentalDocument[]`: documents that could not be used, with reason. |
+| `needs_info` | jsonb NOT NULL (default `[]`) — `RentalIncomeNeedsInfo[]`: codes blocking the qualifying rent (e.g. `RI_NI_NO_MARKET_RENT`, `RI_NI_SHORT_TERM_UNKNOWN`). |
+| `findings` | jsonb NOT NULL (default `[]`) — `RentalIncomeFinding[]`: warnings and signals produced alongside the rent resolution (same `Finding` shape as the DSCR engine). |
+| `params_snapshot` | jsonb — the DSCR engine params the run used (from `eligibility_configs.dscr_params`, merged with defaults). |
+| `params_version` | text — the params version identifier stamped by the merge. |
+| `created_at` | timestamptz NOT NULL |
+| `completed_at` | timestamptz NOT NULL |
+
+The agent writes this row under a **claim guard**: the `setClaimedAgentRunStatus` transaction stamps the `agent_runs` row `complete` and upserts `rental_income_runs` together, so the two are always consistent.
+
+### rental_extraction_ledger
+
+A per-loan deduplication ledger for lease and worksheet extraction. Migration `0263_add_rental_extraction_ledger.sql`.
+
+Composite PK `(loan_id, loan_document_id, extractor_name, segment_key)`. FK `loan_id` → `loans` (cascade).
+
+| Column | Notes |
+|---|---|
+| `loan_id` | uuid NOT NULL (PK part) |
+| `loan_document_id` | uuid NOT NULL (PK part) |
+| `extractor_name` | text NOT NULL (PK part) |
+| `segment_key` | text NOT NULL (PK part) |
+| `reserved_at` | timestamptz NOT NULL |
+
+Each document segment is reserved by the extractor that claims it first. A segment already in the ledger is not extracted again, preventing duplicate lease records across concurrent runs.
+
+## Portal exposure
+
+The Rental Income agent has no standalone portal section. Its output is surfaced indirectly through the [DSCR agent section](/agents/dscr-agent) on the audit results page, where the per-unit rent breakdown and lease placements appear beside the DSCR ratio.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="DSCR agent" icon="calculator" href="/agents/dscr-agent">
+    The agent that consumes rental income output and computes the DSCR ratio.
+  </Card>
+  <Card title="Agent catalog and pipeline" icon="table" href="/agents/catalog-and-dependencies">
+    Placement and entitlement details for standalone queue_worker agents.
+  </Card>
+</Columns>

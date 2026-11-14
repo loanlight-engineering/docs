@@ -1,0 +1,150 @@
+---
+title: DSCR agent
+description: Computes the Debt Service Coverage Ratio for DSCR loans and grades against lender eligibility.
+icon: calculator
+---
+
+The DSCR agent (`dscrAgent`) computes the Debt Service Coverage Ratio (DSCR) for a loan using MISMO-sourced loan facts, the [Rental Income agent](/agents/rental-income-agent)'s resolved rents, and appraisal-supplied market rents. It is a standalone `queue_worker` agent and the final step in the DSCR evaluation pipeline.
+
+<Note>
+`dscrAgent` is **entitlement-gated**: it runs only for lenders holding an explicit `enabled=true` entitlement row. The router's zero-rows fallback does not grant it. See `requiresExplicitGrant` in [Agent catalog and pipeline](/agents/catalog-and-dependencies). Granting `dscrAgent` also requires that the lender holds a `rentalIncomeAgent` grant (`ENTITLEMENT_COREQUISITES`).
+</Note>
+
+## What it computes
+
+For each audit the agent reads:
+
+- **MISMO loan facts** (`audit_runs.mismo_loan_facts`): borrower citizenship, transaction type, loan product, note rate, loan amount, LTV, credit score, taxes/insurance/HOA, and IO term.
+- **Rental income run** (`rental_income_runs`): per-unit rents resolved by the [Rental Income agent](/agents/rental-income-agent).
+- **Eligibility config** (`eligibility_configs.dscr_params`): lender-specific DSCR engine parameters, merged with built-in defaults.
+
+The engine (`lib/dscr-engine/engine.ts`) produces:
+
+| Output | Meaning |
+|---|---|
+| **Per-unit results** | Rent-to-be-utilized per unit, the rent rule that fired, rent basis, and an LTV reduction flag. |
+| **Aggregates** | Unit count, vacant count, occupancy status (`Vacant` / `Occupied`), and total rent. |
+| **Payments** | IO flag, IO gate result, qualifying payment, fully amortized payment, and P&I / TIA components. |
+| **DSCR ratio** | `dscrQualifying` and `dscrFnFullyAmortized`; `activeDscrLabel` names which ratio applies. Both are `null` while `needsInfo` is non-empty. |
+| **Program matrix inputs** | The FICO / LTV / DSCR / occupancy snapshot the eligibility engine reads. |
+| **Findings** | `Finding[]` — warnings and signals about the loan (e.g. `finding.signal.dscr_below_min`, `finding.signal.short_term_rental_present`). |
+| **Needs-info codes** | `DscrNeedsInfoCode[]` — inputs missing or unknowable, carried from the rental income run or emitted by the DSCR engine itself. |
+
+### Ratio provenance
+
+`dscr_runs.ratio_provenance` is `verified` when every input that fed the engine is verified, and `stated` when at least one input came from the loan's stated values (e.g. a worksheet entry rather than an extracted lease). `NULL` means the ratio could not be computed (`needs_info` is non-empty).
+
+## Needs-info codes
+
+A needs-info code signals that the ratio cannot be computed because a required input is unknown. The portal displays the code as a "Needs info" outcome with the document that would clear it.
+
+**Agent-own codes (loan and payment facts):**
+
+| Code | Meaning |
+|---|---|
+| `DSCR_NI_NO_MISMO` | No `mismo_loan_facts` on the audit run. |
+| `DSCR_NI_NO_LOAN_AMOUNT` | Loan amount absent from MISMO. |
+| `DSCR_NI_NO_NOTE_RATE` | Note rate absent. |
+| `DSCR_NI_NO_PRODUCT` | Loan product not in the supported set. |
+| `DSCR_NI_NO_PITIA` | Taxes/insurance/association data missing. |
+| `DSCR_NI_TIA_INCOMPLETE` | Tax/insurance fields only partially populated. |
+| `DSCR_NI_NO_LTV` | LTV absent. |
+| `DSCR_NI_RATIO_IMPLAUSIBLE` | Computed ratio falls outside a sanity range. |
+| `DSCR_NI_IO_NO_FICO` | IO gate requires FICO but it is unknown. |
+| `DSCR_NI_FN_UNKNOWN_IO` | Foreign-national path requires IO term but it is unknown. |
+| `DSCR_NI_LENDER_PARAM_UNSET` | A required engine parameter is not set in `eligibility_configs.dscr_params`. |
+| `DSCR_NI_NO_RENTAL_INCOME` | No rental income run exists for this audit. |
+| `DSCR_NI_UNIT_COUNT_UNSUPPORTED` | Unit count is outside the engine's supported range. |
+| `DSCR_NI_VACANT_CONDITIONS_UNKNOWN` | Vacant-unit conditions required by the rent rule are unknown. |
+| `DSCR_NI_RENT_RULE_INPUT_UNKNOWN` | An input the rent rule needs is unknown. |
+| `DSCR_NI_NO_FULLY_INDEXED_RATE` | ARM product requires a fully indexed rate but it is absent. |
+| `DSCR_NI_NO_NOTE_DATE` | A lease term test requires the note date but it is absent. |
+| `DSCR_NI_NO_IO_TERM` | IO loan requires an IO term length but it is absent. |
+
+**Rental income codes (`RI_NI_*`)** — codes emitted by the Rental Income agent that the DSCR agent carries forward unchanged (e.g. `RI_NI_NO_MARKET_RENT`, `RI_NI_SHORT_TERM_UNKNOWN`). These are shown alongside the agent-own codes in the portal.
+
+## Data model
+
+### dscr_runs
+
+One row per audit run (UNIQUE on `audit_run_id`). Migration `0268_add_dscr_runs.sql`.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `audit_run_id` | uuid NOT NULL → `audit_runs` (cascade). UNIQUE. |
+| `lender_id` | uuid → `lenders` (no action). |
+| `loan_id` | uuid → `loans` (no action). |
+| `rental_income_run_id` | uuid → `rental_income_runs` (set null). The rental income run this result was computed from. |
+| `ratio` | numeric — the active DSCR ratio; `null` while needs-info codes are present. |
+| `ratio_provenance` | text — CHECK `verified \| stated`; `null` when ratio is `null`. |
+| `inputs` | jsonb NOT NULL (default `{}`) — `DscrRunInputs`: every input the engine read, keyed by input path, with its source, status, and evidence location. |
+| `output` | jsonb — `StoredDscrOutput`: the engine's computed result without identity-bearing echoes (per-unit, aggregates, payments, DSCR, program matrix inputs, findings, suggested conditions). |
+| `needs_info` | jsonb NOT NULL (default `[]`) — `DscrRunNeedsInfo[]`: the agent-own and rental-income needs-info codes that block the ratio. |
+| `params_snapshot` | jsonb — the merged engine params used for this run. |
+| `params_version` | text — the params version identifier. |
+| `created_at` | timestamptz NOT NULL |
+| `completed_at` | timestamptz NOT NULL |
+
+## Engine parameters (`eligibility_configs.dscr_params`)
+
+The DSCR engine reads lender-specific parameters from `eligibility_configs.dscr_params` (jsonb, nullable — migration `0262_add_eligibility_configs_dscr_params.sql`). When the column is `null`, the portal's standalone calculator falls back to built-in defaults (`CALCULATOR_DEFAULT_PARAMS`). The audit-path agent refuses to compute when required params are absent and emits `DSCR_NI_LENDER_PARAM_UNSET` instead.
+
+Parameters control rent-rule thresholds (e.g. above-market lease cap, vacant-unit conditions, refi partial documentation thresholds), ARM qualifying rate strategy (`greater_of_fully_indexed_or_note`), IO gate FICO floors, and minimum DSCR by program.
+
+## Check catalogue
+
+The agent maps its engine rules, findings, and needs-info codes to a `DscrCheckListEntry` for each. Each entry has:
+
+- `name` — display label for the check.
+- `outcome` — one of `Pass`, `Failed`, `Warning`, `Needs info`, `Not applicable`.
+- `condition` — prose describing what the check verifies.
+- `document` — the document type that would supply missing evidence.
+- `eligibilityEffect` — the LTV or eligibility impact if this check fails.
+
+The check list is built by `buildDscrChecks` and stamped onto the DSCR ledger row at completion. The portal renders it in the DSCR section page and in the overview card.
+
+## Portal API
+
+The DSCR results are available via a portal audit-section endpoint. The BFF proxy at `packages/app/src/app/api/v2/audits/[auditRunId]/dscr/route.ts` proxies it.
+
+```
+GET /api/v1/portal/audits/:auditId/dscr
+```
+
+Guarded by `PortalAuditsAuthGuard`. See [Portal API: audit results](/portal/api-audit-results#dscr-section) for the full context.
+
+**Response fields (`DscrResponse`):**
+
+| Field | Notes |
+|---|---|
+| `status` | `complete`, `pending`, `failed`, `not_applicable`, `skipped`, or `absent`. `not_applicable` = skipped with reason `notTriggered` (not a DSCR loan). |
+| `header` | `DscrHeader` — ratio, provenance, occupancy, unit count, payment, check coverage counts. `null` when `status` ≠ `complete`. |
+| `verdict` | `DscrVerdict` — program eligibility outcome (Pass / Failed / Needs info) with the failing axis and key metrics. `null` when eligibility is not graded. |
+| `checks` | `LabelledDscrCheck[]` — the full check catalogue with outcomes. |
+| `units` | `DscrUnitRow[]` — per-unit rent, rule, basis, and LTV reduction flag. |
+| `payments` | `DscrPaymentRow[]` — qualifying payment breakdown. |
+| `shortTerm` | `DscrShortTermUnit[]` — short-term rental details per unit. |
+
+The portal renders the DSCR section at `/loan-audits/[auditRunId]/dscr` (staff viewer) and counts it in the portal hero's total and needs-review tallies. DSCR is also included in the partner API's `agentStatuses` summary.
+
+## Triggering
+
+The DSCR agent is **not planned by the router** as a phased agent. Instead, the Rental Income agent queues it via `dscr.queueDscrRun(auditRunId, "rentalIncome")` after each of its own runs — whether the rental income run succeeded or failed. The DSCR agent runs after the rental income run regardless of rental outcome, so a partial (stated or failed) rental result still produces a DSCR computation where possible.
+
+## Related pages
+
+<Columns cols={2}>
+  <Card title="Rental Income agent" icon="home" href="/agents/rental-income-agent">
+    Upstream rent resolution that feeds the DSCR engine.
+  </Card>
+  <Card title="Portal API: bank statement and DSCR" icon="landmark" href="/portal/api-bank-statement-dscr">
+    The standalone DSCR calculator (manual worksheet entry, lease upload, MISMO import).
+  </Card>
+  <Card title="Portal API: audit results" icon="clipboard-check" href="/portal/api-audit-results">
+    The portal audit-section endpoint that serves DSCR results.
+  </Card>
+  <Card title="Financial data model" icon="dollar-sign" href="/data-model/financial-data-model">
+    Eligibility config and rule engine context.
+  </Card>
+</Columns>

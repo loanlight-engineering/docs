@@ -89,6 +89,10 @@ Marked TEMPORARY in the migration comment — the column is scheduled to be drop
 
 Timestamps: `started_at`, `completed_at`, `document_posted_at`. Other columns: `encompass_document_id`, `expected_closing_date`.
 
+<ParamField path="mismo_loan_facts" type="jsonb (nullable)">
+Added by migration `0261_add_audit_runs_mismo_loan_facts.sql`. The structured result of parsing the MISMO XML at audit creation time, used by the [DSCR agent](/agents/dscr-agent) to access loan facts without re-parsing. Columns: borrower fields (name, names, foreignNational, surnames, residency), transaction type, loan product, note rate, loan amount, LTV, credit score, monthly housing expenses (taxes, hazard, flood, HOA), IO term, and note date. `NULL` on runs where no MISMO parse was performed (appraisal-only or pre-feature runs). **Contains PII (borrower names, subject address) — never log this column's value.**
+</ParamField>
+
 The partial unique on `(loan_id, run_number)` applies only where `loan_id IS NOT NULL`. Indexes cover status, lender, MISMO hash, and shadow partials.
 
 `audit_errors` (also `audit-runs.ts`) records per-agent failures without failing the run: PK `id`, `audit_run_id` → `audit_runs` (cascade, NOT NULL), `agent_name`, `error_type` (NOT NULL; CHECK `transient | permanent | validation`), `error_message` (NOT NULL), `error_details` jsonb, `retryable` bool, `occurred_at`. It is documented in detail with the other [result tables](/data-model/result-tables).

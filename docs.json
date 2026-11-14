@@ -95,7 +95,9 @@
               "agents/liabilities-assessment",
               "agents/bank-statement-income",
               "agents/business-verification",
-              "agents/adverse-media-screening"
+              "agents/adverse-media-screening",
+              "agents/rental-income-agent",
+              "agents/dscr-agent"
             ]
           }
         ]

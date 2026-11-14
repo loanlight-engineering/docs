@@ -54,10 +54,21 @@ Controller: `portal-audits/portal-audits.controller.ts` at `api/v1/portal/audits
 | `GET /api/v1/portal/audits/:auditId/urla-completeness` | URLA completeness section |
 | `GET /api/v1/portal/audits/:auditId/checks-completed` | Checks-completed section |
 | `GET /api/v1/portal/audits/:auditId/credit` | Credit section |
+| `GET /api/v1/portal/audits/:auditId/dscr` | DSCR section — see [below](#dscr-section). |
 || `GET /api/v1/portal/audits/:auditId/eligibility` | `EligibilityFindingsResponse` — verdict fields (`auditRunId`, `findings[]`) from `eligibility_results`; surfaced as `effectiveMaxLtv`, `appliedCaps`, `appliedReductions`, `loanLtv`, and `gridBaseLtv` on each finding (LOA-1966). `loanLtv` is the loan's own LTV — present on every row of an evaluation that resolved one, the same value on each row. `gridBaseLtv` is the raw grid cell before caps and reductions. Both are reporting fields, never grading inputs. The underlying reads run in a `repeatable read` transaction (LOA-2193) so findings and readiness rows always describe the same evaluation. Consumed by the portal eligibility card (LOA-2032). |
 || `GET /api/v1/portal/audits/:auditId/ltv-ledger` | LTV ledger projection for the audit (LOA-2947). Behind `isEvidenceOutputEnabled`; answers like an unmatched path (404) when the flag is off. See [LTV ledger read-back](#ltv-ledger-read-back-loa-2947) below. |
 | `GET /api/v1/portal/audits/:auditId/errors` | `PortalAuditErrorsResponse` |
 | `GET /api/v1/portal/audits/:auditId/documents/by-name/:filename/pdf` | Document PDF by name |
+
+## DSCR section
+
+Guarded by `PortalAuditsAuthGuard`. BFF proxy: `packages/app/src/app/api/v2/audits/[auditRunId]/dscr/route.ts`.
+
+See [DSCR agent](/agents/dscr-agent) for the full response shape (`DscrResponse`). The portal renders this section at `/loan-audits/[auditRunId]/dscr`. It counts in the portal hero and in the partner API `agentStatuses`.
+
+<Warning>
+Like every other section, this endpoint requires a matching Next.js BFF proxy route. The proxy exists at `api/v2/audits/[auditRunId]/dscr`. Removing or renaming the proxy silently returns `null` to the portal.
+</Warning>
 
 ## Bank-statement-income audit routes (LOA-2016)
 

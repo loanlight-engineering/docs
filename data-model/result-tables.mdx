@@ -188,6 +188,64 @@ One row per subject per audit run. Stable position: unique index `bv_subjects_au
 
 Other columns: `declared_name`, `declared_address` jsonb, `declared_start_date`, `search_state`, `property_state`, `created_at`.
 
+## DSCR
+
+Written by the [DSCR agent](/agents/dscr-agent). One row per audit run, keyed to `audit_runs` by UNIQUE constraint (not a simple FK child — the row is upserted, not cascade-deleted). Migration `0268_add_dscr_runs.sql`.
+
+### dscr_runs
+
+<ParamField path="id" type="uuid PK" />
+<ParamField path="audit_run_id" type="uuid NOT NULL">FK → `audit_runs` (CASCADE). UNIQUE constraint `dscr_runs_audit_run_id_unique`.</ParamField>
+<ParamField path="lender_id" type="uuid">FK → `lenders` (no action).</ParamField>
+<ParamField path="loan_id" type="uuid">FK → `loans` (no action).</ParamField>
+<ParamField path="rental_income_run_id" type="uuid">FK → `rental_income_runs` (set null). The rental income run this result was computed from.</ParamField>
+<ParamField path="ratio" type="numeric (nullable)">The active DSCR ratio. `NULL` while `needs_info` is non-empty.</ParamField>
+<ParamField path="ratio_provenance" type="text (nullable)">CHECK: `verified | stated`. `verified` when every engine input is verified; `stated` when at least one is stated. `NULL` when ratio is `NULL`.</ParamField>
+<ParamField path="inputs" type="jsonb NOT NULL">Default `{}`. `DscrRunInputs`: every engine input keyed by path, with its source, verification status, and evidence location (page/box).</ParamField>
+<ParamField path="output" type="jsonb (nullable)">`StoredDscrOutput`: per-unit, aggregates, payments, DSCR ratios, program matrix inputs, findings, and suggested conditions — without identity-bearing prose or borrower names.</ParamField>
+<ParamField path="needs_info" type="jsonb NOT NULL">Default `[]`. `DscrRunNeedsInfo[]`: the agent-own (`DSCR_NI_*`) and rental-income (`RI_NI_*`) codes blocking the ratio.</ParamField>
+<ParamField path="params_snapshot" type="jsonb (nullable)">The merged DSCR engine parameters used for this run.</ParamField>
+<ParamField path="params_version" type="text (nullable)">The params version identifier.</ParamField>
+
+Plus `created_at`, `completed_at`.
+
+## Rental income
+
+Written by the [Rental Income agent](/agents/rental-income-agent). Migration `0266_add_rental_income_runs.sql`.
+
+### rental_income_runs
+
+<ParamField path="id" type="uuid PK" />
+<ParamField path="audit_run_id" type="uuid NOT NULL">FK → `audit_runs` (CASCADE). UNIQUE constraint `rental_income_runs_audit_run_id_unique`.</ParamField>
+<ParamField path="lender_id" type="uuid">FK → `lenders` (no action).</ParamField>
+<ParamField path="loan_id" type="uuid">FK → `loans` (no action).</ParamField>
+<ParamField path="transaction" type="jsonb NOT NULL">`RentalIncomeTransaction` — transaction type and other MISMO loan facts the agent read.</ParamField>
+<ParamField path="units" type="jsonb NOT NULL">Default `[]`. `RentalIncomePerUnitResult[]`: rent-to-be-utilized per unit with the rule that fired, rent basis, and LTV reduction flag.</ParamField>
+<ParamField path="qualified" type="jsonb (nullable)">`RentalIncomeQualified`: the qualifying total and per-unit breakdown. `NULL` while needs-info codes are present.</ParamField>
+<ParamField path="leases" type="jsonb NOT NULL">Default `[]`. `RentalIncomeLease[]`: extracted lease records with their placement decisions.</ParamField>
+<ParamField path="worksheet" type="jsonb (nullable)">`DscrWorksheet`: extracted DSCR worksheet fields. `NULL` when no worksheet was classified.</ParamField>
+<ParamField path="documents_skipped" type="jsonb NOT NULL">Default `[]`. `SkippedRentalDocument[]`: documents that could not be used, with reason.</ParamField>
+<ParamField path="needs_info" type="jsonb NOT NULL">Default `[]`. `RentalIncomeNeedsInfo[]`: codes blocking the qualifying rent (e.g. `RI_NI_NO_MARKET_RENT`, `RI_NI_SHORT_TERM_UNKNOWN`).</ParamField>
+<ParamField path="findings" type="jsonb NOT NULL">Default `[]`. `RentalIncomeFinding[]`: warnings and signals produced alongside rent resolution.</ParamField>
+<ParamField path="params_snapshot" type="jsonb (nullable)">The DSCR engine params the run used (from `eligibility_configs.dscr_params`, merged with defaults).</ParamField>
+<ParamField path="params_version" type="text (nullable)">The params version identifier.</ParamField>
+
+Plus `created_at`, `completed_at`.
+
+### rental_extraction_ledger
+
+A per-loan deduplication ledger for lease and worksheet extraction. Migration `0263_add_rental_extraction_ledger.sql`. Composite PK `(loan_id, loan_document_id, extractor_name, segment_key)`. FK `loan_id` → `loans` (cascade).
+
+| Column | Notes |
+|---|---|
+| `loan_id` | uuid NOT NULL (PK part) |
+| `loan_document_id` | uuid NOT NULL (PK part) |
+| `extractor_name` | text NOT NULL (PK part) |
+| `segment_key` | text NOT NULL (PK part) |
+| `reserved_at` | timestamptz NOT NULL |
+
+Each document segment is reserved by the extractor that claims it first. A segment already in the ledger is not extracted again, preventing duplicate lease records across concurrent runs.
+
 ## audit_errors
 
 Per-agent failure ledger (`audit-runs.ts`). PK `id`, `audit_run_id` → `audit_runs` (cascade, NOT NULL).

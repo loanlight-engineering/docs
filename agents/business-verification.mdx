@@ -191,10 +191,28 @@ Two endpoints under `PortalAuditsBusinessVerificationController` (`api/v1/portal
 |---|---|---|
 | `auditRunId` | string | |
 | `status` | string | `complete`, `not_applicable`, `failed`, `pending`, `skipped`, or `absent` |
-| `businesses` | `BusinessVerificationBusiness[]` | One entry per subject |
-| `counts` | `CheckCounts` | Aggregate `ran`, `passed`, `failed`, `couldntCheck`, `warnings`, `notApplicable`, `needsReview` |
+| `businesses` | `BusinessVerificationBusiness[]` | One entry per subject (legacy field, unchanged). |
+| `counts` | `CheckCounts` | Aggregate `ran`, `passed`, `failed`, `couldntCheck`, `warnings`, `notApplicable`, `needsReview` (legacy field, unchanged). |
+| `checks` | `LabelledCheck[] \| null` | Per-subject, per-check decision list. Present on a completed run that recorded a stamp; `null` otherwise (see below). |
+| `coverage` | `CheckCoverage \| null` | Aggregate ran/passed/failed/warning/needs-review/not-applicable counts derived from the recorded stamp. `null` when no stamp exists. |
 
 `not_applicable` is returned when the loan has no self-employment or vesting entity to check (`no_current_self_employment_or_vesting_entity`). `absent` is returned when the agent was not included in the audit's plan.
+
+### Business Verification decisions (LOA-3421)
+
+When the Business Verification worker completes a run it now builds a frozen `checks` list — one entry per subject × check (`found`, `active`, `formation`) — and records it in the same guarded status update that stamps `completed_at`. The stamp is written once and never overwritten; a second terminal update from a re-audit cannot replace the first list.
+
+**When `checks` is served:**
+
+| Run state | `checks` served |
+|---|---|
+| A current stamp exists | Recorded rows in stamp order. Each check entry carries `name` (from the check catalogue), `outcome` (the six core labels: Passed, Failed, Warning, Needs info, Not applicable, Incomplete), and `coverage`. |
+| Completed with no stamp (pre-LOA-3421 or stamp failed) | A live derivation using the resolver's current reason. `savedBeforeCoverage` marker is set. |
+| Any other status | `null` — no rows, no derivation. |
+
+A check list that cannot be built (`check_list_failed` marker) does not hold the run back: the run still completes, and the read falls back to the live derivation.
+
+An unknown stored outcome reads `Incomplete` through the existing `labelRaw` path and does not log the row.
 
 Portal routes: `/loan-audits/[auditRunId]/business-verification` (staff viewer) and the next.js App Router BFF at `api/v2/audits/[auditRunId]/business-verification`.
 
