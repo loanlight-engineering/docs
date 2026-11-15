@@ -1,50 +1,98 @@
 ---
 title: Migration workflow
-description: Authoring and applying Drizzle migrations, and the drift canaries.
+description: Authoring and applying Atlas migrations; the frozen Drizzle chain and its drift canaries.
 icon: git-branch
 ---
 
-LoanLight uses `drizzle-kit` to generate and apply schema migrations. The workflow is: edit the schema TypeScript, generate a numbered SQL migration from the diff, review it, and apply it. **Never hand-write migration SQL from scratch** — let `generate` author it from the schema, then audit the output.
+LoanLight migrated from `drizzle-kit` to [Atlas](https://atlasgo.io) in LOA-3403 (2026-11-14). New migrations go exclusively in `packages/api/db/migrations/atlas/`. The older numbered files under `packages/api/db/migrations/` (and `meta/`) are a **frozen history**: CI fails any PR that adds or changes them.
 
-## The scripts
+## Atlas migrations (LOA-3403, current)
 
-All scripts live in `loanlight-api/packages/api/package.json`.
+All commands run from `packages/api` unless noted.
 
-| Script | Command | Purpose |
-|---|---|---|
-| `db:generate` | `drizzle-kit generate` | Diff `schema/index.ts` against the journal and emit a new numbered SQL migration in `db/migrations/`. **The primary authoring command.** |
-| `db:generate:custom` | `tsx scripts/generate-custom.ts` | Server-side migration numbering — numbers a new `--custom` migration against `origin/main`'s journal (not a stale local copy). Refuses if the branch is behind or the journal is mid-conflict. See below. |
-| `db:renumber` | `tsx scripts/renumber/cli.ts` | Resolve a migration number collision between a branch and `origin/main`. Three modes: `--check` (exit 0/1), `--dry-run` (preview), apply. See below. |
-| `db:migrate` | `drizzle-kit migrate` | Apply pending migrations. |
-| `db:check` | `drizzle-kit check` | Detect collisions / consistency issues in the migration set. |
-| `validate:migrations` | `ts-node scripts/validate-migrations.ts` | CI lint (see below). |
-| `test:migration` | `jest --config ./jest.containers.config.json` | Live-Postgres (testcontainers, `postgres:16-alpine`) migration tests. |
+<Warning>
+`pnpm db:generate`, `pnpm db:generate:custom`, and `pnpm db:renumber` are **retired** and exit 1 with a pointer to the Atlas workflow. Do not use them for new migrations.
+</Warning>
 
-## Authoring a migration
+### Setup
+
+First time on a machine, or when anything looks wrong:
+
+```bash
+pnpm atlas:doctor
+```
+
+This checks that Atlas is at the pinned version (`infra/lib/atlas-version.ts`), that `atlas login` to org `loanlight` is current, that Docker is running, and that the local database is reachable. It prints the fix for each failure.
+
+### Authoring a migration
 
 <Steps>
-<Step title="Edit the schema">
-Change the table file under `src/database/schema/` and make sure it is re-exported from `index.ts`.
+<Step title="Schema change (TypeScript)">
+Edit `src/database/schema/`, re-export the table from `schema/index.ts`, then:
+
+```bash
+pnpm db:new <name>
+```
+
+Atlas diffs the schema against the migration directory and writes a new timestamped file (`YYYYMMDDHHmmss_<name>.sql`) in `packages/api/db/migrations/atlas/`. Review the SQL — never hand-author DDL that the schema can express.
 </Step>
-<Step title="Generate">
-Run `db:generate`. Drizzle diffs the schema against `db/migrations/meta/_journal.json` and writes the next numbered `.sql` file (e.g. `0267_*.sql`). If you are on a branch that has fallen behind `main` and your number collides with an existing migration, use `db:renumber` to reslot your migration onto main's current tail without hand-editing the journal.
+<Step title="Hand-written SQL (backfill, seed, trigger, partial index, CHECK, etc.)">
+```bash
+pnpm db:new --blank <name>
+```
+
+Write the SQL, then validate and lint:
+
+```bash
+atlas migrate hash --env local
+atlas migrate lint --env ci --latest 1
+```
 </Step>
-<Step title="Review the SQL">
-Read the generated SQL. Confirm it does what you intended and did not emit an unexpected narrowing revert (a common symptom of schema/migration drift — see canaries below).
+<Step title="Apply locally">
+```bash
+pnpm db:migrate
+```
+
+A database built before the Atlas cutover is handed to Atlas automatically. The command refuses a non-local database (for example, an open `pnpm db:connect:*` tunnel on port 5432 — close the tunnel first). To reset a stale local DB:
+
+```bash
+pnpm db:migrate --reset          # preview what would be deleted
+pnpm db:migrate --reset --yes    # do it
+```
 </Step>
-<Step title="Validate and test">
-Run `validate:migrations` and `test:migration`. Register P0 migrations in the container test suite.
-</Step>
-<Step title="Apply">
-Run `db:migrate` against the target environment.
+<Step title="After a rebase or gt sync">
+If `atlas.sum` conflicts or looks wrong after rebasing:
+
+```bash
+pnpm db:rebase
+```
+
+The first output line names the base branch it compares against. If it prints `Next: git rebase --continue`, continue the rebase; otherwise commit the result. Never hand-edit `atlas.sum` or a migration already on `main`.
 </Step>
 </Steps>
 
-The journal (`db/migrations/meta/_journal.json`, version 7, postgresql) tracks every migration from `0000_initial_schema` through the latest. The prefix (`idx`) can **jump** — `db:generate:custom` numbers from journal entry count, which has drifted from the last file tag, so gaps are expected.
+Never run `atlas migrate push` manually — CI pushes to Atlas Cloud after merge.
 
-<Warning>
-**The migration runner owns the outer transaction.** Do not add raw `BEGIN;` / `COMMIT;` inside a migration `.sql` — it broke atomicity in `0143`.
-</Warning>
+### Atlas configuration
+
+Config lives in `packages/api/atlas.hcl`. Three environments are defined: `local` (development), `ci` (lint and schema diff), and `rebuild`. The migration directory for all three is `file://db/migrations/atlas`. The Atlas Cloud org is `loanlight`. The `drizzle` and `atlas_schema_revisions` schemas are excluded from every env.
+
+## Frozen Drizzle chain
+
+The Drizzle migration chain (`packages/api/db/migrations/` and `meta/`) is frozen as of LOA-3403. The historical scripts below are retained for reference but no longer apply to new migration work.
+
+### Legacy scripts (retired)
+
+All scripts live in `loanlight-api/packages/api/package.json`.
+
+| Script | Command | Status |
+|---|---|---|
+| `db:generate` | `drizzle-kit generate` | Retired — exits 1 |
+| `db:generate:custom` | `tsx scripts/generate-custom.ts` | Retired — exits 1 |
+| `db:renumber` | `tsx scripts/renumber/cli.ts` | Retired — exits 1 |
+| `db:check` | `drizzle-kit check` | Retired |
+| `validate:migrations` | `ts-node scripts/validate-migrations.ts` | Applies to Drizzle chain only |
+| `test:migration` | `jest --config ./jest.containers.config.json` | Applies to Drizzle chain only |
 
 ## Server-side migration numbering (LOA-1918)
 
@@ -217,6 +265,19 @@ The migration chain is the load-bearing artifact and is fully self-contained. Th
 Publishing follows the standard bump-to-publish flow. For the full package description, see [shared packages](/ops/shared-packages#aus-db-aus-database-migration-chain-and-schema).
 
 ## Recent notable migrations
+
+The table below records migrations that carry meaningful schema or policy changes worth calling out. The Atlas section covers migrations under `packages/api/db/migrations/atlas/`; the Drizzle section covers the frozen chain under `packages/api/db/migrations/`.
+
+### Atlas migrations
+
+| Migration | Summary |
+|---|---|
+| `20261101000000_baseline` | The Atlas baseline (LOA-3403, 2026-11-14). Contains the full schema DDL (roles, enums, tables, indexes, grants, functions, triggers) as of the Drizzle chain cutover at the 2026-09-02 squash plus the subsequent 19-migration Drizzle tail. This is the starting point for all Atlas migration history. |
+| `20261101000001_drizzle_names` | Compatibility naming layer added immediately after the baseline to preserve the name conventions the Drizzle chain established. |
+| `20261114150750_loan_context_capture_history` | Creates `evidence_loan_context_captures` (LOA-3160, EDU-30.2). Records subsequent loan-context captures for an audit run — the initial `loan_context` pin lives in `evidence_audit_source_pins`; this table retains generation 2+ re-captures. PK is `(audit_run_id, generation)`. `generation >= 2` is enforced by CHECK. `source_slot = 'loan_context'` is enforced by CHECK. FKs to `evidence_audit_source_pins` (the initial pin) and `evidence_sources` (the current source). An `(source_id, lender_id, loan_id)` index supports the inverse lookup. |
+| `20261114150754_loan_context_capture_history_guards` | Adds `BEFORE UPDATE/DELETE` and `BEFORE TRUNCATE` statement-level triggers to `evidence_loan_context_captures` using `evidence_reject_history_mutation()`, then `REVOKE UPDATE, DELETE, TRUNCATE` from `PUBLIC`. The table is append-only from creation. |
+
+### Drizzle migrations (frozen chain)
 
 The table below records migrations added after the 2026-09-02 squash that carry meaningful schema
 or policy changes worth calling out.

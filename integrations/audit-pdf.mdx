@@ -317,6 +317,16 @@ Credit rule `reason`, and the `agentStatuses` ledger.
 **Counted agents** are the agents whose check totals feed the coverage model:
 `documentHealth`, `dataConsistency`, `urla` (1003), `properties` (Property Data), and `credit`.
 
+### Couldn't-check split (LOA-3606)
+
+The API now serves `couldntCheck` alongside `needsReview` in every coverage block. `needsReview` contains only issues (Failed, Warning, unrecognised labels); `couldntCheck` contains Needs info and Incomplete outcomes. Both fields are optional — a response without `couldntCheck` (from an older API) is handled by inferring the split from the per-label counts, so the PDF library can deploy after the API without breaking on version skew.
+
+A new `isCouldntCheckLabel` classifier in `label-selection.ts` mirrors the API's vocabulary. `labelsMatchCoverage` checks issues and couldn't-check counts separately.
+
+The subtitle now says "Issues found" only when at least one issue exists (a `failed` or `warning` label). An audit with only couldn't-check outcomes says neither that issues were found nor that all checks passed; instead the subtitle notes that some checks could not be completed. The all-clear banner behaves the same way.
+
+**Appraisal badge (LOA-3606).** The Encompass appraisal badge counts only Failed, Warning, and unrecognised labelled rules, plus its unlabelled additions (null-labelled FAIL/WARNING rules, actionable LLM findings). Needs info and Incomplete rules are no longer listed or counted as issues. `APPRAISAL_NEEDS_REVIEW_LABELS` narrowed to `failed` and `warning`; a labelled rule under any other non-couldn't-check label still renders in the badge but is ranked after Failed and Warning.
+
 ### Summary strip
 
 The Audit Summary section's six problem-row columns are replaced by a horizontal strip showing totals
@@ -325,8 +335,8 @@ across all counted agents:
 | Column | Meaning |
 |---|---|
 | Checks Passed | Counted agent checks that returned `passed`. Hidden when any counted agent is unrecorded or its section did not load. |
-| Failed | Checks with a `failed` or `missing`/`incomplete` label. |
-| Couldn't Check | Checks the agent could not evaluate. |
+| Need Review | Checks with a `failed`, `missing`, `incomplete`, or unrecognised label. |
+| Couldn't Check | Checks with a `needs_info` or `incomplete` label that the agent could not evaluate (LOA-3606). |
 | Warnings | Checks with a `warning` label. |
 | Required Docs Present | Whether all required documents were found. |
 
@@ -335,17 +345,14 @@ reads "N problems recorded in …". An unavailable section reads "Section unavai
 
 ### Per-section coverage notes
 
-Each counted agent's section closes with one coverage note: a line stating how many checks ran and
-how many passed (or an unavailable/degraded variant when the section did not load). This closes the
-1003 Check, Document Health, Data Consistency, Properties, Credit, and Business Verification
-sections. A failed or pending Business Verification run is an unavailable section and its closing
-note is omitted.
+Each counted agent's section closes with one coverage note. The note states how many checks ran and passed, and — if any — how many need review and how many couldn't be checked, separately (LOA-3606). An unavailable or degraded variant appears when the section did not load. This closes the 1003 Check, Document Health, Data Consistency, Properties, Credit, and Business Verification sections. A failed or pending Business Verification run is an unavailable section and its closing note is omitted.
 
 ### Coverage Appendix
 
 A Coverage Appendix is appended to the main audit PDF (after all other sections and before
 property pages on the combined-delivery path; absent from property-only split PDFs). It lists
-every check in every counted section, including `not_applicable` rows. Sections:
+every check in every counted section, including `not_applicable` rows. Group headings within each
+section separate issues and couldn't-check rows (LOA-3606). Sections:
 
 - **1003, Data Consistency, Properties, and Credit** — one row per check, with its label and reason.
 - **Document Health** — a matrix: documents on rows, check types (missing, expiration, etc.) as columns.

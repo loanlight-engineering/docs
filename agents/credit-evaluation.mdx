@@ -553,6 +553,10 @@ Per-rule definitions (`ruleSetId`, `sourceTemplateId` — intentionally not an F
 Human-in-the-loop tables: `credit_corrections` (field edits) and `credit_rule_overrides`
 (override outcome `PASS | FAIL | WARNING | NEEDS_INFO | SKIPPED`).
 
+<ResponseField name="evidence_loan_context_captures" type="table">
+Append-only table (Atlas migration `20261114150750`, LOA-3160) that records generation 2+ re-captures of the loan context for an audit run. The initial loan-context capture lives in `evidence_audit_source_pins`; subsequent re-captures (when new Encompass loan data arrives during the audit) are written here. PK is `(audit_run_id, generation)` with `generation >= 2`. The LTV shadow calculation reads the latest generation to pick up updated citizenship, prepayment penalty, and interest-only inputs. See [evidence capture schema](/data-model/evidence-schema#evidence-loan-context-captures-loa-3160-atlas-migration-20261114150750) for the full schema.
+</ResponseField>
+
 <ResponseField name="credit_evidence_generations" type="table">
 Migration `0212` (LOA-2997 / EDU-26) adds `credit_evidence_generations`, which stores point-in-time snapshots of a completed credit run for use as evidence by downstream systems (such as the eligibility engine’s LTV calculation). One row per snapshot. Key columns: `run_id` (FK to `credit_runs.id`), `lender_id`, `loan_id`, `audit_run_id`, `audited_credit_document_id`, `source` (jsonb — the extraction provenance), `facts` (jsonb — the full `CreditFacts` snapshot at generation time), `layers_used`, `is_scanned`, `implementation` (jsonb — identifies which code version produced this generation), `settings` (jsonb), `completed_at`, `ordered_date` (jsonb — the resolved credit report reference date used for ordering), `field_verification` (jsonb), `verification_pages` (jsonb), `predecessor_generation_id` (nullable FK — the prior generation this one supersedes), and `capture_seq` (positive integer, unique within a run). Unique constraints: `(id, lender_id, loan_id)` for scope identity and `(run_id, capture_seq)` for run sequence. The `evidence_decision_watermarks` table gains a `credit_membership` jsonb column (migration `0216`) to record which credit evidence generation contributed to each watermark decision.
 </ResponseField>
@@ -760,6 +764,8 @@ loan page reflect the same verdict the reviewer applied, not the original evalua
 
 **CRED_001/002/003 per-borrower consistency:** the `applicationBorrowers` context field threads the URLA person roster into the evaluateRules node. Each report's subjects are compared against their _own_ application borrower rather than all borrowers on the loan, eliminating false name-consistency failures on co-borrower reports.
 
+**Joint credit records bound to verified owners (LOA-3160).** Joint credit tradelines are now attributed to the verified owners of the account. The pipeline binds `J` (joint) and borrower-designator rows using verified identity evidence from the MISMO roster, so a joint account does not silently inflate the wrong person's liabilities. Reports that cannot place a row keep their prior behavior.
+
 **Loan-level findings:**
 
 - `CRED_L01` — qualifying FICO vs. the lender's configured minimum (`≥` is a pass). Computed by the projection, not stored as a `credit_rules` row.
@@ -793,6 +799,10 @@ When `PRIMARY_WAGE_EARNER` cannot pick a winner, `FicoUnknown` records the reaso
 `application_missing`). The most severe failure is reported first, using the precedence order:
 `application_missing` → `borrower_unmatched` → `no_score` → `income_unreadable` →
 `income_missing` → `income_tie`.
+
+**Luxury FICO label minimum scores (LOA-3160, LUX-FICO-LABELS-1).** For Luxury Mortgage, printed FICO score labels in the eligibility matrix tables act as minimum scores. A band inherits all eligible lower-score tiers from the same table and uses the highest LTV whose loan ceiling covers the loan amount. Explicit closed ranges retain their printed limits. This applies within one matrix table and does not carry across tables. The behavior is implemented in `fico-selection.ts`.
+
+**Primary earner selection improvements (LOA-3160, Deephaven).** `PRIMARY_WAGE_EARNER` selection now handles multi-borrower occupancy ambiguity and ties more precisely: it resolves the unique highest verified qualifying monthly income, records the tie/missing-income reason when income is equal or absent, and handles non-occupant co-borrower scenarios. Product-specific score-selection policies can override the strategy per program. A loan with exactly one borrower still selects that borrower without reading income.
 
 Custom credit-rule authoring lives in a separate `portal-credit-rules` module
 (`PortalCreditRulesController`): natural-language parsing (`credit-nl-parse.service.ts`), a

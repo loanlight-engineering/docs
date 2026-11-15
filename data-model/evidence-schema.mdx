@@ -667,6 +667,83 @@ references. These preserve the exact document ID and SHA-256 and the extraction 
 inventing a page position, so a producer that observes a document attribute without a page reference
 can cite it correctly.
 
+## LOA-3160 — urla-declarations.v12, observation-appraisal.v6, and observation-closing-disclosure.v1 (shared-types 9.11.0)
+
+`@loanlight-engineering/shared-types` **9.11.0** ships three new registry snapshots together as LTV producer contracts.
+
+**`urla-declarations.v12`** extends v11 with six declaration rows needed for delayed-financing, high-cost, and rent-lates LTV inputs:
+
+| Code | Subject | LTV driver |
+|---|---|---|
+| `subject_property.acquired_date` | `subject_property` | Delayed-financing DF-1: subject acquisition date |
+| `loan.lien_priority_type` | `loan` | High-cost HC-1: lien-specific HPML thresholds |
+| `loan.hmda_rate_spread_percent` | `loan` | High-cost HC-1: `hpml` indicator |
+| `borrower.residence.basis` | `borrower` | Rent-lates RL-1: housing expense basis (`Own`, `Rent`, `LivingRentFree`, `Unknown`) |
+| `borrower.residence.type` | `borrower` | Rent-lates RL-1: current/prior residence classification |
+| `borrower.residence.duration_months` | `borrower` | Rent-lates RL-1: residence-window coverage |
+
+Lien priority follows MISMO 3.4 B324: `FirstLien`, `SecondLien`, `ThirdLien`, `FourthLien`, `Other`. Rate spread is a signed decimal in percentage points (`currency_amount` unit `percent`). Residence enums are sourced from MISMO 3.4 B324.
+
+**`observation-appraisal.v6`** extends v5 with four appraisal subject prior-sale codes for delayed-financing DF-1:
+
+| Code | Value type | Purpose |
+|---|---|---|
+| `appraisal.subject.prior_sale_date` | date | Subject acquisition date (DF-1 primary input) |
+| `appraisal.subject.prior_sale_price` | text | Subject transfer price (evidence; DF-1 uses date only) |
+| `appraisal.subject.prior_sales_or_transfers_indicator` | boolean | Subject transfer statement in the report |
+| `appraisal.subject.prior_sale_research_period` | — (period qualifier only, no value) | Explicit research-window coverage |
+
+All rows use `pdf` locator kind; subject kind `subject_property`; adopter `EDU-30`. The research-period row carries a required calendar interval in `item.period` with a `none` value kind.
+
+**`observation-closing-disclosure.v1`** (`OBSERVATION_CLOSING_DISCLOSURE_V1_REGISTRY`) is the Closing Disclosure producer contract. All rows pin producer `loanlight-api.closing-disclosure`, subject kind `document` (one per CD instance, including multiple CDs in one file), adopter `EDU-30`, and `pdf`/`pdf_document` locator kinds. Finality (which CD is signed/latest-issued) is a consumer decision, not a schema field.
+
+| Code | Value type | Notes |
+|---|---|---|
+| `closing_disclosure.date_issued` | date | |
+| `closing_disclosure.closing_date` | date | |
+| `closing_disclosure.disbursement_date` | date | |
+| `closing_disclosure.loan_id_number` | text | `sensitivity: restricted` |
+| `closing_disclosure.property_address` | text | `sensitivity: restricted` |
+| `closing_disclosure.loan_purpose` | text | |
+| `closing_disclosure.loan_amount` | decimal_amount (USD) | |
+| `closing_disclosure.cash_to_close_amount` | decimal_amount (USD) | Drives `fc.ineligible.cash_out_dollar_limit`, `lux.ineligible.cash_out_dollar_limit` |
+| `closing_disclosure.payoffs_and_payments_total` | decimal_amount (USD) | Never a substitute for cash-to-borrower |
+| `closing_disclosure.form_variant` | enum | `with_seller` / `without_seller` |
+| `closing_disclosure.cash_to_close_direction` | enum | `from_borrower` / `to_borrower` |
+| `closing_disclosure.borrower_signature_present` | boolean | |
+| `closing_disclosure.borrower_signature_date` | date | |
+
+## LOA-3160 — observation-lease.v1 (shared-types 9.12.0)
+
+`@loanlight-engineering/shared-types` **9.12.0** publishes `OBSERVATION_LEASE_V1_REGISTRY` (`observation-lease.v1`) for the Rental Income LV-1 slice. It records saved lease facts without tenant identity.
+
+All rows pin producer `loanlight-api.lease-evidence`, subject kind `document` (one per lease occurrence), `pdf` locator kind, adopter `EDU-30`, and cardinality `single`. An unstated month-to-month term stays unknown — it is never defaulted to `false`.
+
+| Code | Value type | Notes |
+|---|---|---|
+| `lease.monthly_rent` | decimal_amount (USD required) | |
+| `lease.end_date` | date | |
+| `lease.property_address` | text | `sensitivity: restricted` |
+| `lease.unit_label` | text | |
+| `lease.month_to_month` | boolean | |
+
+## evidence_loan_context_captures (LOA-3160, Atlas migration 20261114150750)
+
+Records subsequent loan-context captures for an audit run. The initial `loan_context` pin is in `evidence_audit_source_pins`; this table retains every later re-capture (generation 2+). It is append-only: `BEFORE UPDATE/DELETE` and `BEFORE TRUNCATE` triggers use `evidence_reject_history_mutation()`, and `UPDATE, DELETE, TRUNCATE` are revoked from `PUBLIC`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `audit_run_id` | `uuid NOT NULL` | Part of composite PK |
+| `generation` | `integer NOT NULL` | Part of composite PK; CHECK `>= 2` (generation 1 is the initial pin) |
+| `lender_id` | `uuid NOT NULL` | Scope |
+| `loan_id` | `uuid NOT NULL` | Scope |
+| `source_slot` | `text NOT NULL` | CHECK `= 'loan_context'` |
+| `initial_source_id` | `uuid NOT NULL` | FK to `evidence_audit_source_pins.(audit_run_id, source_slot, lender_id, loan_id, source_id)` ON DELETE RESTRICT — ties each re-capture to the original pin |
+| `source_id` | `uuid NOT NULL` | FK to `evidence_sources.(id, lender_id, loan_id)` ON DELETE RESTRICT — the source retained in this generation |
+| `captured_at` | `timestamptz NOT NULL` | Default `now()` |
+
+Index: `evidence_loan_context_captures_source_idx` on `(source_id, lender_id, loan_id)`.
+
 ## Related
 
 <Columns cols={2}>

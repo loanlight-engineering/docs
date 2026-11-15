@@ -198,6 +198,19 @@ Two endpoints under `PortalAuditsBusinessVerificationController` (`api/v1/portal
 
 `not_applicable` is returned when the loan has no self-employment or vesting entity to check (`no_current_self_employment_or_vesting_entity`). `absent` is returned when the agent was not included in the audit's plan.
 
+### Portal UI (LOA-3421)
+
+On the `show_the_work` arm the Entity Health Check page no longer uses the shared agent-page template (progress bar, coverage box, Exceptions/All toggle). It is laid out as two card sections:
+
+1. **Secretary of State Validation** — one card per business, every check. Each card shows the band pill (worst label among the card's checks: Failed, then Warning, Needs info, Incomplete; otherwise Passed). The Secretary of State summary line reads "N need review" and "M couldn't be checked" separately (LOA-3606). **View Evidence** sits in the business-details row, right-aligned; hidden when the business was not found.
+2. **Public Records Check** — cards titled `Results for: {Business} & {Owner}` (three or more: `A, B & C`). The risk-area table appears first, then each subject that did not pass (verdict, summary, articles). The "Searched as" lines from the previous view are removed.
+
+Pill words follow the standard `RESULT_DISPLAY` vocabulary (Warning / Passed / Incomplete). "Likely a different person" keeps its own wording.
+
+Summary tiles appear directly under the page header. The overview card's **Show** button no longer saves the shared Exceptions/All toggle choice, since the page it opens has no toggle.
+
+`BusinessVerificationAgentPage` and its test were removed. `entityHealthCoverage` no longer takes a `showTheWork` parameter (the flag-off arm drove nothing rendered; the flag-off card uses the legacy overview). The `show_the_work` path now mounts `BusinessScreeningView` for the new card layout.
+
 ### Business Verification decisions (LOA-3421)
 
 When the Business Verification worker completes a run it now builds a frozen `checks` list — one entry per subject × check (`found`, `active`, `formation`) — and records it in the same guarded status update that stamps `completed_at`. The stamp is written once and never overwritten; a second terminal update from a re-audit cannot replace the first list.

@@ -329,6 +329,12 @@ The match line renders as muted text under the category select in the portal tra
 
 **P2P sender names without "from" (LOA-2683):** `extractP2pSenderName` previously anchored on `/\bfrom\b/` only, so banks that print the sender directly after the rail (`ZELLE <NAME> <phone>`) produced no sender name and the family/self exclusion never fired. A rail-anchored parse (Zelle, Venmo, Cash App, PayPal, Popmoney, QuickPay) is now applied alongside the existing `from` parse, with a newline-tolerant anchor and middle-name reconstruction. The new parse is gated to `direction === "inbound"` — the outbound and `descriptionFirst` expense paths are unchanged.
 
+**P2P credits printed surname-first excluded (LOA-3557).** The self-transfer and family-transfer passes previously matched senders in printed word order only, so `"SMITH JANE"` or `"Smith, Jane"` against `"Jane Smith"` passed through as income. A person-form sender (`First Last`, `LAST FIRST`, or `Last, First`) now matches in any order:
+- **Exact any-order** — the same words, regardless of order.
+- **Surname match** — when the sender's first or last word equals the account holder's surname.
+
+One-word senders still match exactly only. Organizations are identified by the shared `ENTITY_ONLY_DESIGNATIONS` list applied over the whole description run before the two-word cap; they keep the existing in-order exact and last-word-surname outcome. `sameNameAnyOrder` is in `name-matching.ts` and shared by both passes. `p2pCounterpartyCandidates`, `isSameOrRelatedParty`, `exactNameMatch`, and the recurring-expense gate are unchanged. The new exclusions apply to statements processed after this change merged; no backfill is performed.
+
 **Balance-rollover continuity keyed on account (#4030, supersedes LOA-2690):** `detectContinuityFindingsNode` previously keyed continuity on the printed mask alone, which caused false-positive `fraud_continuity` criticals whenever one mask covered two accounts (e.g. a credit union issuing a business checking and a primary share account under the same member number). The account key is now built on two components:
 
 1. **Shared account identity** (`accountIdentityBucketKeyOf` from `statement-month-sequence.ts`): canonical last four, composing `bank|suffix` only where the same suffix is observed across multiple institutions. Two unrelated sub-accounts with the same last-four get distinct keys; two renderings of the same account (`****6177` / `XXXX6177`) get the same key.
@@ -657,6 +663,18 @@ experience differs from the partner lane in several ways:
 - **`epc_audit` source.** EPC batches are minted with `borrower_files.source = 'epc_audit'`
   (migration `0068` adds the column value; migration `0069` validates it). EPC writes suppress
   asset-run triggers and carry persisted EPC buckets through extraction.
+
+## Income check registry (LOA-3422)
+
+Every Income check is declared once in `income-check-registry.ts` with a stable key, scope (`per_statement` or `per_analysis`), subject, and outcome set. The outcome union is derived from the registry; `INCOME_OUTCOME_LABELS` is typed over that union so a missing label fails `tsc`.
+
+With `show_the_work` on, the Income page shows every check in the registry with its labeled result — not only findings that raised an issue:
+
+- **Per-statement checks** (PDF integrity, font consistency, balance continuity, validation) — one row per source PDF or statement, with an explicit outcome (`passed`, `failed`, `warning`, `needs_info`, `incomplete`, `not_applicable`). A check that passed now shows `passed` rather than a blank row. Per-PDF checks are keyed by `sourceDocumentSubject`: the source document ID, or an opaque SHA-256 digest of the source key when a document ID is unavailable. The file name or S3 key is never the check identity.
+- **Per-analysis checks** (income trend, qualification period, large deposits, etc.) — one row per check across the whole analysis, using the same outcome vocabulary.
+- **Dismissed findings** remain visible with a `Dismissed` tag (reviewer, timestamp, note), sort last, and no longer contribute to the needs-review count.
+
+The worker records the full check list to `agent_runs.check_list` before marking the file complete. An audit saved before LOA-3422 retains the stored-findings view on the portal and never claims `passed` for checks it did not record. With the flag off the Income screen is unchanged.
 
 ## Audit lifecycle and source isolation
 
