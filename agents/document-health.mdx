@@ -13,7 +13,7 @@ The agent is constructed and invoked by `LangGraphService.createDocumentHealthGr
 `langgraph/document-health-graph-runner.ts`. The runner generates the `auditRunId`, a thread id of
 `${loanId}-document-health-${auditRunId}`, creates the `audit_runs` row, emits
 `EVENTS.AGENT.DOCUMENT_HEALTH.START`, then invokes the graph with
-`{ pipelineId, loanId, documentId, auditRunId, lenderCode, productType, estimatedClosingDate }`.
+`{ pipelineId, loanId, documentId, auditRunId, lenderCode, productType, estimatedClosingDate, loanContext }`. The `loanContext` is populated from the URLA extraction handoff (`extractHandoff("urlaExtraction")`); before LOA-3400 this value was spread as `undefined`, causing all YAML conditions (purpose, occupancy, employment, housing, property type, refinance purpose) to silently skip. The dispatcher also spreads entity keys (`title_held_by_entity`, `entity_owner_names`, `entity_owner_soft`) when public records show an entity owner on a refinance.
 
 <Info>
 `pipelineId` is the loan's **LlamaCloud pipeline** (vector index) holding the parsed documents.
@@ -173,7 +173,7 @@ results: present-required → `issueKind: "valid"`; missing → `issueKind: "mis
 After the program evaluation pass, the node runs the **borrower-declaration evaluator**
 (`borrower-declaration-eval.ts`). It reads each borrower's URLA Section 1/4/5 declaration answers,
 matches them against the built-in check registry (`ALL_BORROWER_DECLARATION_CHECKS`), and emits
-results for any triggered check. See [Borrower-declaration checks](#borrower-declaration-checks) below.
+results for any triggered check. Before emitting a `missing_document` for a classifier-backed declaration output, the node runs `recheckMissingDeclarationTypes` — the same retrieval-based presence check that program-required types use (`retrievalPresenceCheck` / `assessPresenceWithRetrieval`) — to reduce false negatives from incomplete classify-split runs (LOA-3612). A found type re-runs the declaration pass with it marked present. Only classifier-backed `missing_document` rows are searched; `conditional_document_unknown` results are not. See [Borrower-declaration checks](#borrower-declaration-checks) below.
 
 The node returns `requiredDocumentTypes`, which is threaded into `aggregate` so
 `doc_expiration_results.is_required` can be set.
@@ -302,7 +302,7 @@ recognised as their real type (for example `gift_letter`, `divorce_decree`) rath
 ## Required-document conditions
 
 `verify-required-documents` evaluates per-document conditions from the lender YAML
-(`day_1` / `pre_close`). Conditions are resolved against a `LoanContext` derived from the URLA.
+(`day_1` / `pre_close`). Conditions are resolved against the `LoanContext` from the URLA extraction handoff (see [graph invocation](#) above); all YAML conditions evaluate against actual loan data.
 
 `SUPPORTED_CONDITIONS`: `required`, `not_required`, `if_expired`, `if_rerun`, `if_updated`,
 `if_redisclosed`, `if_used`, `if_needed` (property value > $2,000,000), `if_purchase`,
@@ -317,19 +317,27 @@ recognised as their real type (for example `gift_letter`, `divorce_decree`) rath
 | `if_investment` | `loanContext.occupancy_type === 'INVESTMENT'` |
 | `if_renting` | `housing_status === 'RENT'` |
 | `if_condo` | `property_type === 'CONDO'` |
-| `if_entity_vesting` | `title_held_in_trust === true` |
+|| `if_entity_vesting` | `title_held_by_entity === true` |
 | `if_needed` | `property_value > $2,000,000` |
 | `if_cash_out` / `if_delayed_financing` | `refinance_purpose` |
 | `if_texas_50a6` | `property_state === 'TX'` AND `refinance_purpose === 'CASH_OUT'` |
 | `if_ny` | `property_state === 'NY'` |
 
 <Note>
-**LOA-3341 — `if_entity_vesting` on purchase loans.** `loanContext.title_held_in_trust` is only
-populated from ATTOM's trust indicator on refinances. On a purchase loan the current titleholder
-is the seller, whose trust status is irrelevant to the borrower's entity-documentation requirements.
-The field is therefore left unset on purchases, and `if_entity_vesting` always resolves to
-`skipped` for purchase loans — it cannot trigger entity-vesting document requirements based on the
-seller's ownership structure (LOA-3341, #5041).
+**LOA-3341 / LOA-3400 — `if_entity_vesting` on purchase loans.** On a purchase loan the current
+titleholder is the seller, whose entity structure is irrelevant to the borrower's documentation
+requirements. `loanContext.title_held_by_entity` (renamed from `title_held_in_trust` in LOA-3400)
+is left unset on purchases, so `if_entity_vesting` always resolves to `skipped` for purchase
+loans — it cannot trigger entity-documentation requirements based on the seller's ownership
+structure (LOA-3341, #5041).
+
+On **refinances**, `title_held_by_entity` is derived from public-record ownership (LOA-3400): the
+loan dispatcher determines whether the subject property is owned by an LLC, corporation, or trust.
+Two companion fields travel with it: `entity_owner_names` (the owner name string) and
+`entity_owner_soft` (`true` for bank or relocation owners, which degrade the finding to a
+non-blocking `conditional_document_unknown` row). Government owners are excluded. The requirement
+reason reads "Required because public records show the property owned by [OWNER]" and never
+mentions the borrower declaration.
 </Note>
 
 <Warning>

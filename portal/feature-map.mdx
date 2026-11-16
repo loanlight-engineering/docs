@@ -55,7 +55,7 @@ The portal uses the Next.js App Router with five route groups under `src/app/`. 
 
     | Tab | Purpose |
     |---|---|
-    | **Feature Flags** | All lender feature flags plus the Qualifying score method select (lowest middle or primary wage earner). The select stays locked if the current value cannot load, to prevent overwriting a value that is simply slow to arrive. |
+    | **Feature Flags** | All lender feature flags plus two value-flag selects: the **Qualifying score method** (`credit_qualifying_fico_method`: lowest middle, primary wage earner) and the **Eligibility audit level** (`eligibility_audit_level_eval`: off, compare, on). Value-flag selects stay locked when the current value cannot load, to prevent overwriting a value that is simply slow to arrive. |
     | **API Keys** | Partner API key management. |
     | **EPC Credentials** | WorkOS M2M application credentials. One-time secret reveal on creation; the secret is never stored by LoanLight. |
     | **Encompass ID Repair** | Repair mislinked Encompass loan IDs on the viewed client's loans (available only while viewing that client). |
@@ -195,6 +195,16 @@ The **eligibility card** is **not** in this `FeatureFlags` object. Its visibilit
 
 <Note>
 The **new results UI** (Data Consistency, Document Health, 1003 Check, Properties Check, Credit Review, and the standalone Credit product) is gated by `show_the_work`, a tri-state in `lender_feature_flags` — **not** in this `FeatureFlags` JavaScript object. It is resolved server-side and surfaced as `showTheWork` on the overview and credit-detail endpoints. See [feature flags and entitlements](/lender-config/feature-flags-and-entitlements) for the tri-state semantics and rollout defaults.
+</Note>
+
+<Note>
+The **eligibility audit level** (`eligibility_audit_level_eval`) is a value flag stored in
+`feature_value` on `lender_feature_flags` — **not** in the boolean `FeatureFlags` object. Its
+three states are `off` (default, no row), `compare` (shadow evaluation alongside production), and
+`on` (live LTV eligibility evaluation). A super admin sets it via the **Eligibility audit level**
+select on the **Feature Flags** settings tab (LOA-3160). The value is parsed by
+`parseEligibilityAuditLevelMode`; any unrecognized value reads as `off`. See [feature flags and
+entitlements](/lender-config/feature-flags-and-entitlements).
 </Note>
 
 `getFeatureFlags(lenderId)` GETs the backend `/lenders/${lenderId}/feature-flags`, which returns `{ featureKey, enabled }[]`; the result is transformed via `KEY_MAP` onto an env-default base. An empty array or any failure falls back to `getEnvDefaults()`.

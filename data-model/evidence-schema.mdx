@@ -727,6 +727,47 @@ All rows pin producer `loanlight-api.lease-evidence`, subject kind `document` (o
 | `lease.unit_label` | text | |
 | `lease.month_to_month` | boolean | |
 
+## LOA-3160 — observation-settlement-statement.v1 (shared-types 9.13.0)
+
+`@loanlight-engineering/shared-types` **9.13.0** publishes `OBSERVATION_SETTLEMENT_STATEMENT_V1_REGISTRY` (`observation-settlement-statement.v1`). It unblocks the EDU-30 delayed-financing producer (EDU-30.2) by providing a registered place to record settlement-statement facts.
+
+All rows pin producer `loanlight-api.settlement-statement`, subject kind `document` (one per settlement statement occurrence — HUD-1, ALTA, or a Closing Disclosure used as a settlement record), adopter `EDU-30`, and `pdf`/`pdf_document` locator kinds.
+
+| Code | Value type | Notes |
+|---|---|---|
+| `settlement_statement.kind` | enum (`hud_1`, `alta_combined`, `alta_buyer`, `alta_seller`, `closing_disclosure`, `other`) | Sourced from frozen schema `reducto-settlement-statement.v1.json` |
+| `settlement_statement.marked_estimated` | boolean | |
+| `settlement_statement.settlement_date` | date | |
+| `settlement_statement.disbursement_date` | date | |
+| `settlement_statement.property_address` | text | `sensitivity: restricted` |
+| `settlement_statement.buyer_names` | list of names | Raw evidence; never a join key |
+| `settlement_statement.seller_names` | list of names | Raw evidence; never a join key |
+| `settlement_statement.contract_sales_price` | decimal_amount (USD) | |
+| `settlement_statement.new_loan_amounts` | list of amounts (USD) | Multiple-valued to let the reader distinguish zero loans (cash) from an unreadable loan line |
+| `settlement_statement.cash_from_or_to_buyer` | decimal_amount (USD) | |
+| `settlement_statement.cash_direction` | enum (`from_buyer`, `to_buyer`) | |
+| `settlement_statement.signed` | boolean | |
+
+**Two new value kinds** ship with this release to support multiple-valued fields:
+- `list_of_amounts` — a list of `decimal_amount` entries. An empty list (`[]`) is distinct from an absent item (missing/unreadable).
+- `list_of_names` — a list of name strings. Same empty-vs-absent distinction.
+
+Observation identity is `(code, subject, period)`, so repeated items for one statement would collide. The list value kinds allow `new_loan_amounts`, `buyer_names`, and `seller_names` to be multiple-valued within a single observation item without that collision.
+
+## LOA-3160 — observation-appraisal.v7 (shared-types 9.14.0)
+
+`@loanlight-engineering/shared-types` **9.14.0** publishes `observation-appraisal.v7`. It extends v6 unchanged and adds one definition:
+
+| Code | Version | Subject | Value type | Notes |
+|---|---|---|---|---|
+| `appraisal.listing_info.offering_listing_kind` | v1 | `subject_property` | enum | Members: `sale`, `rental`, `both` (frozen export `OFFERING_LISTING_KINDS`). Exported type `OfferingListingKind`. |
+
+Adopter `EDU-28`. Locator kinds `pdf`, `structured`, `pdf_document` — the same origins as the checkbox it qualifies (`appraisal.listing_info.listed_within_previous_year`). Period: none.
+
+The `offering_listing_kind` observation qualifies the captured listing checkbox without replacing it. When the appraisal report does not state the listing kind, the item has outcome `unknown` and value `null`. An empty string and out-of-set values (e.g. `"lease"`, `"for_sale"`, case variants) are each rejected `invalid_value`. The enum parser rejects any value outside the declared members, enforcing the closed set by contract.
+
+`parseAppraisalListingEmissionV2` is updated to admit v7 emissions (it previously admitted only v5 and v6, causing v7 listing entries to be refused with `illegal_state`).
+
 ## evidence_loan_context_captures (LOA-3160, Atlas migration 20261114150750)
 
 Records subsequent loan-context captures for an audit run. The initial `loan_context` pin is in `evidence_audit_source_pins`; this table retains every later re-capture (generation 2+). It is append-only: `BEFORE UPDATE/DELETE` and `BEFORE TRUNCATE` triggers use `evidence_reject_history_mutation()`, and `UPDATE, DELETE, TRUNCATE` are revoked from `PUBLIC`.
