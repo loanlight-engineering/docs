@@ -31,6 +31,8 @@ Current sections (in sidebar order):
 
 The Overview rollup counts findings across all sections. The appraisal and credit buckets contribute the canonical, override-excluding counts, so the rollup stays reconcilable with the Findings badge in the Audit Runs table (which reads `audit_runs.finding_count`).
 
+**Needs info groups (LOA-3635).** Each section now surfaces a **Needs info** group for checks that could not run because required data was missing or incomplete. The label outcome determines the bucket: `failed` and `warning` labels count as Issues (rose badge); `missing` and `incomplete` labels count as Needs info (amber badge); `passed`, `not_applicable`, and `null` labels are clean; unknown labels count as Issues as a safe default. The Overview section rolls up both the Issue count and the Needs info count across all sections — Document Health, Data Consistency, URLA, Credit, and Appraisal each contribute to both totals independently. Octy is backward-compatible with older API responses: when Needs info groups are absent from the response, sections render without the amber badge and no existing badge or count changes.
+
 ### Appraisal Evaluation section (octy #100, #103)
 
 The Appraisal Evaluation section surfaces `appraisalEvaluation` agent results that were previously invisible in Octy. Data is fetched from a dedicated route, `GET /api/audit-runs/[id]/appraisal`, which joins Octy's vendored `appraisal_runs` and `appraisal_rule_compliance` tables.

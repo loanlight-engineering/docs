@@ -809,6 +809,17 @@ Apply via `/admin/staged-rules` → Deephaven → dry-run → promote.
 
 EAD programs remain blocked from CLTV grading pending a separate PITIA/DSCR gap fix.
 
+**Lender-specific second appraisals and collateral-value basis (LOA-3160, Deephaven eligibility bundle 10, Luxury eligibility bundle 25).** Deephaven WHSL and Jumbo Prime programs now enforce lender-configured second-appraisal requirements based on loan amount, purpose, flip status, and prior-ownership history. When two full appraisals are present, the evaluator selects the lower admitted value; for purchase transactions under the applicable policy the selection also considers the lesser of the purchase price. D14 cash-out and review-variance triggers for Deephaven enforce exact $2M and $1.5M loan-amount boundaries: a value landing exactly on a boundary produces `Needs Review` with same-date source citations from both reports when the source wording differs.
+
+Luxury SA and Prime programs require two independent appraisal reports for loan amounts above $2M. Different report values remain conflicting because Luxury's document set does not designate a controlling value; the evaluator emits `Needs Review` with citations from both reports. The standalone-second CLTV recomputation (LOA-2665) now uses the selected collateral basis rather than the LOS property-value basis when a collateral-value selection rule applies.
+
+New evidence modules added to support adverse LTV caps and eligibility inputs:
+- **`dti-loan-declared.ts`** (`dti-loan-declared.v1`) — derives a declared loan DTI from borrower income, liabilities, proposed housing, and inventory/allocation evidence. Returns `needs_review` when any input is missing, ambiguous, or when a non-empty expense or property inventory prevents the calculation.
+- **`appraisal/subject-transfer.ts`** — captures the subject's prior-sale transfer research period (from MISMO XML or extracted PDF) for delayed-financing proof. Emits only when the prior-sale indicator is bound, the extracted interval is valid and final, and a document locator is present.
+- **Prepayment permission** — derived from the loan's declared term when no explicit prepayment flag is present in the loan context.
+
+Inventory limitation: distinct report, chain, and document identities do not establish that different independent appraisers signed the reports. The upstream inventory contract is retained.
+
 #### Deephaven relative LTV overlays (LOA-1779, Leg 1)
 
 `composeEffectiveMaxLtv` (in `lib/loan-eligibility/`) now accepts three parameterized relative-LTV reduction keys from `LtvModifiersSchema`:

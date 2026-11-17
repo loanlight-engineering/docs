@@ -271,6 +271,35 @@ migrations own it; Octy never creates or alters it. Octy reads it through
 `src/lib/consolidation/final-documents.ts` behind a schema-presence gate
 (`consolidationSchemaDeployed`).
 
+## Classifications API — `propertyRole` enrichment (LOA-3399)
+
+`GET /api/v1/audit_runs/:id/classifications` now computes and attaches a `propertyRole` to each
+document segment in the response. The role identifies whether the document was associated with the
+subject property or an REO (Real Estate Owned) property, based on the loan's URLA 1003.
+
+| `role` value | Meaning |
+|---|---|
+| `subject` | The document's extracted address matches the subject property address from Section 4 of the URLA. |
+| `reo` | The document's extracted address matches a confirmed REO property from Section 3 of the URLA. |
+| `indeterminate` | The address is ambiguous (matches an uncertain address or both subject and REO), the document has no extractable address, or the URLA data is unavailable. |
+| `none` | The loan has no REO properties; the role is not applicable. |
+
+A companion `reason` field explains the classification: `subject_match`, `reo_match`, `ambiguous`,
+`no_match`, `no_address`, `no_reo`, or `role_unavailable`.
+
+The role is computed at request time by `computePropertyRoles` from the latest URLA extraction
+result for the audit run. Skipped runs omit the field. Address matching handles common formatting
+variations and fails closed (to `indeterminate`) when an address is unreadable or ambiguous. An
+unreadable REO property address increments an internal `unreadableReo` count, keeping the role
+conservative — the absence of a confirmed REO address does not assert `none`.
+
+<Note>
+`propertyRole` and `reason` are not stored in `document_classifications`. They are computed on
+each request from the current URLA extraction state. Loanlight Integrations records the resulting
+routing decision on `document_push_record.property_route` and `.property_route_reason`
+(migration 052) for documents it delivers to Encompass eFolders.
+</Note>
+
 ## Dry-runs write real rows
 
 octy dry-runs (`POST /internal/dry-run/classify-split`) run the real agent against a tracked loan

@@ -319,6 +319,13 @@ The active-dispute detection rule is **CRED_023** (Active Disputes), seeded by m
 Payment History**, not active disputes. **CRED_010** (Disputed Accounts) and **CRED_027** were
 removed from the registry in migration `0266` — both read the producerless
 `tradelines[].account.dispute` / `.remarks` fields and could never fire.
+
+**CRED_023 account matching (LOA-3597).** The rule identifies disputed accounts by name from the
+credit report's dispute-remark text. The extractor uses bounded cross-page remark attribution to
+link remarks to their accounts, and mid-masked account-number patterns (e.g. `****1234`) to match
+them when the number appears partially redacted. Composite account statuses are mapped before
+evaluation; `paid` accounts with recent or undated late payments are kept under review. The finding
+message names the disputed accounts and reports an accurate count.
 </Note>
 
 <Note>

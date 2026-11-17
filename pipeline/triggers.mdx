@@ -155,6 +155,55 @@ These orchestrators delegate to `DocumentProcessingService`, which now also rout
 Treat the LOS-pull path as deprecated. The Encompass `LosProvider` is a non-functional stub. New work targets the EPC and Partner paths. See [Legacy Dev Connect](/integrations/legacy-dev-connect).
 </Warning>
 
+## Portal New Loan Start
+
+The portal Start form lets portal users initiate audit and standalone runs directly without going
+through the EPC path. The entry point is `POST /api/v1/portal/loans/start`
+(`NewLoanStartService.start`, `NewLoanResumeService.resume`), guarded by `PortalAuthGuard`
+(roles `client_admin` and `client_user`).
+
+### Pre-Underwriting mode (LOA-3571)
+
+When Pre-Underwriting is ticked, Start resolves only the requesting lender's own loan (never a
+cross-tenant loan), determines product availability from the lender's core agents and grant
+agents, validates all Start fields, and creates a standard loan audit run. The loan audit run id
+is returned as the `loan_audit` response. Lender-scoped loan lookup prevents any cross-tenant
+admission.
+
+### Standalone mode (LOA-3572)
+
+When Pre-Underwriting is unticked, Start creates separate independent runs for each ticked
+product — one per appraisal PDF, one per credit report, and one bank-statement run covering all
+uploaded statements. Each unit gets its own run id assigned at create time.
+
+A standalone claim (`claimForStart` with `reserveAuditRun: false`) freezes the request and the
+kept file ids without reserving an audit run id. The loan number is kept on every run. Units that
+fail before their run row is saved appear in `notStarted`; units that fail after (e.g. a
+queue-unavailable error after the row is saved) are listed in `started[]` with
+`status: "failed"` and can be replayed on recovery.
+
+The response is `202 { mode: "standalone", started, notStarted }` on success, or
+`400 { mode: "nothing_started", ... }` when no unit started. Products are named by their contract
+keys: `appraisal`, `credit`, `bank_statements`.
+
+### Input validation
+
+Pre-claim validation refuses the request with one of the following codes without creating anything:
+`validation_failed` (blank loan number, bad flags, no product, unrealistic closing date, over-limit
+files), `invalid_program`, `uploads_incomplete`, `bank_program_mismatch`, `start_in_progress`.
+
+Standalone Start enforces per-product size limits before claiming: more than `MAX_SSRS_PER_RUN`
+SSRs beside a single appraisal PDF, an appraisal PDF over `APPRAISAL_PDF_MAX_BYTES` (200 MB), or
+more statements than `maxFilesForPeriod` are each a 400 that starts nothing.
+
+### Recovery
+
+A session already claimed but not yet answered is reclaimed by `NewLoanResumeService.resume` on
+retry (409 on a concurrent duplicate). Pre-Underwriting sessions follow the existing loan audit
+recovery path. Standalone sessions create only the units not yet recorded (using the frozen plan
+from the original claim), never re-read entitlements, and never create a loan audit in place of a
+standalone.
+
 ## Statement Analyzer standalone runs
 
 The [Statement Analyzer](/agents/income-analysis) has its own portal-driven entry path that produces an **asset run**, not an audit run. Portal staff upload bank statements through `POST /api/v1/portal/bank-statements/enqueue` (`BankStatementController`, guarded by `PortalAuthGuard`, roles `client_admin` / `client_user`). The request carries an optional free-text `loanId`.
