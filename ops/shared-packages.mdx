@@ -126,6 +126,20 @@ To point a consumer at local source, use pnpm overrides:
 }}}
 ```
 
+## Internal packages in loanlight-api
+
+Not all shared packages are published to GitHub Packages. `loanlight-api` also ships workspace-internal built packages that live in the monorepo but are consumed by other packages inside `loanlight-api` itself, never by external repos.
+
+**`@loanlight/api-portal-auth` (LOA-3406).** A new built workspace package at `loanlight-api/packages/api-portal-auth`. It extracts the portal authentication primitives that were previously inlined in the API's core identity module so they can be consumed from any NestJS module without creating cross-boundary coupling. Exports:
+
+- `PortalContext` — the parsed session context interface.
+- `@PortalUser` — the parameter decorator that injects `PortalContext` into a controller method.
+- `@Roles(...)` / `ROLES_KEY` — the roles guard decorator and its metadata key.
+- `requireInternal(ctx)` and `requireLenderAccess(ctx, lenderId)` — throw-on-violation access helpers.
+- `PortalAuthGuard` — a NestJS guard that delegates the authentication decision to an injected `PORTAL_AUTHENTICATOR` token, so the guard can be used from any module without importing the WorkOS verifier.
+
+`@nestjs/common` is a peer dependency; the package imports nothing from the API itself. The API's `PortalAuthenticatorModule` (registered globally in `AppModule`) binds `PORTAL_AUTHENTICATOR` to the existing WorkOS guard instance. The core module re-exports from the package for backward compatibility, so no other import path changes in this release.
+
 ## shared-types: the cross-repo contract
 
 `shared-types` is the contract the audit pipeline produces and the portals

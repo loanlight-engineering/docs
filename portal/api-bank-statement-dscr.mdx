@@ -103,9 +103,24 @@ Controller: `bank-statement/bank-statement.controller.ts` at `api/v1/portal/bank
 | `POST /api/v1/portal/bank-statements/:id/reprocess` | client_admin, client_user | Re-run analysis (HTTP 200, throttle 10/min) |
 | `GET /api/v1/portal/bank-statements/:id/export` | read+ | Export data (throttle 10/min) |
 
-#### Export balance report (LOA-2661)
+#### Export balance report (LOA-2661, LOA-3641)
 
-The `GET :id/export` Excel report (bank-statement balance sheet) scopes each month's balances to the **newest account covering that month**. Each `ExportMonthlyRow` carries an `accountCount` field indicating how many accounts contributed to that month's balance scope. A month covered by multiple accounts shows `(N accounts)` in the balance column header.
+The `GET :id/export` Excel report and PDF (bank-statement QI calculation) show **one row per statement** (not one row per calendar month, as before LOA-3641). Each row is labelled with the statement's period (e.g. `May 1 – May 29, 2026`, spanning two years when the period crosses a year boundary) and carries that statement's own deposits, exclusions, NSF/OD count, and stored opening and closing balances. The income trend percentage is also rebuilt from the statement-month sequence to match the portal's Income Trend display.
+
+Statement rows are grouped by account (using the LOA-2661 identity rule — a statement with no account number joins the file's only identified account), oldest first within each account; the account carrying counted statements appears first. Files with two or more accounts get one heading row per account so the balance chain reads within one account.
+
+Four statement categories appear in the table:
+
+| Category | Placement |
+||---|---|
+|| Counted statements and reviewer-excluded statements | Main table, in the balance chain |
+|| Duplicates | Below the main totals, under "Duplicates" |
+|| Low-deposit-share statements | Below the main totals, under "Excluded accounts" |
+|| Second-account statements | Below the main totals, under "Second account" |
+
+Non-primary sub-account statements and their duplicate copies are excluded from the main table entirely. A "Statement missing" month row appears for every gap in the income-qualification window (12 or 24 months), matching the portal's modal.
+
+The single builder `statement-rows.ts::deriveStatementRows` feeds both the PDF and the Excel export, so all surfaces agree. The `income-export` income-only export renders its own template with no statement table and is unchanged.
 
 #### `waiting_on` in status responses
 

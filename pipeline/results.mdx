@@ -89,17 +89,17 @@ The portal sidebar shows a "Not run" entry with the human-readable sentence for 
 - `coverage` — a `Coverage` object at the section level. When the agent recorded a check list (`recorded: true`) it contains `ran` (count of checks the label maps to a non-`null` label), `needsReview` (count whose label is `failed`, `missing`, `incomplete`, or `warning`), and `counts` (a map of every `CheckLabel` to its count). When it did not (`recorded: false`) it carries a `reason`:
 
 | `reason` | Meaning |
-|---|---|
-| `not_run` | The agent did not run (skipped or absent). |
-| `not_complete` | The agent has not finished yet. |
-| `stale` | The run was re-opened and completed again without a new check list, so the old stamp no longer matches `completed_at`. |
-| `saved_before_coverage` | The agent completed before check-list recording shipped (or no list was produced). |
-| `not_evaluated` | Coverage cannot be computed without additional data (used by the credit agent when compliance results are absent). |
-| `unreadable` | The ledger row could not be read; the rest of the response is unaffected. |
+||---|---|
+|| `not_run` | The agent did not run (skipped or absent). |
+|| `not_complete` | The agent has not finished yet. |
+|| `stale` | The run was re-opened and completed again without a new check list, so the old stamp no longer matches `completed_at`. |
+|| `saved_before_coverage` | The agent completed before check-list recording shipped (or no list was produced). |
+|| `not_evaluated` | Coverage cannot be computed without additional data (used by the credit agent when compliance results are absent). |
+|| `unreadable` | The ledger row could not be read; the rest of the response is unaffected. |
 
 - `checks` — where the PRD defines a shape, an array of per-check rows with `label`, `name`, and related fields. Present on the Data Consistency and 1003 Check endpoints today.
 
-The shared projection services (`AppraisalAuditProjectionService`, `CreditReportProjectionService`, `buildAuditRunResults`) are unchanged, so the partner `/results` and `/appraisal` routes, the internal audit-results route, `checks-completed`, and the audit PDF do not receive these fields. The additive fields are attached in the portal controller / portal-section layer only.
+The partner `/results` and `/appraisal` routes and the audit PDF do not receive these fields. The additive fields are attached in the portal controller / portal-section layer only.
 
 **Agents that record check lists today:** `piiValidation` (Data Consistency, LOA-3288) and `urlaExtraction` (1003 Check, LOA-3289). All other agents report `saved_before_coverage` until their own check-list tickets ship.
 
@@ -109,7 +109,18 @@ See [Portal audit results API](/portal/api-audit-results).
 
 `InternalAuditResultsController` (`internal/internal-audit-results.controller.ts`, base `internal/v1/audit-results`, guarded by `InternalApiKeyGuard`):
 
-- `GET /internal/v1/audit-results/:auditRunId` — fans out (`Promise.allSettled`) over `auditDataMapper.buildAuditRunResults`, property data and red flags, URLA completeness, classifications, and credit projection bundles. Returns `{ success, data: { auditRunId, auditResults, propertyData, redFlags, urlaCompleteness, classifications, credits, creditRoster } }`. `documentsAnalyzedCount` comes from `llamaClient.listPipelineDocuments(loan.llc_pipeline_id)`.
+- `GET /internal/v1/audit-results/:auditRunId` — fans out (`Promise.allSettled`) over `auditDataMapper.buildAuditRunResults`, property data and red flags, URLA completeness, classifications, and credit projection bundles. Returns `{ success, data: { auditRunId, auditResults, propertyData, redFlags, urlaCompleteness, classifications, credits, creditRoster, propertyChecks } }`. `documentsAnalyzedCount` comes from `llamaClient.listPipelineDocuments(loan.llc_pipeline_id)`.
+
+**Internal endpoint check labels (LOA-3635).** The internal endpoint now carries the same check labels the portal's results route serves, so Octy can distinguish a `NEEDS_INFO` check from a genuine failure. The labelling is applied by the shared `labelAuditRunResults` function (`audit/check-labels/audit-run-results.ts`), so the portal and internal routes can never label a check differently. The internal response includes:
+
+- **`auditResults.dataConsistency`** — labelled rows with per-row `label`; `checks` and `coverage` match the portal shape.
+- **`auditResults.documentHealth`** — labelled rows with per-check `checks` and `coverage`.
+- **`auditResults.credit`** — labelled with `inLoanCoverage` and `loanFindings` for Combined DTI / Qualifying FICO.
+- **`credits[]`** — each credit report's rules carry `label` and `inLoanCoverage`; each report carries `superseded` (marked from the loan view the same way the portal's credit route marks them).
+- **`propertyChecks`** (new field) — every property rule the agent recorded, with its `label` and `reason`. Absent from the portal's main results route; added only to the internal endpoint.
+- **`urlaCompleteness`** — labelled rows for every borrower (`rules_engine_results`) plus `checks` (every rule per borrower) and `coverage`.
+
+`summary.issueCount` (and so `audit_runs.finding_count`) is unchanged by this expansion. A credit run whose only non-passing rules are `NEEDS_INFO` now reports `credit.issueCount: 0` on the internal endpoint (consistent with the portal), while `summary.issueCount` still counts them.
 
 **`creditRoster` (LOA-3284).** An additive field that groups credit reports by borrower, using the same logic as the portal's `GET /api/v1/portal/audits/:auditId/credit/loan`. Shape:
 - `creditGroups[]` — each group has `id`, `personIds`, `currentReportId`, and `supersededReportIds`. Report ids match `credit_runs.id` and the ids in `credits[]`.

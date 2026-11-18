@@ -639,12 +639,12 @@ subject-loan guaranties. All rows are PDF-sourced observations on a `borrower` s
 `entity_loan` relationship qualifier.
 
 | Code | Value type |
-|---|---|
-| `entity.person.name` | text |
-| `entity.person.borrowing_entity` | text |
-| `entity.person.ownership_share` | text |
-| `entity.person.guarantor` | boolean |
-| `entity.person.guaranteed_loan` | text |
+||---|---|
+|| `entity.person.name` | text |
+|| `entity.person.borrowing_entity` | text |
+|| `entity.person.ownership_share` | text |
+|| `entity.person.guarantor` | boolean |
+|| `entity.person.guaranteed_loan` | text |
 
 A source-local person label establishes no application identity. Entity and loan references qualify
 the relationship; they never serve as a person identifier. All adopters are `EDU-30`.
@@ -652,6 +652,12 @@ the relationship; they never serve as a person identifier. All adopters are `EDU
 The parser requires an `entity_loan` qualifier for every owner row, distinguishes two relationships
 for the same member, and rejects true duplicates. A generic parser guard additionally requires an
 allowed origin on present observations with declared locator kinds.
+
+**Entity owners capture path (LOA-3160, Atlas migrations `20261116160352`–`20261116160354`).** Three Atlas migrations widen the evidence system's constraints to accept entity-owner evidence:
+
+- `evidence_capture_attempts.path_check` gains `entity_owners_classification` as a valid path value. This path is used when the entity-owners classification result is captured from PDF evidence (the equivalent of `asset_completion` for entity ownership).
+- `evidence_observation_items.period_presence_check` is updated to allow the five `entity.person.*` observation codes without a period qualifier. Entity-ownership observations record facts about an entity's ownership structure at the time of the loan, not over a time window.
+- A `validate_entity_owners_constraints` migration applies `NOT VALID` constraints and validates them.
 
 ## LOA-3160 — PDF document origins in evidence contracts (shared-types 9.9.0)
 
