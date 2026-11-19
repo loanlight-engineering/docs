@@ -129,6 +129,43 @@ When a global rule uses `{property_address}` or `{account_number}` placeholders 
 
 **Generated document type exemption.** Both guards exempt LoanLight-generated document types (`aus_results`, `property_report`, `appraisal_review_summary`, `bank_statement_income_report`). LoanLight emits one report per property already labelled by `descriptionTemplate`; a lender may legitimately want all generated reports in a single folder without naming it per property. The exemption is intentional — applying the guard to generated types would make that configuration unsaveable.
 
+### REO property document routing (LOA-3399)
+
+A lender override can carry `reoNameTemplate` — a literal folder name such as `"REO - Taxes"` — to route REO property documents (tax, insurance, mortgage-statement types) away from the subject-property eFolders and into a dedicated REO eFolder. The field is in `LenderRoutingOverride` and is validated at save time by `isLiteralFolderName`: a value containing any `{{ }}` placeholder is rejected, because all REO properties of a given type share one folder and a per-document name would rename that shared folder.
+
+`reoNameTemplate` is an addition to the allowed override keys (`LENDER_OVERRIDE_ALLOWED_KEYS`). The three existing per-lender fields (`nameTemplate`, `descriptionTemplate`, `fileNameTemplate`) are unaffected and continue to work on all types.
+
+#### How routing works
+
+`property-route.ts::applyPropertyRole` runs **after** the existing classification resolver, and only for a document type whose lender override carries `reoNameTemplate` and whose classification resolved `mapped` or `degraded`. The routing table, by property role:
+
+| Property role | eFolder | Container type | Recorded as |
+|---|---|---|---|
+| `subject`, or `none` (1003 lists no other properties) | Today's folder (unchanged) | unchanged | `subject` |
+| `reo` | The REO folder from `reoNameTemplate` | `<type>Reo` | `reo` |
+| `ambiguous`, `no_match`, `no_address`, `role_unavailable`, or absent | "To Be Reviewed Manually" container | default | `manual` with the reason |
+| `reo` but the REO folder name collides with a subject folder | "To Be Reviewed Manually" container | default | `manual` / `reo_folder_collision` |
+
+The property role comes from the loanlight-api classifications response. An unrecognized shape reads as absent (`.catch(undefined)`), so API version drift sends affected documents to manual review rather than failing the push.
+
+#### Collision checks
+
+Collision checks run at two points:
+- **Save time** (`routing-config-admin.service.ts`): `reoNameTemplate` is rejected if it matches or could match any subject folder name or container type the config can render. A subject `nameTemplate` with no fixed text (only `{{ }}` placeholders, possible on `property_report`) collides with every REO name. Types that share a container type must carry the same REO folder name.
+- **Routing time** (`reo-folder-collisions.ts`): the same check runs against the active config. A collision at routing time sends the REO documents to manual review with reason `reo_folder_collision`. This catches a config that skipped the save check (for example, promoted from an older version).
+
+#### Prerequisites and rollout
+
+<Warning>
+Turn REO folders on only after:
+1. loanlight-api commit that adds the property role to the classifications response (`api#5570`) is deployed.
+2. This integrations change is deployed (PRs #670 and #671, in that order).
+3. The lender's audits run URLA extraction. Without a 1003, the role is `role_unavailable` and all affected documents go to manual review.
+4. The lender's Encompass template folder permissions suit property tax and insurance PDFs.
+</Warning>
+
+Already-filed documents are never moved. Documents filed before REO folders were enabled, or on an earlier audit, stay where they are. Rollback is removing `reoNameTemplate` from the lender override; documents already filed stay where they are.
+
 ## Error responses
 
 | Status | Body | When |

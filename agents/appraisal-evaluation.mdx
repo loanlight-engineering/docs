@@ -466,15 +466,18 @@ Both the portal (in-process) and Octy (via `POST /internal/iris/fact-sweep`) rea
 
 `appraisal_photos` (migration `0297`, bbox in `0298`) is the single photo store. One row per extracted photo; the IRIS observation columns (`scene`, `attribution`, `quality`, `elements`, `conditions`) are `NULL` until the agent catalogs the photo (`analyzed_at` is the marker). Rows use a deterministic UUIDv5 id (source signature + page + figure index) so a re-analysis of the same source upserts in place — no id churn, no orphan crops.
 
+Four columns were added by the IRIS photo checklist migrations (LOA-3529): `caption_text` (the printed label on the photo), `caption_summary` (Reducto's extracted summary), `pdq_hash` (PDQ perceptual hash used to compare report photos against listing photos), and `pdq_quality` (PDQ hash confidence score). All four are nullable with no default.
+
 <Note>
 **The legacy `photo_manifest` column and 8-value category contract are retired.** `PhotoClassifierService` and `ImageExtractionService` were deleted as part of LOA-1901. All photo data is now served from `appraisal_photos`. The `photo_manifest` column drop deliberately trails the `appraisal_photos` table creation by one deploy.
 </Note>
 
 ### Portal and Octy surfaces
 
-The portal **Photos** tab is gated to `super_admin` only via `canSeeIrisPhotos` — not yet visible to lenders. It has four views, selected via a tab strip: **Findings** (default), **Facts** (taxonomy-driven fact groups from the sweep), **Property features** (non-flagged element inventory), and **Gallery** (honeycomb). The processing view shows the scanning comb on top; completed photos settle into their scenes below it. Octy's audit-run modal is the primary viewing surface for IRIS data: the shared `IrisAnalysisPanel` provides the same four-view layout. See [Loan lookup and audit-run modal](/octy/loan-lookup).
+The portal **Photos** tab is gated to `super_admin` only via `canSeeIrisPhotos` — not yet visible to lenders. It has six views, selected via a tab strip: **Checklist** (default for a persisted run, see [IRIS photo checklist](#iris-photo-checklist-loa-3529) below), **Findings**, **Facts** (taxonomy-driven fact groups from the sweep), **Property features** (non-flagged element inventory), **Gallery** (honeycomb), and **Report Alerts**. The processing view shows the scanning comb on top; completed photos settle into their scenes below it. The Checklist view is staff-only: checklist routes refuse lenders and staff impersonating a lender. Octy's audit-run modal is the primary viewing surface for IRIS data: the shared `IrisAnalysisPanel` provides the same views, with Checklist opening by default on a persisted run. See [Loan lookup and audit-run modal](/octy/loan-lookup).
 
-Octy also provides a dedicated `/appraisals-iris` admin page with six tabs:
+Octy also provides a dedicated `/appraisals-iris` admin page with seven tabs:
+- **Checklist** (LOA-3529) — the first tab for a persisted run. Browse the six photo-checklist items, edit their per-kind parameters, and view verdicts. The item editor exposes typed per-kind params and a live preview panel; a report-field picker and field-conditions editor built on the IRIS form kit configure the reconcile-based items. See [IRIS photo checklist](#iris-photo-checklist-loa-3529) below.
 - **Appraisal Runs** — a paginated table of all IRIS-analyzed appraisal runs across lenders, with faceted filters and prev/next row navigation in the detail panel.
 - **IRIS Taxonomy** — browse and edit the seeded taxonomy rows. LOA-2638 replaced the separate "Flagging" and "Expected scenes" cards with one **"Where it raises a finding"** card (`FlaggingCard`) offering three modes: everywhere, only outside specified scenes, or never. The card writes the three flag-zone columns (`default_severity`, `applicable_scenes`, `out_of_scene_severity`) that the runtime reads. Other columns available to edit include fact-group, photo-band, and `places`.
 - **Relevance Rules** — view, author, and measure `appraisal_iris_relevance_rules` rows. Four rule archetypes are available (different property, no single home in frame, wrong place, and custom/catch-all). Each rule's conditions can be measured against real historical runs before saving: the preview panel shows how many observations would have been suppressed per run, and a diff view identifies which photo findings would disappear. See [Relevance gate](#relevance-gate-appraisal_iris_relevance_rules-loa-23422344-2346) below.
@@ -553,6 +556,70 @@ A 404 means "no such run" — nothing else. A run that exists but has no IRIS an
 The portal Photos tab gains a **Report Alerts** view alongside Findings, Facts, Features, and Gallery (`IrisAlertsTab`, `GET /api/appraisal/[runId]/iris/alerts`). The same payload renders in Octy's `IrisAlertsTab` component. The view shows "waiting for the report" until both photo analysis and extraction are complete. Every alert row is now clickable and opens the corresponding photo highlighted in the photo lightbox (LOA-2333, #4434, #152).
 
 The Octy `/appraisals-iris` admin page gains a **Reconcile** tab (`IrisReconcileTab`): operators browse concept rows, edit their signal paths and knobs, and preview alert outcomes against historical runs before saving.
+
+### IRIS photo checklist (LOA-3529)
+
+The IRIS photo checklist is the fourth step in the IRIS pipeline, running after extraction, photo analysis, and reconciliation. It evaluates six deterministic checks (Deephaven checks 1100–1107) against stored analyzer answers and live config. Each check returns one of three verdicts: **Passed**, **Failed**, or **Can't tell**.
+
+#### The six checklist items
+
+| Item | Key | Kind | Deephaven check(s) | What it evaluates |
+|---|---|---|---|---|
+| Comparable photos taken by the appraiser | `comparable_photos` | `comparable_verification` | 1100 | PDQ hash comparison against Zillow/Redfin listing photos, then a vision check per linked report photo against the 4 nearest listing photos by PDQ. MLS-watermarked and subject photos fail. |
+| Exterior photos complete | `exterior_views` | `required_photos` | 1103 | Front, rear, and street views present; side-view count matches the attachment type. |
+| Interior rooms photographed, captioned and on the sketch | `rooms_photographed` | `room_inventory` | 1102, 1105 | Distinct bedrooms, bathrooms, and kitchens in photos match the report's room counts; captions name the room; floor-plan sketches cover every room the report counts. |
+| Amenities match the photos | `amenities_match_photos` | `reconcile_concepts` | 1104 | Reads amenity concepts from the sales-grid Subject column; compares the report's answers against the subject photos in both directions, using the reconcile concept config. |
+| Condition issues match the photos | `condition_issues_match_photos` | `reconcile_concepts` | 1101, 1106 | Uses the reconciliation system's own result for `condition_issues` in both directions. |
+| Plat map marks the subject | `plat_map_marked` | `plat_map` | 1107 | Plat map is present and marks the subject parcel. Location and flood maps are never accepted as the plat map. |
+
+**Fail only on a complete analysis.** Absence-based failures ("not seen", "missing") abstain when the underlying analyzer is partial, failed, or never run. Presence-based failures (a sighting contradicts the report) stand regardless of analysis completeness.
+
+#### New tables
+
+`appraisal_iris_analyses` (migration `20261118165200`) stores the paid analyzer answers that the checklist items read. Answers are memoized: the unique index on `(run_id, analyzer_key, input_digest)` means that re-running an item with the same inputs never re-bills the LLM call. `cost_usd` per row is summed at read time and reported in the run's spend (superseded answers stay counted but are never loaded).
+
+| Column | Notes |
+|---|---|
+| `id` | UUID PK. |
+| `run_id` | FK `appraisal_runs(id)` ON DELETE CASCADE. |
+| `lender_id` | FK `lenders(id)` ON DELETE CASCADE. |
+| `analyzer_key` | Identifies the analyzer (e.g. `comparable_pdq_hash`). |
+| `input_digest` | SHA-256 of the inputs (CHECK `^[0-9a-f]{64}$`). |
+| `step_key` | LangSmith step name, nullable. |
+| `model_id` | Model used, nullable. |
+| `output` | JSONB analyzer result. |
+| `cost_usd` | Nullable; `numeric(12,6)`. |
+
+`appraisal_iris_checklist_items` (migration `20261118165200`) is the global checklist config — one row per item. Items are **not** per-lender or per-run; operators edit rows live in Octy and the seed (`20261118165202`) is insert-if-missing so edits survive redeploys.
+
+| Column | Notes |
+|---|---|
+| `key` | Text PK (e.g. `comparable_photos`). |
+| `kind` | CHECK: `required_photos \| reconcile_concepts \| room_inventory \| plat_map \| comparable_verification`. |
+| `display_name` | Human label shown in Octy and the portal. |
+| `description` | Description for reviewers. |
+| `active` | Default `true`. Inactive items are not evaluated. |
+| `locked` | Default `false`. Locked items cannot be edited by operators. |
+| `params` | JSONB per-kind configuration (e.g. exterior-view counts by attachment type, amenity concept list). |
+
+#### Post-settle runner
+
+The checklist items are evaluated by a **post-settle runner** shared with IRIS reconcile. The runner settles analyzers once IRIS is terminal and extraction has landed, under a heartbeat-renewed lease with a settled-write fence. Per process, the sweep caps paid settles at four.
+
+#### Endpoints
+
+The checklist API is mounted at `/internal/iris/checklist/*` (`IrisChecklistController`), gated by `InternalApiKeyGuard` and throttled. These endpoints serve Octy; lenders and staff impersonating a lender are refused.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `runs/:appraisalRunId` | Returns checklist verdicts for a run. Octy detects a missing-route 404 from an older API and renders a `FeatureUnavailableNotice` (deployment-independent). |
+| POST | `runs/:appraisalRunId/refresh` | Re-runs the settle. Returns `409` when another process holds the settle lease; `503` when the settle could not be claimed. |
+
+The portal route `GET /api/appraisal/[runId]/iris/checklist` proxies the internal endpoint for the portal Checklist tab.
+
+#### Lender egress
+
+The lender-facing run detail strips `checklist`, `reconcile.statements`, and every settle lease from `irisFacts`. Checklist routes refuse requests from lenders and from staff impersonating a lender.
 
 ### agenticRefine, detectScanned, and ocr have been deleted
 

@@ -39,7 +39,7 @@ A user with `db-studio:prod:read` unlocks Studio at `/prisma-studio` by supplyin
 1. Verifies the kill switch is not engaged.
 2. Verifies the user holds the required permission.
 3. Calls `ensureRoleExists()` (`src/lib/studio/db-role.ts`) as `octy_provisioner` to create `octy_ro_<user>` if it does not already exist and grant it `octy_readonly` membership. The role name is derived from the user's email (`john.breland@loanlight.com` → `octy_ro_john_breland`). `CREATE ROLE` takes no bind parameters, so the derivation is strictly allowlisted and re-validated at the interpolation point.
-4. Writes a DynamoDB session grant (`STUDIO_GRANTS_TABLE`): read sessions expire after **30 minutes**, write sessions after **15 minutes**. DynamoDB TTL deletion is eventual, so the endpoint re-checks the expiry timestamp on every request rather than trusting the TTL.
+4. Writes a DynamoDB session grant (`STUDIO_GRANTS_TABLE`): read sessions expire after **2 hours**, write sessions after **15 minutes**. DynamoDB TTL deletion is eventual, so the endpoint re-checks the expiry timestamp on every request rather than trusting the TTL.
 5. Emits a `db_studio.session.unlocked` WorkOS audit event (`src/lib/studio/workos-audit.ts`). A failed audit delivery is swallowed by design (`auditBestEffort`) — the unlock still succeeds, and the `console.log` before the call always reaches CloudWatch.
 
 Subsequent Studio requests go through `withStudioSession` (`src/lib/studio/with-studio-session.ts`), which re-checks the kill switch and the DynamoDB grant on every call.
