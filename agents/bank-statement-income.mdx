@@ -151,6 +151,50 @@ Collapsing happens over the transaction set handed in at the time of the call (p
 
 The flag is registered in the admin Flags tab (`KNOWN_FLAGS` + `KEY_MAP` + `FeatureFlags`) and resolves `false` when no `lender_feature_flags` row exists.
 
+## Large-deposit sourcing (LOA-3366, LOA-3554)
+
+Since LOA-3366, flagged large deposits are **excluded from qualifying income by default** until a reviewer documents the source. The exclusion applies to every lender without configuration; it is computed at income-read time (not at detection time), so a threshold change adds or removes excluded deposits immediately without reviewer action.
+
+**What is excluded.** `large_deposit` findings that the threshold or a manual override flagged. The exclusion threshold is computed from income *before* large deposits are excluded, so excluding them never lowers the threshold itself. Business-type profile flags and suppress-override rows are excluded from the exclusion decision (they stay in their current categorized state). A large deposit whose category or income filter already keeps it out of income (e.g. own-account transfer, refund, or a filtered credit) is served as `not_income` rather than `excluded_until_sourced` and counts toward the "not counted as income" header metric.
+
+**Add to Income (LOA-3554).** A reviewer can include an excluded large deposit by opening the **Add to Income** dialog, supplying an optional note (up to 500 characters), and confirming. The deposit stays included through recalculation and through subsequent threshold changes. **Undo** re-excludes a sourced deposit; on a duplicate-transaction group, Undo can be called from either row. **Bulk Add to Income** in the Transactions table sources 1–200 selected excluded deposits in a single request (each write is atomic; one audit row per deposit shares a `bulk_batch_id`).
+
+**Portal behavior.** A sourced row shows Income, Large Deposit, and a "Sourced by [name] on [date]: [note]" line plus an Undo control. Encompass and results-link sourcing record "via Encompass" / "via results link" in place of a reviewer name. The large-deposit banner and the info modal's exclusion sentence are shown only when the file has at least one excluded or sourced deposit. Dismissing a `large_deposit` finding returns `422` while the file is awaiting sourcing.
+
+**Data model.** Migration `20261119141339_large_deposit_sourcing.sql` adds:
+
+`large_deposit_sourcing` — one row per sourced transaction. Unique index on `(borrower_file_id, transaction_id)`.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `borrower_file_id` | FK → `borrower_files(id)` ON DELETE CASCADE |
+| `transaction_id` | uuid NOT NULL |
+| `note` | text, nullable, max 500 characters |
+| `created_by` | FK → `portal_users(id)` ON DELETE SET NULL; `null` for partner/Encompass sourcing |
+| `actor_kind` | CHECK `portal_user \| partner_org` |
+| `channel` | CHECK `encompass \| results_link \| NULL` (null = portal session) |
+| `created_at` | timestamptz, default `now()` |
+
+Re-sourcing an already-sourced deposit replaces the existing row's note, actor, channel, and created time and writes another audit log row. Reprocessing deletes sourcing rows for transactions that no longer exist (unless the extraction returns no transactions at all).
+
+**Endpoints:**
+
+| Surface | Route | Method |
+|---|---|---|
+| Portal | `POST /api/v1/portal/bank-statements/:id/large-deposits/source` | Bulk source selected excluded deposits |
+| Portal | `DELETE /api/v1/portal/bank-statements/:id/large-deposits/source/:transactionId` | Undo a single deposit |
+| Encompass / results link | `POST /api/v1/portal/audits/:auditId/bank-statement-income/large-deposits/source` | Source via EPC or partner |
+| Encompass / results link | `DELETE /api/v1/portal/audits/:auditId/bank-statement-income/large-deposits/source/:transactionId` | Undo via EPC or partner |
+
+Errors: `422` when a requested id is not an excluded large deposit on the file (the whole batch is rejected), `409` while the file is processing, `404` on Undo when the deposit is not sourced or belongs to another linked analysis. Read-only portal users do not see Add to Income or Undo.
+
+**Income trend.** Add and Undo recompute the `income_trend` finding and delete the scoped analysis's cached AI summary in the same transaction, so neither describes income from before the change.
+
+<Note>
+Flagged deposits beyond the 500-finding cap stay in income: the exclusion reads persisted findings, which are capped. LOA-3625 tracks lifting this limit.
+</Note>
+
 ## Loan-scoped parse cache (LOA-3105, migration 0141)
 
 When a loan has already been processed, earlier parses of the same source file can cover some or all of the pages needed by a new batch. The worker skips pages that are already covered and reuses the cached extraction, avoiding a redundant Reducto call and the associated cost.

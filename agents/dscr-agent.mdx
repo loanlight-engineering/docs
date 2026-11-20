@@ -86,6 +86,49 @@ One row per audit run (UNIQUE on `audit_run_id`). Migration `0268_add_dscr_runs.
 | `created_at` | timestamptz NOT NULL |
 | `completed_at` | timestamptz NOT NULL |
 
+## EDU evidence ledger (LOA-3160)
+
+Since LOA-3160, the DSCR agent's ratio and every event that could change it are recorded in two append-only evidence tables alongside the existing `dscr_runs` row. The LTV eligibility engine reads these tables as the authoritative DSCR input rather than querying `dscr_runs` and `rental_income_runs` directly.
+
+### evidence_dscr_agent_events
+
+One row per event that matters to LTV eligibility. Migration `20261119081040_dscr_agent_evidence.sql`.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `lender_id`, `loan_id`, `audit_run_id` | Composite FK → `audit_runs(id, lender_id, loan_id)` ON DELETE RESTRICT. |
+| `sequence` | Monotonic per audit run; allocated under an advisory lock (`sequence > 0`). |
+| `kind` | CHECK `claim \| refresh_failed \| refresh_skipped \| owed \| rental_income_completed` |
+| `dscr_run_id` | Present on `claim` rows only. |
+| `rental_income_run_id` | Present on `rental_income_completed` rows only. |
+| `ratio`, `ratio_provenance`, `needs_info` | Present on `claim` rows; carry the computed result at the moment of the claim. |
+| `appraisal_revision` | Present on `claim` and `rental_income_completed` rows; records which appraisal publication drove this event. |
+| `recorded_at` | `clock_timestamp()` — wall-clock time, not transaction time. |
+
+The table is append-only: `evidence_append_only_guard` (before DELETE/UPDATE) and `evidence_truncate_guard` (before TRUNCATE) both invoke `evidence_reject_history_mutation()`, and `REVOKE UPDATE, DELETE, TRUNCATE ... FROM PUBLIC` is applied at migration time. Indexes: `(audit_run_id, kind, sequence)` for latest-event-of-kind lookups; `(loan_id, lender_id)` for cleanup probes.
+
+Event kinds written at each site:
+- **Processor claim fence** — writes `claim` with the current ratio, needs-info codes, and appraisal revision.
+- **Failed refresh** — writes `refresh_failed`.
+- **Entitlement-refused seal** — writes `refresh_skipped`.
+- **Both trigger reopens** and the **appraisal refresh reopen** — write `owed`.
+- **Rental-income fence** — writes `rental_income_completed` via `AgentRunReconciler.reopenAgentRun`, regardless of whether the row state changed.
+
+### evidence_dscr_appraisal_publications
+
+One row per appraisal publication that is graded for DSCR. Created by the `evidence_dscr_appraisal_published` trigger on `appraisal_runs` (fires on INSERT or UPDATE of `extracted_data`, `valuation_report_kind`, or `audit_run_id`). Migration same as above.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `audit_run_id`, `lender_id`, `loan_id` | Scope |
+| `revision` | Monotonic per audit run (`> 0`), allocated under an advisory lock. |
+| `appraisal_run_id` | The appraisal run that became graded. |
+| `recorded_at` | `clock_timestamp()`. |
+
+Also append-only with the same guards and revokes.
+
 ## Engine parameters (`eligibility_configs.dscr_params`)
 
 The DSCR engine reads lender-specific parameters from `eligibility_configs.dscr_params` (jsonb, nullable — migration `0262_add_eligibility_configs_dscr_params.sql`). When the column is `null`, the portal's standalone calculator falls back to built-in defaults (`CALCULATOR_DEFAULT_PARAMS`). The audit-path agent refuses to compute when required params are absent and emits `DSCR_NI_LENDER_PARAM_UNSET` instead.
