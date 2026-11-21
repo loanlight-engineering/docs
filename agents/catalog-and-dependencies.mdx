@@ -51,15 +51,17 @@ This is the current `AGENT_PIPELINE`. `requiresIndexing` agents are the ones who
 | `propertyData` | 1 | `preAuditClassification`, `urlaExtraction` | `inproc_graph` | `true` |
 | `creditEvaluation` | 1 | `preAuditClassification`, `urlaExtraction` | `inproc_graph` | `false` |
 | `documentHealth` | 2 | `preAuditClassification`, `propertyData`, `urlaExtraction` | `inproc_graph` | `true` |
-| `redFlags` | 2 | `propertyData`, `urlaExtraction` | `inproc_graph` | `false` |
+| `redFlags` | 2 | `preAuditClassification`, `propertyData`, `urlaExtraction` | `inproc_graph` | `false` |
 | `appraisalEvaluation` | standalone | — | `queue_worker` | `false` |
 | `liabilitiesAssessment` | standalone | — | `inproc_graph` | `false` |
+| `bankStatementIncome` | standalone | — | `queue_worker` | `false` |
 | `businessVerification` | standalone | — | `queue_worker` | `false` |
+| `adverseMedia` | standalone | `urlaExtraction` | `queue_worker` | `false` |
 | `rentalIncomeAgent` | standalone | — | `queue_worker` | `false` |
 | `dscrAgent` | standalone | — | `queue_worker` | `false` |
 
 <Note>
-`preAuditClassification` carries `requiresIndexing` because classify drives the LlamaCloud upload of the raw documents. `creditEvaluation` loads its document bytes from S3 (not the indexed pipeline), and `redFlags` consumes `propertyData` output — so neither reads the index. The catalog keys here are the identity that flows into `agent_runs.agent_type`; the LangSmith run-name labels are a separate presentation form (e.g. `piiValidation` → `PII-Validation`) — see [observability](/agents/observability). `rentalIncomeAgent` and `dscrAgent` are standalone `queue_worker` agents (DSCR plan B and A respectively) — they have no phase and no declared `dependsOn`. The DSCR agent's ordering on the rental income and credit results is expressed by when the Rental Income agent enqueues it, not by the pipeline DAG.
+`preAuditClassification` carries `requiresIndexing` because classify drives the LlamaCloud upload of the raw documents. `creditEvaluation` loads its document bytes from S3 (not the indexed pipeline). `redFlags` declares `dependsOn: ["preAuditClassification", "propertyData", "urlaExtraction"]` — the classification edge makes the dependency on purchase-contract and DRIVE metadata explicit (via `resolveClassificationFacts`). `adverseMedia` declares `dependsOn: ["urlaExtraction"]` — it fails `loan_application_unavailable` without the URLA result. All other standalone agents have no `dependsOn`. The DSCR agent's ordering on rental income and credit results is expressed by when the Rental Income agent enqueues it, not by the pipeline DAG. The catalog keys here are the identity that flows into `agent_runs.agent_type`; the LangSmith run-name labels are a separate presentation form (e.g. `piiValidation` → `PII-Validation`) — see [observability](/agents/observability).
 </Note>
 
 ### Catalog notes and traps
@@ -68,8 +70,8 @@ This is the current `AGENT_PIPELINE`. `requiresIndexing` agents are the ones who
   <Accordion title="liabilitiesAssessment is seeded inactive">
     `liabilitiesAssessment` is seeded with `active=false` and no phase. Because it is inactive it never appears in a required closure or a plan. Liabilities and DTI live inside the fully-implemented `creditEvaluation` agent. See [Liabilities assessment](/agents/liabilities-assessment).
   </Accordion>
-  <Accordion title="rentalIncomeAgent and dscrAgent: ENTITLEMENT_COREQUISITES">
-    Both are entitlement-gated (`requiresExplicitGrant: true`). `dscrAgent` additionally requires the lender to hold a `rentalIncomeAgent` grant (`ENTITLEMENT_COREQUISITES`). Granting `rentalIncomeAgent` also activates the lease and DSCR worksheet metadata extractors inside `preAuditClassification`. Granting only `dscrAgent` without `rentalIncomeAgent` is blocked at the entitlement service. See [Rental Income agent](/agents/rental-income-agent) and [DSCR agent](/agents/dscr-agent).
+  <Accordion title="rentalIncomeAgent and dscrAgent: AGENT_COREQUISITES">
+    Both are entitlement-gated (`requiresExplicitGrant: true`). `dscrAgent` additionally requires the lender to hold a `rentalIncomeAgent` grant, declared in `AGENT_COREQUISITES` as: `dscrAgent` requires `rentalIncomeAgent` (reason: "DSCR reads its rent from Rental income"). `appraisalIris` similarly requires `appraisalEvaluation`. Granting `rentalIncomeAgent` also activates the lease and DSCR worksheet metadata extractors inside `preAuditClassification`. Granting only `dscrAgent` without `rentalIncomeAgent` is blocked at the entitlement service. See [Rental Income agent](/agents/rental-income-agent) and [DSCR agent](/agents/dscr-agent).
   </Accordion>
   <Accordion title="urlaCompletenessRulesEngine is NOT a catalog agent">
     The URLA completeness rules engine is deliberately absent from the catalog and `AGENT_PIPELINE`. It is an embedded subgraph of `urlaExtraction` and is never scheduled or billed independently. See [URLA completeness](/agents/urla-completeness).
@@ -96,7 +98,7 @@ The per-agent reference pages document each agent's behavior: [Pre-audit classif
     Kahn's algorithm over the edges; throws if the dependency graph has a cycle.
   </Step>
   <Step title="assertEdgesPointToLowerPhase()">
-    Every edge's source phase must be a non-null integer strictly greater than the target's phase. Both endpoints must have non-null phases.
+    Every phased → phased edge must point to a strictly lower phase. Standalone → phased edges (e.g. `adverseMedia → urlaExtraction`) are permitted: the target must be phased (non-null `auditPhase`) but the source may be standalone. Nothing may depend on a standalone agent.
   </Step>
   <Step title="assertNoDrift()">
     Every non-hyphenated registered graph name (from `GraphRegistryService.getRegisteredGraphs()`) and every `EXECUTOR_AGENT_KEYS` entry must be an **active** catalog row, or boot throws. This keeps the seed and the code in sync.
@@ -122,6 +124,23 @@ The registry exposes the catalog joined with the code map. The router, orchestra
 | `getDirectDependencies(agentType)` | The direct `dependsOn` predecessors (for the orchestrator's dependency-aware skip). |
 | `byPhase(phase)` | Active records in a given phase. |
 | `requiredClosure(requested)` | The transitive required closure (below). |
+| `standaloneDependencyClosure(agentType)` | The active-filtered, phase-sorted required closure of a **standalone** agent's own `dependsOn`; empty for a phased or unknown agent. Used by the router to merge a standalone agent's phased dependencies into the plan when the agent can run. |
+
+## Soft relationships: AGENT_USES and AGENT_COREQUISITES
+
+In addition to `dependsOn` (hard plan dependencies), `agent-pipeline.ts` declares two soft relationship types that appear in the Octy entitlement graph but never affect routing or billing.
+
+**`AGENT_USES`** (keyed by the consumer agent) declares that one agent reads another's results when available, but does not pull the producer into the plan. Each entry carries:
+- `agent` — the producer agent type.
+- `effect` — what the consumer loses when the producer is off (shown in Octy as a warning).
+- `severity` — `"degrades"` (runs with reduced checks) or `"cannot_start"` (cannot run on the specified lanes).
+- `lanes` — optional list of `triggerSource` values where the relationship applies; omitted means every lane.
+
+Examples: `appraisalEvaluation` uses `urlaExtraction` (severity `degrades` — skips 1003 cross-checks) and uses `preAuditClassification` on EPC only (severity `cannot_start`). `adverseMedia` and `businessVerification` each use `urlaExtraction` (severity `degrades`).
+
+`AGENT_USES` entries appear as `uses` in `GET /internal/agent-platform/graph`. The lender-view endpoint adds `gaps`: uses whose reader is in the lender's effective runnable set but whose producer is not. CI enforces the declarations with `agent-uses.drift.spec.ts`, which scans each standalone agent's own source folders and fails CI when one imports another agent's output without a declared `AGENT_USES` entry.
+
+**`AGENT_COREQUISITES`** (keyed by the dependent agent) declares grants that must be made together. The entitlement service rejects a save that grants one side without the other, and Octy's UI toggles both sides as a pair. Each entry carries `requires` (the co-required agent) and `reason`. This constant replaces the former `ENTITLEMENT_COREQUISITES` (removed in LOA-3718).
 
 ## The required closure
 

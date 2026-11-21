@@ -305,6 +305,21 @@ The "all-clear" banner and accompanying-appraisal-report handling that previousl
 `audit-content.ts` were moved to the API side; the `pdf_check_labels` mode no longer renders
 them from the PDF library.
 
+## Not-evaluated check families (LOA-2319)
+
+The five check families in the Audit Summary (Credit, 1003, Properties, Document Health, Data Consistency) can fail to produce results for two reasons:
+
+- The family's section is `null` — credit, 1003, and properties are **fetched separately** (`Promise.allSettled`) and can be dropped by a network or timeout failure.
+- The family's ledger entry in `agentStatuses` has `status: "failed"` — the agent ran but reported a terminal failure.
+
+A `failed` ledger entry wins over an `undefined` section: if both conditions apply, the family is not evaluated.
+
+**Flag-off (legacy) report.** When a family is not evaluated, the Audit Summary cell shows `—` instead of a count. The subtitle and closing line are withheld; instead, the PDF says "No issues found, but some checks could not be completed." (the appraisal companion pointer is kept after this line). The all-clear appears only when every family was evaluated and produced zero findings.
+
+`legacy/not-evaluated.ts` owns the predicate. The five families (`credit`, `urla`, `properties`, `documentHealth`, `dataConsistency`) each map to a section key and a ledger `agentType`. Only `failed` is treated as not evaluated; `skipped` is left unchanged (a `skipped` ledger entry means the agent was deliberately not run, e.g. appraisal-only orders).
+
+**Flag-on (labelled) report.** When a failed agent's section has no problem rows and no recorded non-pass outcome (`failedWithNothingToDrop`), `coverage-model.ts` marks that agent `unavailable` rather than zero problems. The unavailable state hides the section's appendix rows and prevents a clean subtitle. A failed agent whose section still carries problem rows or a recorded non-pass outcome keeps its rows and counts; only the empty-results case becomes `unavailable`.
+
 ## Coverage features (LOA-3299, `epc_show_the_work`)
 
 When the lender has `epc_show_the_work` on, three new coverage surfaces appear in the audit PDF.

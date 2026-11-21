@@ -73,6 +73,14 @@ The first output line names the base branch it compares against. If it prints `N
 
 Never run `atlas migrate push` manually — CI pushes to Atlas Cloud after merge.
 
+**Local schema check.** To verify that your Drizzle schema matches the Atlas migration history (the same check CI runs):
+
+```bash
+pnpm atlas:no-op-check
+```
+
+This exports the Drizzle schema, diffs it against `db/migrations/atlas`, and exits non-zero if they diverge. It requires Docker (`atlas.hcl`'s `ci` env uses a local Postgres container). It replaces the former `pnpm validate:migrations` command.
+
 ### Atlas configuration
 
 Config lives in `packages/api/atlas.hcl`. Three environments are defined: `local` (development), `ci` (lint and schema diff), and `rebuild`. The migration directory for all three is `file://db/migrations/atlas`. The Atlas Cloud org is `loanlight`. The `drizzle` and `atlas_schema_revisions` schemas are excluded from every env.
@@ -89,68 +97,11 @@ All scripts live in `loanlight-api/packages/api/package.json`.
 |---|---|---|
 | `db:generate` | `drizzle-kit generate` | Retired — exits 1 |
 | `db:generate:custom` | `tsx scripts/generate-custom.ts` | Retired — exits 1 |
-| `db:renumber` | `tsx scripts/renumber/cli.ts` | Retired — exits 1 |
-| `db:check` | `drizzle-kit check` | Retired |
-| `validate:migrations` | `ts-node scripts/validate-migrations.ts` | Applies to Drizzle chain only |
-| `test:migration` | `jest --config ./jest.containers.config.json` | Applies to Drizzle chain only |
-
-## Server-side migration numbering (LOA-1918)
-
-Two scripts under `packages/api/scripts/renumber/` make Drizzle migration numbering reliable on branches without requiring client-side git config or the `gt` tool:
-
-**`pnpm db:generate:custom -- --name=<name>`** generates a new custom migration and numbers it against `origin/main`'s journal, not a potentially stale local copy. It refuses to run if the branch is behind main (naming `db:renumber`) or the journal is in a merge conflict, then deletes the throwaway snapshot `drizzle-kit --custom` leaves behind.
-
-**`pnpm db:renumber`** resolves a migration number collision. Three modes:
-- `--check` — exits `0` (no collision) or `1` (collision detected). Used by the CI gate (LOA-1920).
-- `--dry-run` — previews the renumber by running the real logic against a throwaway copy.
-- *(apply)* — auto-resolves a conflicted journal, re-slots each branch migration onto main's tail via `drizzle-kit` (numbering delegated, never hand-computed), preserves each SQL body byte-for-byte, and stages the result.
-
-The core is layered and unit-tested under `packages/api/scripts/renumber/`: `journal-state` (pure logic) → `git-journal` (git adapter) → `renumber` (orchestration) → `cli`.
-
-## Destructive-change lint (LOA-1924)
-
-`packages/api/scripts/lint-migrations.ts` and the `migration-lint/` modules under it run a warn-only CI gate that classifies every statement in a newly-added migration as **convention**, **destructive**, or **unclassified**.
-
-The gate uses [squawk](https://squawkhq.com) (a native `libpg_query`-based linter) for statement classification, augmented by repo-specific rules:
-
-- `DO $$ … $$` blocks — squawk treats them as opaque; `do-blocks.ts` parses the PL/pgSQL body and re-classifies statements inside it.
-- Drops squawk has no rule for (e.g. `DROP INDEX`) and house conventions (enum partitioning, data-fixup observability) are handled in `lint.ts` and `enum-partitioning.ts`.
-
-**Status: warn-only.** The gate annotates offending lines with `::warning` in CI and prints a summary, but its findings do not fail the build. Only an operational failure (crash, unreadable path, or a missing input set) exits non-zero. This is intentional: the gate is a detective control; the existing one-approval requirement on `main` is the preventive one.
-
-**Liveness guard.** A separate CI step runs `lint-migrations.ts --assert-input-set` and hard-fails if `packages/api/db/migrations/` is absent or empty. This prevents the gate from silently reporting green over an empty input set if the directory ever moves.
-
-**What it flags:**
-
-- `ALTER COLUMN … SET NOT NULL` (even when a backfill is present — pairing is declared with `-- squawk-ignore adding-not-nullable-field`, not inferred).
-- Column or table drops, type changes, index removals.
-- `ALTER TYPE … ADD VALUE` mixed with other DDL in the same file (enum-partitioning rule — shared with `validate-migrations.ts`).
-- Bare `UPDATE` / `DELETE` inside a migration with no `GET DIAGNOSTICS` / `RAISE NOTICE` wrapper.
-- Dynamic SQL (`EXECUTE format(…)`) — reported `unclassified`.
-
-**Expand/contract path.** Each destructive class has the same fix pattern: separate the schema change from the code change across two deploys, and annotate with a `-- squawk-ignore` comment when the backfill is already present. See `scripts/migration-lint/README.md` for worked examples.
-
-**Running locally:**
-
-```bash
-# Migrations this branch adds (committed, staged, or untracked)
-pnpm lint:migrations:changed
-
-# Lint specific files
-pnpm exec tsx packages/api/scripts/lint-migrations.ts packages/api/db/migrations/0300_x.sql
-
-# Liveness assertion only
-pnpm exec tsx packages/api/scripts/lint-migrations.ts --assert-input-set
-```
-
-## CI lint rules (validate:migrations)
-
-`scripts/validate-migrations.ts` enforces:
-
-- Journal `when` timestamps are strictly increasing.
-- Every `.sql` file has a journal entry and vice-versa.
-- Enum value migrations must use `ADD VALUE IF NOT EXISTS` so they are idempotent on non-transactional re-runs.
-- **(Check 7, LOA-1918)** No leftover `--custom` throwaway snapshot files are present. A snapshot is the temporary file `drizzle-kit generate --custom` emits before your manual SQL edit; `db:generate:custom` deletes it automatically, but leaving one in the branch fails CI.
+| `db:renumber` | `tsx scripts/renumber/cli.ts` | Retired — exits 1; the `renumber/` module was deleted in LOA-3719 |
+| `validate:migrations` | `ts-node scripts/validate-migrations.ts` | **Deleted** — LOA-3719. `pnpm atlas:no-op-check` owns the schema-vs-migrations comparison. |
+| `lint:migrations` | `tsx scripts/lint-migrations.ts` | **Deleted** — LOA-3719. `atlas migrate lint` (CI job `atlas-migrate-lint`) owns destructive-change checks. |
+| `migrate:squash` | `tsx scripts/migrate-squash.ts` | **Deleted** — LOA-3719; squash is complete and the Drizzle chain is frozen. |
+| `test:migration` | `jest --config ./jest.containers.config.json` | Applies to Drizzle chain container specs only |
 
 ## Migration-only constructs
 
@@ -182,7 +133,11 @@ The timestamp invariant is why nearly every timestamp column is declared `timest
 
 ## Squashing migrations — LOA-1495
 
-The migration chain only grows. `pnpm migrate:squash <cutoff-idx>` collapses the settled
+<Note>
+`pnpm migrate:squash` and its supporting scripts (`squash/equivalence-proof.ts`, `squash/run-equivalence-proof.ts`, `squash/pinned-spec-sweep.ts`) were deleted in LOA-3719. The squash tooling is no longer available. The first (and final) squash has already been executed; the Drizzle chain is frozen and Atlas owns all new migrations. The description below is retained for historical context.
+</Note>
+
+The migration chain only grows. `pnpm migrate:squash <cutoff-idx>` collapsed the settled
 prefix (entries `0..cutoff` in journal order) into a **baseline set** without touching the
 database schema:
 

@@ -122,12 +122,12 @@ Dependencies still run even when their own entitlement row is `enabled=false`: e
 `AgentEntitlementService` (`agent-platform/agent-entitlement.service.ts`) reads and writes the per-lender entitlement **intents** and resolves the effective runnable set against the live `AGENT_PIPELINE` DAG. Intent is stored; dependencies are never stored — they are recomputed on every read, so a code-side edge change is honored with zero backfill. It is exposed to Octy's lender entitlement-management UI through `AgentPlatformController` (`agent-platform/agent-platform.controller.ts`), guarded by the shared-secret `x-internal-api-key` (`OCTY_INTERNAL_API_KEY`):
 
 | Endpoint | Returns |
-|---|---|
-| `GET /internal/agent-platform/graph` | The active agent DAG (`nodes` + `edges`) for the management graph view. |
-| `GET /internal/agent-platform/lenders/:lenderId/entitlements` | A `LenderEntitlementView`. |
-| `PUT /internal/agent-platform/lenders/:lenderId/entitlements` | Replaces the lender's wanted set (body `{ agentTypes: string[] }`). |
+||---|---|
+|| `GET /internal/agent-platform/graph` | The active agent DAG: `nodes`, `edges` (hard `dependsOn` relationships), `uses` (`AGENT_USES` soft relationships), and `coRequisites` (`AGENT_COREQUISITES` pairs). Both endpoints filter to relationships whose both agents are active. |
+|| `GET /internal/agent-platform/lenders/:lenderId/entitlements` | A `LenderEntitlementView`. |
+|| `PUT /internal/agent-platform/lenders/:lenderId/entitlements` | Replaces the lender's wanted set (body `{ agentTypes: string[] }`). |
 
-`LenderEntitlementView` carries `managed` (false when the lender has no rows — running the default), `entitled` (the explicitly-wanted set), `effective` (entitled + their transitive dependencies), and `nodeStates` (per active agent: `entitled`, `auto` — pulled in as a dependency, or `available`).
+`LenderEntitlementView` carries `managed` (false when the lender has no rows — running the default), `entitled` (the explicitly-wanted set), `effective` (entitled + their transitive dependencies), `nodeStates` (per active agent: `entitled`, `auto` — pulled in as a dependency, or `available`), and `gaps` (the subset of `AGENT_USES` entries where the reader is in `effective` but the producer is not — the checks the lender's agents will silently skip or fail to start).
 
 <Note>
 `setLenderEntitlements` uses **full materialization**: it writes one row per active agent — `enabled=true` for the checked agents, `enabled=false` for the rest — and prunes rows for now-inactive agents. This matches `loadEnabledAgents` (which filters on `enabled`) and removes the "uncheck everything ⇒ zero rows ⇒ default all-on" footgun.
