@@ -22,6 +22,8 @@ There is deliberately **no runtime override table** for the live config. The onl
 
 An env var override (`<STEP_KEY>_MODEL_OVERRIDE`) can supersede a `codeDefault` without a commit, but is allowlisted and audit-logged; steps resolved this way appear with `source: "env"` in the `/api/llm-config/steps` response and are flagged on the page.
 
+Most steps belong to the `model` framework and select a chat model. Steps in the **`extraction-vendor`** framework are different: they select a hosted document-extraction service (`reducto` or `llamacloud`) rather than a chat model. They appear in `GET /api/llm-config/steps` alongside model steps but are resolved with `resolveExtractionVendor`, not `getChatModel`. The only current `extraction-vendor` step is `appraisalEvaluation.mainExtractionVendor` (code default: `reducto`). Octy's LLM-config badge does not yet render this framework type.
+
 ## Page layout
 
 Three URL-synced tabs (`?tab=`):

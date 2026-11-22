@@ -21,6 +21,8 @@ Evidence capture eligibility is enforced in `src/audits/evidence/evidence-eligib
 
 **LTV shadow (EDU-30.2)** is unconditional as of LOA-3160 (2026-11-01). The recompute sweep now runs in every environment and processes every lender that has EDU-30.2 entity-scope work in `evidenceRequiredGenerations`, regardless of environment or feature flag. Non-LTV-shadow work for unenabled lenders is still skipped. The `/api/evidence/loans/[loanId]/ltv-shadow` portal route also dropped its `assertEnabled` check in the same release.
 
+A developer testing tool, `pnpm ltv:live-e2e` (`packages/api/scripts/ltv-live-e2e/`), is available for running real loan documents end-to-end through the production LTV path — partner upload, classification, every audit agent, `runEduChain`, and the portal LTV card readers — and reading the results from production database records. The tool is opt-in only (refuses CI, Jest, and non-loopback S3 before any provider import) and runs one loan at a time under an atomic-link lock. Each loan runs in a detached child process; the parent reads results from production records after child exit. The report is written to a private 0600 file; only counts and the report path reach stdout. It is a developer test tool and never runs in CI (LOA-3160, #5754).
+
 ## Tables
 
 ### evidence_sources

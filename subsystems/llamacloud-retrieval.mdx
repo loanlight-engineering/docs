@@ -175,3 +175,7 @@ from the previous client-counted guess; those lines overstated spend and are not
 
 Continue to [retrieval tools and PII scoping](/subsystems/retrieval-tools-and-scoping) for the
 LangChain tools and the deterministic `file_id` + page-range push-down.
+
+<Note>
+This page covers LlamaCloud's role as a **retrieval layer** — indexing loan documents into managed vector pipelines and serving hybrid RAG queries to audit agents. LlamaCloud serves a second, entirely separate role as an **appraisal extraction vendor**: the `reductoExtract` graph node can send the main PDF extraction to LlamaCloud's `LlamaExtract` service instead of Reducto, controlled by the `appraisalEvaluation.mainExtractionVendor` LLM-config step (LOA-3603). The two roles share the same `LLC_PROJECT` scope but use different client paths and different LlamaCloud APIs. For the extraction lane, see [Appraisal-Evaluation agent](/agents/appraisal-evaluation).
+</Note>
