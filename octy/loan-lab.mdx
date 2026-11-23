@@ -64,6 +64,7 @@ Everything converges on this object: the 30 built-in presets are spec literals, 
 - **Scenarios** — the library. Presets and your own scenarios in one list; presets are read-only and offer **Duplicate**.
 - **Runs** — history, polled. Statuses are `running`, `succeeded`, `partial`, `failed`, `interrupted`. A `partial` run is flagged *audit outcome unreliable*, because an audit over an incomplete document set reports on the upload rather than the loan.
 - **From a loan** — derive a scenario from a real production loan, showing what was read next to what was produced.
+- **Results** — the LTV tester: a lender's eligibility matrix, one-cell launches, and what the EDU ledger computed for each run. See [The LTV tester](#the-ltv-tester) below.
 
 ### Database tables
 
@@ -94,6 +95,46 @@ Loan Lab's scenario library and run history are stored in two tables in loanligh
 | `heartbeat_at` | `timestamptz` | Written while the run is active; the reconciler moves abandoned `running` rows to `interrupted` after a deploy |
 
 Octy tolerates the absence of these tables: `src/lib/loan-lab/scenario/store.ts` falls back to the in-code preset specs when the tables are unavailable, so scenario generation still works before the migration lands. Saving and run history are unavailable without the tables.
+
+## The LTV tester
+
+The Results tab (`ResultsPanel.tsx`, `ResultsLaunchControls.tsx`) generates a lender's matrix from its stored eligibility rules (`tester/matrix.ts`) and measures what EDU computes for each cell.
+
+### One partner key per test lender
+
+`LOANLIGHT_PARTNER_API_KEYS` is a JSON object of lender id → partner key, config only (`src/lib/loan-lab/tester/partner-keys.ts`). A matrix is generated for any lender, but launches only for a lender that has a key in the map, against that lender's own key (the token cache is per key). An absent or empty map reports `partner_keys_not_configured`; an invalid map or entry reports `partner_keys_malformed`. Neither state permits a launch. Stored results remain available.
+
+A lender without an entry in a valid map reads `generate_only(no_partner_key)`; a matrix whose lender differs from the lender its key resolves to reads `generate_only(launch_lender_differs)`. A tester launch never falls back to the single `LOANLIGHT_PARTNER_API_KEY`.
+
+On INT, key the map by `LOAN_LAB_INT_TESTER_LENDER_ID` (Demo Account CSO #6, `5916ace6-26c5-4038-8391-6c8d970d3ae2`, in `config/destinations.ts`):
+
+```json
+{"5916ace6-26c5-4038-8391-6c8d970d3ae2": "<partner key>"}
+```
+
+The nightly E2E cleanup lenders (`E2E_CLEANUP_LENDER_IDS`) wipe what they hold, so a scenario there would be deleted: they read `generate_only(cleanup_lender)` and never launch, even with a key in the map.
+
+### Tester routes
+
+All routes live under `src/app/api/loan-lab/tester/`, each behind `guardLoanLabRoute()` and `withLoanLabErrors`. The browser runs no tester rule; every view model is derived on the server.
+
+- **`POST /api/loan-lab/tester/math`** — body `{ lenderId }`. Sweeps the lender's matrix in math mode (`tester/math.ts::runMathSweep`): each sweepable cell is one call to the partner evaluation route with the grid inputs, bounded by `MATH_TIMEOUT_MS`. No loan, no documents, no vendor cost. Returns `200 { sweep }` with `status: "swept"`, `sent` (cell id and run id) and `listed` (cells not sent, as `not_generable` or `unknown` with their reason). A refusal returns `409` whose `code` is the reason: `no_partner_key`, `launch_lender_differs`, an aborted preflight (`status: "aborted"`, `code` is the preflight reason), or a rules `unknown`.
+- **`POST /api/loan-lab/tester/launch`** — body `{ lenderId, cellId, launch: "ab_pair" }` or `{ lenderId, cellId, launch: "staged", mode: "A" | "B" }`. One click launches one cell: an A/B pair (Mode A then Mode B on one seed and one clock value) or one staged run (stage 1, then stage 2 with the document set of `mode`). Returns `202 { runs }` on success. `409 { error, code }` otherwise: `busy` (a loan-backed tester run is already in flight for that lender), `no_partner_key`, `launch_lender_differs`, a cell that cannot launch, or a preflight failure code.
+- **`GET /api/loan-lab/tester/results?lenderId=<id>`** — read only. Returns `persistence`, `results` (one item per stored scenario result, each with its derived `outcome`, the `report` a failed scenario files as an Octy bug report, and `newest`), `pairs`, `comparisons` (Mode A against Mode B per pair), `staged` (per staged run, its stages and transitions), `greyed` (target ledger inputs against the inputs Loan Lab wires), and `matrix` (the cells and the launch decision, or `rulesUnknown` when the rules cannot be read).
+
+### Result labels and outcomes
+
+Every result carries `test: "math" | "staged" | "A" | "B"`, `mode: "A" | "B" | null` and `stage: 1 | 2 | null`. A math result has no loan and no mode or stage; it shows as "math mode (not a loan)".
+
+**Matrix cell outcomes** are `scenario` (launchable), `not_generable(<axis>)`, or `unknown(<reason>)`. When the lender's stored rules cannot be read at all, nothing launches and the reason is `rules_unreadable`, `no_rules`, or `rules_malformed`.
+
+**Result outcomes** (`tester/outcome.ts::deriveOutcome`): `computed`, `incomplete`, `conflicting`, `stale`, `needs_review`, `unavailable(<reason>)`, `invalid_mode_a`, and `pending` (`launching` or `audit_running`). Every `unavailable` cause comes first, so a value is never shown when anything is unsure. A run that never reached a result shows its own state.
+
+**Launch preflight** (`tester/decide-preflight.ts`) aborts for `destination`, `unknown`, `wrong_lender`, or `gate_off`. Locally it accepts only a loopback launch URL, collection URL, and database; deployed int accepts only the int destination and an int database.
+
+### Request limits
+
+The tester accepts at most 200 stored grid rows and 128 KiB of rules per request. Larger rule sets return `rules_too_large` before scenario generation or API calls; each continuation applies the same limits. Results stop at a 2 MiB stored-run window budget and an 8 MiB response ceiling. The response reports truncation at these limits; use its history cursor to read older results.
 
 ## Predicted findings and the fact catalog
 
@@ -202,3 +243,9 @@ The following loanclone features were not ported:
 - **Runs are database-backed**, not in memory. Octy runs 2–4 ECS tasks, so a poll can land on a task that never heard of the run. A reconciler moves abandoned `running` rows to `interrupted` rather than leaving them stuck after a deploy.
 - **Encompass runs read the loan back** after create and field writes (`encompass/read-back.ts`) — the key fields a scenario varies (loan amount, property value, purpose, occupancy, borrower profile, expense rows) plus every Encompass-only field — and name any it dropped or changed. Discarded fields ride on the run's `error` until `loan_scenario_runs` gains a dedicated column.
 - **`scenario/regression.test.ts`** fingerprints every preset's MISMO, Encompass payload, and PDFs. A new capability must leave them unchanged; update the snapshot only when changing a preset's output is the point.
+
+## Tester trap doors
+
+- **An absent partner key means the legacy key.** In `loanlight/client.ts`, a call with no key (`undefined`) reads `LOANLIGHT_PARTNER_API_KEY`; `null` throws. Every call made for a tester lender — the preflight's `whoami`, create, documents, status, audit, and `collect`'s audit and access-URL reads — passes `partnerKeyFor(lenderId)` and stops when it is `null`, never `undefined`. A new partner call on a tester path that forgets the key silently talks as another lender. Enforced by: `decide-preflight.test.ts` O1-TWO-LENDERS, `collect.test.ts` COL-LENDER-KEY, `runner.test.ts` RUN-UNSUPPORTED and TR-PARTNER-KEY, `collector-io-guard.test.ts` IO-ENV-KEYS.
+- **The tester preflight decides on the lender's own key, not a name.** The observation records `expectedLenderName` and the name the key answers with, but `decidePreflight` refuses only when the run's key does not resolve to the run's lender. Each configured test lender has its own name, so the name-based isolation in [Isolation model](#isolation-model) covers runs on the legacy key only: synthetic loans for a second tester lender are told apart by `LOANLIGHT_PARTNER_API_KEYS`, not by `OCTY_TEST_LENDER_NAME`.
+- **A lender-tagged spec without a cell** (`tester: { lenderId }` only) takes the plain partner path and sends that lender's key; it is never created on the legacy key after a preflight that checked another.

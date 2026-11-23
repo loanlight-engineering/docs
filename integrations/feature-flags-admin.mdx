@@ -28,17 +28,18 @@ The service maintains a code-defined registry (`feature-flags.registry.ts`) of t
 | `aus_property_indexing` | AUS Property Indexing | `false` | Whether the AUS report, property report, and appraisal review-summary PDFs are routed via the `document_push_routing_config` table into specific eFolders. When `false` (default), these PDFs are delivered as bare "AUS Results" resources with no eFolder routing, regardless of the `document_push` flag. Added LOA-2466. |
 | `ssr_only_detection` | SSR-Only Detection | `false` | Flag an audit run as SSR-only when every document new on that run landed in the lender's configured UCDP SSR eFolder. **Value-bearing** — requires the eFolder display name in `value`. Added LOA-2483. |
 | `bucket_routing` | Bucket Routing | `false` | Enable the [bucket routing tier](/integrations/routing-config-admin#bucket-routing-tier-loa-2463) for this lender. When on, classify-failed documents with a known Phase 1 split bucket are routed by the global `bucketRules` config instead of collapsing into manual review. The tier runs before the classification lookup and preempts any lender-scoped `unknown` override for documents it covers. Leave off until bucket rules are seeded globally (LOA-2464) and the lender's destinations are confirmed. Added LOA-2554. |
-| `findings_document_health` | Findings — Document Health | `false` | **Value-bearing** (`off` / `manual` / `auto`). Controls automatic delivery of Document Health audit findings as Encompass Conditions/Tasks via `CREATE_FINDINGS`. Only `auto` triggers delivery in the current release; `manual` is defined but inert. Added LOA-2039. |
-| `findings_pii_validation` | Findings — PII Validation | `false` | **Value-bearing** (`off` / `manual` / `auto`). Same delivery mode semantics as `findings_document_health`. Added LOA-2039. |
-| `findings_credit_evaluation` | Findings — Credit Evaluation | `false` | **Value-bearing** (`off` / `manual` / `auto`). Added LOA-2039. |
-| `findings_property_data` | Findings — Property Data | `false` | **Value-bearing** (`off` / `manual` / `auto`). Added LOA-2039. |
-| `findings_appraisal_evaluation` | Findings — Appraisal Evaluation | `false` | **Value-bearing** (`off` / `manual` / `auto`). Added LOA-2039. |
-| `findings_urla_completeness` | Findings — URLA Completeness | `false` | **Value-bearing** (`off` / `manual` / `auto`). Added LOA-2039. |
-| `epc_show_the_work` | Show the Work (EPC) | `false` | Switches the EPC delivery path to the API's check labels. When on: the audit PDF renders rows using the `label` field (see [audit-pdf library](/integrations/audit-pdf#check-labels-on-sections-loa-3298)) and drops legacy all-clear lines; the `LL-Appraisal-01` finding count uses the API's `coverage.needsReview` total when appraisal coverage is recorded (LOA-3379). Turn on only after the API's label fields are deployed. Separate from the portal's `show_the_work` flag. |
+| `findings_appraisal` | Findings — Appraisal | `false` | **Value-bearing** (`off` / `manual` / `auto`). Delivers appraisal findings to this lender's Encompass workflow as mapped Conditions or Tasks. `auto` delivers with each completed audit; `manual` is reserved for user-triggered pushes and delivers nothing yet. Inert until the lender's Encompass admin maps the codes. Added LOA-2039. |
+| `findings_credit` | Findings — Credit | `false` | **Value-bearing** (`off` / `manual` / `auto`). Same delivery mode semantics. |
+| `findings_documents` | Findings — Documents | `false` | **Value-bearing** (`off` / `manual` / `auto`). Same delivery mode semantics. |
+| `findings_1003` | Findings — 1003/URLA | `false` | **Value-bearing** (`off` / `manual` / `auto`). Same delivery mode semantics. |
+| `findings_data_consistency` | Findings — Data Consistency | `false` | **Value-bearing** (`off` / `manual` / `auto`). Same delivery mode semantics. |
+| `findings_property` | Findings — Property | `false` | **Value-bearing** (`off` / `manual` / `auto`). Same delivery mode semantics. |
+| `findings_integrity` | Findings — Document Integrity | `false` | **Value-bearing** (`off` / `manual` / `auto`). Same delivery mode semantics. Added LOA-2929. |
+| `epc_show_the_work` | Encompass — Show the Work | `false` | Switches the EPC delivery path to the API's check labels. When on: the audit PDF renders rows using the `label` field (see [audit-pdf library](/integrations/audit-pdf#check-labels-on-sections-loa-3298)) and drops legacy all-clear lines; the `LL-Appraisal-01` finding count uses the API's `coverage.needsReview` total when appraisal coverage is recorded (LOA-3379). Turn on only after the API's label fields are deployed. Separate from the portal's `show_the_work` flag. |
 
-The six `findings_*` flags share a common `FindingMode` type (`off` / `manual` / `auto`) parsed by `finding-mode.ts::parseFindingMode`. `enabled = true` with `feature_value = 'off'` reads as off at runtime. `enabled = false` or an absent row also reads as off.
+The seven `findings_*` flags share a common `FindingMode` type (`off` / `manual` / `auto`) parsed by `finding-mode.ts::parseFindingMode`. `enabled = true` with `feature_value = 'off'` reads as off at runtime. `enabled = false` or an absent row also reads as off.
 
-The registry endpoint (LOA-2549) now includes `allowedValues: ["off", "manual", "auto"]` on all six `findings_*` entries. Boolean flags and `ssr_only_detection` (free text) do not carry this field (`allowedValues?: never` on boolean flags). The `allowedValues` field is informational for UI rendering; server-side validation is unchanged.
+The registry endpoint (LOA-2549) now includes `allowedValues: ["off", "manual", "auto"]` on all seven `findings_*` entries. Boolean flags and `ssr_only_detection` (free text) do not carry this field (`allowedValues?: never` on boolean flags). The `allowedValues` field is informational for UI rendering; server-side validation is unchanged.
 
 All flags default to disabled (absence of a row = disabled). For **value-bearing flags** (`ssr_only_detection` and the `findings_*` family), `enabled = true` with a blank or absent value also reads as disabled at runtime — the stored `enabled` state is reported accurately by the admin API, but `resolveFeatureValue` returns `null` until a non-blank `value` is persisted.
 
@@ -87,18 +88,19 @@ For value-bearing flags (`ssr_only_detection`), include `value`:
     { "key": "aus_property_indexing", "enabled": false, "value": null },
     { "key": "ssr_only_detection", "enabled": false, "value": null },
     { "key": "bucket_routing", "enabled": false, "value": null },
-    { "key": "findings_document_health", "enabled": false, "value": null },
-    { "key": "findings_pii_validation", "enabled": false, "value": null },
-    { "key": "findings_credit_evaluation", "enabled": false, "value": null },
-    { "key": "findings_property_data", "enabled": false, "value": null },
-    { "key": "findings_appraisal_evaluation", "enabled": false, "value": null },
-    { "key": "findings_urla_completeness", "enabled": false, "value": null },
+    { "key": "findings_appraisal", "enabled": false, "value": null },
+    { "key": "findings_credit", "enabled": false, "value": null },
+    { "key": "findings_documents", "enabled": false, "value": null },
+    { "key": "findings_1003", "enabled": false, "value": null },
+    { "key": "findings_data_consistency", "enabled": false, "value": null },
+    { "key": "findings_property", "enabled": false, "value": null },
+    { "key": "findings_integrity", "enabled": false, "value": null },
     { "key": "epc_show_the_work", "enabled": false, "value": null }
   ]
 }
 ```
 
-All thirteen flags are always present in the response.
+All fourteen flags are always present in the response.
 
 ## Audit logging
 
