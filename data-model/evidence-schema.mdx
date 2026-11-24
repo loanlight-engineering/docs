@@ -776,6 +776,34 @@ The `offering_listing_kind` observation qualifies the captured listing checkbox 
 
 `parseAppraisalListingEmissionV2` is updated to admit v7 emissions (it previously admitted only v5 and v6, causing v7 listing entries to be refused with `illegal_state`).
 
+## LOA-3160 — observation-lease.v2 (shared-types 9.15.0)
+
+`@loanlight-engineering/shared-types` **9.15.0** publishes `OBSERVATION_LEASE_V2_REGISTRY` (`observation-lease.v2`). It extends v1 with start date and fixed-term month count, both needed for LTV vacancy and STR inputs.
+
+All rows pin the same producer and locator conventions as v1. Two new observations are added:
+
+| Code | Value type | Notes |
+|---|---|---|
+| `lease.start_date` | date | Lease commencement date. |
+| `lease.term` | decimal | Fixed-term length in integer months. `month_to_month: false` distinguishes an explicit fixed term from an implicit or missing one; a v1 `unknown` month-to-month state is preserved, never back-filled as `false`. |
+
+Atlas migration `20261123202831_lease_observation_v2.sql` widens `evidence_capture_attempts.lease_capture_shape_check` to accept `edu30.lease-evidence.v2` alongside v1, and updates `evidence_observation_items.period_presence_check` to allow `lease.start_date` and `lease.term` without a period qualifier.
+
+## evidence_rental_income_versions (LOA-3160, Atlas migration 20261123202830)
+
+Records the rental-income version marker per audit run. This table is the LTV shadow's authoritative record of which rental income run was used and what source content it was computed from.
+
+One row per audit run. PK is `audit_run_id` with a CASCADE FK to `audit_runs`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `audit_run_id` | `uuid PK` | FK `audit_runs(id)` ON DELETE CASCADE. |
+| `lender_id` | `uuid NOT NULL` | Scope. |
+| `loan_id` | `uuid NOT NULL` | Scope. |
+| `rental_income_run_id` | `uuid NOT NULL` | The income run whose results are reflected. |
+| `completed_at` | `timestamptz NOT NULL` | When the rental income run completed. |
+| `source_content_sha256` | `text NOT NULL` | CHECK: lowercase 64-char hex (`^[0-9a-f]{64}$`). Content hash of the income run's source material, so a change in inputs causes a new version record. |
+
 ## evidence_loan_context_captures (LOA-3160, Atlas migration 20261114150750)
 
 Records subsequent loan-context captures for an audit run. The initial `loan_context` pin is in `evidence_audit_source_pins`; this table retains every later re-capture (generation 2+). It is append-only: `BEFORE UPDATE/DELETE` and `BEFORE TRUNCATE` triggers use `evidence_reject_history_mutation()`, and `UPDATE, DELETE, TRUNCATE` are revoked from `PUBLIC`.

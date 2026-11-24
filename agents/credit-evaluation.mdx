@@ -35,6 +35,10 @@ and enqueues a job on the BullMQ queue `credit-extraction`. `CreditProcessor`
 (`modules/portal-credit/credit.processor.ts`, `@Processor("credit-extraction")`) claims the
 run with a compare-and-set (`pending → running` plus a `claimToken` and heartbeat), downloads
 the PDF from S3, and calls `LangGraphService.createCreditEvaluationGraph`.
+
+<Note>
+`credit_runs` has a nullable `display_file_name` text column (migration `20261123120000`, LOA-3715) written at New Loan Start from the upload session's original filename. The run detail returns it as `displayFileName` alongside the audit credit report's filename (from `loan_documents`) and the loan number. The credit review header shows these in order: display name, report name, stored name, loan number — never an internal file ID. The column never reaches the S3 key or job data.
+</Note>
 </Tab>
 <Tab title="Audit-driven run (pipeline)">
 During an audit, `AuditAgentsExecutor`

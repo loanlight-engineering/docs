@@ -337,6 +337,23 @@ The Octy activity trail — one row per operation on a bug report or run. Record
 
 Indexes: `idx_octy_run_events_run_id` on `(run_id, created_at)`, `idx_octy_run_events_issue_id` on `(issue_id, created_at)`, `idx_octy_run_events_api_key_id` on `(api_key_id)`.
 
+## income_run_borrower_bindings (LOA-3160)
+
+Migration `20261123133653` creates `income_run_borrower_bindings`, which records the explicit per-audit borrower binding for a portal income run. A binding ties one income run to a specific target audit run and nominated borrower, immutably, under the run's completion lock.
+
+One row per `(run_id, target_audit_run_id)`. The PK is the composite `(run_id, target_audit_run_id)`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `run_id` | `uuid` NOT NULL | FK `income_runs(id)` ON DELETE CASCADE. |
+| `target_audit_run_id` | `uuid` NOT NULL | FK `audit_runs(id)` ON DELETE CASCADE. The audit the borrower's income run is bound to. |
+| `receipt_id` | `uuid` NOT NULL | FK `evidence_emission_batches(id)` — the evidence batch admitted at bind time. |
+| `borrower_entity_id` | `uuid` NOT NULL | FK `evidence_entities(id)` — the declared borrower entity. |
+| `borrower_entity_bound_by` | `uuid` NOT NULL | FK `portal_users(id)` — the authenticated actor who performed the binding. |
+| `created_at` | `timestamptz` NOT NULL | |
+
+The binding API (`PATCH /api/v1/portal/income-runs/:id`) requires both `targetAuditRunId` and `borrowerEntityId`. Admission verifies the requested audit, loan, and tenant, then persists the receipt and actor under the completion, run-row, and audit-append locks. A successful bind reports a ledger status: `on_ledger` (with a batch ID) when the borrower's computed income is on the evidence ledger, or a named gap (`borrower income not on the ledger`) otherwise.
+
 ## appraisal_runs link
 
 Migration `0203` adds `appraisal_runs.audit_run_id` (`uuid`, nullable, FK `audit_runs(id)` ON DELETE SET NULL) so the appraisal agent attaches to its parent audit run. Legacy rows stay NULL, and a `createUpdatedRun` revision legitimately shares its parent's `audit_run_id` (so there is no partial-unique). Indexes: `idx_appraisal_runs_audit_run_id` on `(audit_run_id)` and `idx_appraisal_runs_loan_audit` on `(loan_id, audit_run_id)`.

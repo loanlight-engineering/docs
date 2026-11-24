@@ -33,6 +33,10 @@ max 2). The processor (`@Processor("appraisal-extraction")`) claims the run with
 `LangGraphService.createAppraisalEvaluationGraph`, persists the graph-returned `enrichmentData`,
 then runs the rules and findings (see below).
 
+<Note>
+`appraisal_runs` has a nullable `display_file_name` text column (migration `20261123120000`, LOA-3715) written at New Loan Start from the upload session's original filename. The run detail returns it as `displayFileName`; the appraisal review header shows it in preference to the stored S3 name. The column never reaches an S3 key, job data, or graph input.
+</Note>
+
 ### EPC audit path (LOA-1675)
 
 The agent also runs on the EPC audit path, triggered post-completion by
@@ -577,7 +581,7 @@ The IRIS photo checklist is the fourth step in the IRIS pipeline, running after 
 
 | Item | Key | Kind | Deephaven check(s) | What it evaluates |
 |---|---|---|---|---|
-| Comparable photos taken by the appraiser | `comparable_photos` | `comparable_verification` | 1100 | PDQ hash comparison against Zillow/Redfin listing photos, then a vision check per linked report photo against the 4 nearest listing photos by PDQ. MLS-watermarked and subject photos fail. |
+| Comparable photos taken by the appraiser | `comparable_photos` | `comparable_verification` | 1100 | Two-stage check: (1) PDQ hash comparison against Zillow/Redfin listing photos; (2) when PDQ finds no copy, a crop-match scan (`listing_crop_match` analyzer) on up to 4 linked report photos per comparable. The crop scan uses ORB features and RANSAC affine fit to detect photos the appraiser cut, resized, or squeezed from a listing photo. MLS-watermarked and subject photos fail. |
 | Exterior photos complete | `exterior_views` | `required_photos` | 1103 | Front, rear, and street views present; side-view count matches the attachment type. |
 | Interior rooms photographed, captioned and on the sketch | `rooms_photographed` | `room_inventory` | 1102, 1105 | Distinct bedrooms, bathrooms, and kitchens in photos match the report's room counts; captions name the room; floor-plan sketches cover every room the report counts. |
 | Amenities match the photos | `amenities_match_photos` | `reconcile_concepts` | 1104 | Reads amenity concepts from the sales-grid Subject column; compares the report's answers against the subject photos in both directions, using the reconcile concept config. |
@@ -585,6 +589,22 @@ The IRIS photo checklist is the fourth step in the IRIS pipeline, running after 
 | Plat map marks the subject | `plat_map_marked` | `plat_map` | 1107 | Plat map is present and marks the subject parcel. Location and flood maps are never accepted as the plat map. |
 
 **Fail only on a complete analysis.** Absence-based failures ("not seen", "missing") abstain when the underlying analyzer is partial, failed, or never run. Presence-based failures (a sighting contradicts the report) stand regardless of analysis completeness.
+
+#### Crop-match analyzer (LOA-3781)
+
+The `listing_crop_match` stored analyzer detects listing photos that the appraiser copied, cropped, resized, or squeezed into the appraisal report — transforms that change the PDQ hash and so evade the hash stage. It runs only when PDQ found no whole-frame copy for a given report photo.
+
+For each comparable, up to 4 linked report photos (`MAX_CROP_SCANNED_PHOTOS`) are compared against that comparable's listing photos. Work runs in a `worker_threads` pool (`crop-match-pool.ts`, `min(2, cores − 1)` workers, unref'd and idle-stopped) using OpenCV.js ORB feature matching followed by a RANSAC affine fit with independent x and y scale factors. A match stores a `CropScan` result in `appraisal_iris_analyses` (`analyzer_key = 'listing_crop_match'`) with the matching listing photo URL, crop bounding box, fit measurements, inlier count, and up to 40 matched point pairs. Listing photos the PDQ scan already downloaded are reused.
+
+**Verdict.** The copy decision (`isCropCopy`) is applied at read time against today's `CROP_COPY` bounds, so a configuration retune re-grades historical runs without a re-run:
+- A cropped or partial copy → `"cut from its listing photo (it shows N% of the listing frame; M points match)"`.
+- A whole-frame copy (resized or squeezed) → `"its listing photo resized or squeezed (M points match)"`.
+
+An OpenCV failure at any step stores nothing; the next settle retries. The fit rejects mirrored, sheared, or rotated transforms. Photos beyond the per-comparable download budget are fetched again by the crop scan.
+
+**Known limits.** Comparables analyzed before LOA-3781 shipped show as pending until the checklist is re-run. Photos beyond the 4th linked photo per comparable and photos with no bounding box are judged by look alone. A reshoot from the listing photographer's exact position of a flat façade can read as a copy (not observed in production data).
+
+**Portal overlay.** The checklist compare dialog now includes a **crop-match overlay**: the crop bounding box, matched point pairs, and the report photo positioned over its listing photo with an opacity slider. The overlay re-measures on resize. Checklist tables (lines, concepts, comparables) were resized to match the Octy layout, and each concept row shows its own verdict sentence.
 
 #### New tables
 
