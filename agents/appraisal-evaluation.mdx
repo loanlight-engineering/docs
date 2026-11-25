@@ -924,6 +924,28 @@ New evidence modules added to support adverse LTV caps and eligibility inputs:
 
 Inventory limitation: distinct report, chain, and document identities do not establish that different independent appraisers signed the reports. The upstream inventory contract is retained.
 
+**Deephaven property exclusions and refinance classification (LOA-3160 DHL-2, eligibility bundle 16, LTV driver catalog 3).** The Deephaven eligibility evaluator gains:
+- **Any-condo exclusion** — when the lender configures `anyCondo: "exclude"`, the direct-eligibility path treats every condo property type as ineligible. EAD investment refinances now agree with the v4 catalog; SFR and unrelated programs remain eligible.
+- **IO qualification** — interest-only loans qualify against the mapped IO grids; the per-program IO configuration controls when this applies.
+- **Acreage precision** — acreage comparison uses the extracted value at double precision with no rounding.
+- **Geography/CSA county matching** — county matching uses the v2 marker (`ltv.county-matching.v2`). Historical v4 records without the marker retain literal county semantics.
+- **EP high-DTI caps** — Deephaven Expanded Prime enforces an LTV cap when the declared DTI exceeds the program threshold.
+- **Program-specific refinance classification** — Deephaven programs classify cash-out and rate/term refinances independently. When two readings disagree at the same actual LTV (Jumbo Prime paired reductions at 84.99% and 79.99%), the evaluator retains both readings and withholds both effective and published maxima rather than picking one.
+
+**Deephaven delayed financing rule (LOA-3160 DF-2, eligibility bundle 17 → 18, LTV driver catalog 4 → 5).** A new Eligibility Rule enforces the delayed-financing LTV limit for Deephaven loans.
+
+Program behavior:
+- **General programs (EP, NP, SJ, ITIN, D14):** the delayed-financing LTV limit is `documentedInitialInvestment + delayedFinancingDocumentedCosts`, using the cash-out grid (DH WHSL Guidelines §3.5.1). Deephaven does not use First Colony's or Luxury's lesser-of basis.
+- **Jumbo Prime:** rate/term treatment applies with a 180-day acquisition window and the Texas 50(a)(6) exception (DH WHSL Jumbo Prime §6.5). Rate/term is the more conservative floor in that shape.
+
+**Missing purchase facts.** When the prior-purchase settlement statement has not been extracted (the closing-disclosure classification does not yet produce purchase price, cash-purchase, or no-financing fields), the loan receives the named gap `delayed_financing_purchase_facts_unavailable`. The rest of max LTV still computes; missing facts never stop or reject the calculation. For Jumbo Prime where the delayed-financing driver can only raise the max (rate/term is above cash-out), the existing publication gate publishes the lower cash-out answer with the open gap on the result — the outcome is never `within` on missing facts.
+
+**Financed purchase exception.** A prior purchase where `noFinancing === false` or `cashPurchase === false` is not delayed financing. That decision is tied to the declared acquisition date and the specific refinance subtype; it does not apply to a purchase loan or when the acquisition date is unreadable.
+
+<Note>
+The settlement-statement extraction producer that supplies `delayedFinancingDocumentedCosts`, purchase price, and the cash-purchase/no-financing flags is not yet built. Until it ships, every Deephaven delayed-financing loan receives the named gap `delayed_financing_purchase_facts_unavailable`.
+</Note>
+
 #### Deephaven relative LTV overlays (LOA-1779, Leg 1)
 
 `composeEffectiveMaxLtv` (in `lib/loan-eligibility/`) now accepts three parameterized relative-LTV reduction keys from `LtvModifiersSchema`:
@@ -1022,6 +1044,26 @@ accommodate the HELOC bundle's rule codes.
 | EVL_012 | `CUST_DEEE0012` | `evaluation.loan_number` | WARNING |
 
 The check compares only ASCII letters and digits (case-folded, all other characters ignored), so `ln 1001` matches `LN-1001`. A printed placeholder (`N/A`, `NA`, `None`, `Null`, `Unknown` — edge punctuation and dots stripped before recognition) always warns, even if the loan's own number normalises to the same letters. When the report prints no loan number, or the loan's own number was not read, the check emits `NEEDS_INFO`. The loan number comes from `loans.loan_number` read by the extraction job and is not placed in the shared loan-context eval bag. The derived fields `inspection.loan_number_matches_loan` and `evaluation.loan_number_matches_loan` are written by `withReportLoanNumberMatch` (`lib/appraisal-pipeline/report-loan-number-match.ts`) before the evaluator runs; both bundles move to version 2 with this change.
+
+**LOA-3789: valuation recheck checks (PCI_013, PCI_014, EVL_013, EVL_014).** Both HELOC report bundles move from version 2 to 3 and add four FAIL-severity checks. Every Deephaven HELOC audit already re-runs the Clear Capital ordering decision against the loan as it stands; a report ordered for one product (inspection or evaluation) can become wrong if the loan changes before the report returns.
+
+| Rule | Bundle | What it flags | Severity |
+|---|---|---|---|
+| PCI_013 / EVL_013 | inspection / evaluation | The loan now needs a full appraisal: loan amount is above the full-appraisal limit, the AVM value is no longer accepted, or the AVM failed in a state without evaluations. | FAIL |
+| PCI_014 | inspection | The loan now calls for a residential evaluation because the AVM no longer passes. | FAIL |
+| EVL_014 | evaluation | The loan now calls for an exterior inspection because the AVM now passes and was accepted. | FAIL |
+
+When the recheck cannot decide (a required input is missing), PCI_013/EVL_013 are `NEEDS_INFO` naming the missing input, and PCI_014/EVL_014 are `SKIPPED` — the report shows the issue once. The rule never guesses a pass.
+
+Eight derived `valuation_recheck.*` facts are now available in the custom rule builder: `recorded`, `avm_fields_cleared`, `loan_amount_cleared`, `property_state_cleared`, `borrower_contact_cleared`, `property_type_cleared`, `avm_acceptance_cleared`, and `needed_product`. Each `*_cleared` fact is `true` when the ordering decision got past that input's check (not necessarily that the input was present). These facts are populated by `withValuationRecheck` (`lib/appraisal-pipeline/report-valuation-recheck.ts`) before the evaluator runs; full appraisal runs never receive them.
+
+**Which recheck is used.** An EPC audit is held to its own ordering decision — EPC is the only audit type that records a HELOC decision. If that decision is not yet saved, the result is `NEEDS_INFO`, never an older decision. Portal uploads and partner/shadow audits use the loan's newest decision.
+
+**Ordering alignment (octy#255).** Every live HELOC decision on a loan that holds an active valuation order now links that order, including `needs_input`, `manual_order_required`, and skipped decisions. Octy reads any subsequent decision on an already-ordered loan as "Order already placed on this loan. No action taken."
+
+<Note>
+Known limits: a report-back audit's decision runs alongside extraction, so a report could be graded before the decision is saved — the rule is `NEEDS_INFO` in that case, never a false pass, and no re-grade runs. When Clear Capital's product list is unavailable, no decision row is recorded and the recheck is `NEEDS_INFO`. Previewing these conditions in the rule builder shows `NEEDS_INFO` where an audit grades; the rule builder does not inject report loan facts.
+</Note>
 
 Key rule decisions:
 - **Hard stops in the guide stay FAIL**: row, log, and modular homes (`DHH_029`–`DHH_031`), which the main Deephaven bundle only warns on.

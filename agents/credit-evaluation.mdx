@@ -775,7 +775,11 @@ loan page reflect the same verdict the reviewer applied, not the original evalua
 
 **CRED_001/002/003 per-borrower consistency:** the `applicationBorrowers` context field threads the URLA person roster into the evaluateRules node. Each report's subjects are compared against their _own_ application borrower rather than all borrowers on the loan, eliminating false name-consistency failures on co-borrower reports.
 
-**Joint credit records bound to verified owners (LOA-3160).** Joint credit tradelines are now attributed to the verified owners of the account. The pipeline binds `J` (joint) and borrower-designator rows using verified identity evidence from the MISMO roster, so a joint account does not silently inflate the wrong person's liabilities. Reports that cannot place a row keep their prior behavior.
+**Joint credit records bound to verified owners (LOA-3160).** Joint credit tradelines are attributed to the verified owners of the account. The pipeline binds `J` (joint) and borrower-designator rows using verified identity evidence from the MISMO roster, so a joint account does not silently inflate the wrong person's liabilities. Reports that cannot place a row keep their prior behavior.
+
+**Declared business co-owners in ledger FICO (LOA-3160).** Declared employment and business ownership records are now bound to borrower UUIDs on both the verified-FICO and retained LTV paths. The binding requires affirmative shared-business identity: a name-only match yields `ownership_unknown`; distinct affirmative identities conflict. Wage employments with an omitted self-employment indicator do not become business-ownership gaps. A confirmed `owner_conflict` is kept even when a separate unresolved declaration exists alongside it. Ownership gaps are named results and do not reject incoming EDU evidence data.
+
+**FICO through borrower-selection gaps (LOA-3160).** The FICO ledger data flow now keeps qualifying FICO scores available through borrower-selection gaps. When borrower selection has gaps (for example, an ambiguous or incomplete identity match), the score remains usable rather than being dropped, so the LTV calculation is not unnecessarily blocked on identity resolution.
 
 **Loan-level findings:**
 

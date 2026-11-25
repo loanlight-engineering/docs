@@ -161,6 +161,10 @@ Since LOA-3366, flagged large deposits are **excluded from qualifying income by 
 
 **Portal behavior.** A sourced row shows Income, Large Deposit, and a "Sourced by [name] on [date]: [note]" line plus an Undo control. Encompass and results-link sourcing record "via Encompass" / "via results link" in place of a reviewer name. The large-deposit banner and the info modal's exclusion sentence are shown only when the file has at least one excluded or sourced deposit. Dismissing a `large_deposit` finding returns `422` while the file is awaiting sourcing.
 
+<Note>
+**Show the Work off (LOA-3779).** The results-page income editor rendered when the lender's `show_the_work` flag is off (`LegacyIncomeEditor`) now shows Add to Income and Undo for excluded large deposits, and correctly identifies which deposits are already counted (displaying "counted" hover text instead of the generic large-deposit text). Before LOA-3779, `LegacyIncomeEditor` did not pass `onLargeDepositSourcingChange` to the transactions table, so both controls were hidden and the section, transactions, and calculations did not reload after an action.
+</Note>
+
 **Data model.** Migration `20261119141339_large_deposit_sourcing.sql` adds:
 
 `large_deposit_sourcing` — one row per sourced transaction. Unique index on `(borrower_file_id, transaction_id)`.
