@@ -112,6 +112,29 @@ The presigned-upload flow:
 
 Safety constraints on the presigned target URL: the hostname must be HTTPS; IP literals, local/metadata hostnames (`localhost`, `169.254.*`, `10.*`, etc.), URL credentials, and HTTP redirects are rejected before any bytes are sent. The presigned `PUT` and the extraction call share a ten-minute deadline. A file that is too large to extract is persisted as a `file_too_large` finding — split/compress guidance is rendered in the portal — and that file is not eligible for a size-only reprocess (only actionable errors are reprocessable).
 
+## Chunked extraction for large combined PDFs (LOA-3610)
+
+Some lenders submit a single combined PDF covering multiple statement periods. When such a file
+exceeds the 95 MiB limit that LlamaExtract enforces per request, the worker now splits the file
+into smaller pieces and extracts each piece independently rather than failing the whole file.
+
+**How it works.** Before sending a file to LlamaExtract, the worker plans extraction pieces:
+- Each piece covers up to 20 pages.
+- The total extraction is capped at 100 pages per file.
+- If the file would exceed the 95 MiB per-request cap, the worker splits the PDF at the planned
+  page boundaries, uploads each piece, extracts it, and merges the results.
+
+Statement period seams are handled across chunk boundaries — a period that spans the boundary
+between two pieces is correctly stitched together in the merged result.
+
+**Partial failures.** If one piece fails, the months it covered are reported as failed page
+ranges while months from successfully extracted pieces are preserved. A failed piece does **not**
+cause the entire file to fail. Uploaded temporary files are cleaned up after extraction completes
+or fails.
+
+**Constraint.** A failed piece must not fall back to re-uploading the original oversized file —
+only the failed pages are retried or reported as unavailable.
+
 ## Reducto extraction checkpoint (LOA-2517)
 
 Each file's validated `ExtractionResult` is persisted to Redis keyed by `(borrowerFileId, sourceFileHash, EXTRACTION_CONTRACT_VERSION)` before `writeResults` runs. On a BullMQ retry, a checkpoint hit serves the cached result and skips the paid `structureWithReducto` call; only the not-yet-checkpointed file(s) re-extract. The TTL is bounded: at least `BANK_STATEMENT_LEDGER_DEADLINE_MS` (120 min) and at most `PII_BOUND_MS` (3 h). Keys are deleted after `writeResults` succeeds to tighten the PII window; TTL self-expiry is the backstop.

@@ -221,6 +221,33 @@ COALESCE unique on `(lenderId, ruleCode, loanProgramId)`), and `income_run_rule_
 (per-run, latest wins). Export PDFs are produced by the `income-export` module.
 </ResponseField>
 
+## Primary wage earner from declared income (LOA-3160, PWE-SOURCE-1)
+
+The LTV shadow (EDU-30) needs a "primary wage earner" to pick the borrower FICO and to supply
+the `primaryEarner` input to the eligibility engine. `readLtvPrimaryEarnerIncome`
+(`audits/evidence/borrower-income-evidence.ts`) is the single function that drives both.
+
+It applies these steps in order:
+
+1. **Verified income available.** If the income gate has a completed, non-stale generation for
+   the loan, the borrower with the highest verified monthly income is the primary wage earner.
+2. **Declared income fallback (PWE-SOURCE-1).** When verified income cannot determine the
+   earner (gate not completed, all zero, or gate disabled for the lender) and the lender's
+   policy permits declared totals, the borrower with the highest URLA-declared monthly income is
+   used instead.
+3. **Undetermined.** When neither source resolves the earner, the lower middle FICO still flows
+   to eligibility and the gap is recorded as `pwe_undetermined`.
+
+Ties (two borrowers with identical income) remain `income_tie` regardless of source. Lenders
+that require a verified ledger income source (including Luxury SA) do not fall back to declared
+totals — for them the declared income path is explicitly excluded by the lender's income-class
+policy. Declared income is all-or-nothing per loan: if declared totals are unavailable or
+unreadable for any borrower on the loan, the entire declared-income path is skipped.
+
+`incomeRecordBorrower` in `audits/evidence/income/borrower-attribution.ts` retains a snapshot
+of the declared income it used so the evidence ledger records which declared total drove the
+primary-earner decision.
+
 ## Borrower attribution for income records (LOA-3160)
 
 `incomeRecordBorrower` in `audits/evidence/income/borrower-attribution.ts` is the single,

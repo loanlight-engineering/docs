@@ -1,36 +1,43 @@
 ---
 title: API bounded-context map
-description: How loanlight-api organises its code into 13 bounded contexts with layered import rules.
+description: How loanlight-api organises its code into 16 bounded contexts with layered import rules.
 icon: map
 ---
 
-The API bounded-context map (`packages/api/architecture/contexts.json`) assigns every production file under `src/` to one of 13 named contexts and gives each context an integer layer. A context may import only from strictly lower layers. The system was introduced in Phase 0 of the API bounded-contexts initiative (LOA-2387).
+The API bounded-context map (`packages/api/architecture/contexts.json`) assigns every production file under `src/` to one of 16 named contexts and gives each context an integer layer. A context may import only from strictly lower layers. The system was introduced in Phase 0 of the API bounded-contexts initiative (LOA-2387).
 
 ## Why it exists
 
 `loanlight-api/packages/api` grew without explicit module boundaries, producing a graph with 42 mutually-importing context pairs and 267 violating cross-layer imports at the time the map was declared. The bounded-context map and its accompanying ratchet freeze the violation count at that baseline: no new violation may enter, but existing ones may shrink. Each subsequent phase targets a subset of the violations until the graph is acyclic.
 
-## The 13 contexts
+## The 16 contexts
 
 Each context has a `name`, a `layer` integer, an `owner`, a `responsibility`, a set of `members` (path prefixes / globs / exact paths under `src/`), declared `entryModules`, and a `channels` block declaring queues, SQS topics, EventBridge events, and calls to other LoanLight services the context uses.
 
 | Context | Layer | Responsibility |
 |---|---|---|
-| `platform` | 1 | NestJS composition root; cross-cutting concerns: LlamaCloud, S3, LangSmith, SQS/EventBridge, PDF generation, LLM services |
-| `identity` | 2 | WorkOS auth, partner API keys, FusionAuth, JWT validation |
-| `runtime` | 3 | Oz/Octy dry-run and internal proxy endpoints |
-| `ruleops` | 4 | Lender rule authoring: appraisal rules, credit rules, portal rules catalog |
-| `loan` | 5 | Loan and lender management, classify-split runs, loan-document registry |
-| `documents` | 6 | Document-health agent and retrieval scoping |
-| `income` | 7 | Bank-statement income, asset reporting, income analysis agents, portal-income queue |
-| `credit` | 8 | Credit evaluation agent, credit data retrieval |
-| `appraisal` | 9 | Appraisal evaluation, IRIS photos, CDA/AVM collateral review |
-| `eligibility` | 10 | Property data, property red-flags, URLA completeness rules |
-| `audit` | 11 | Audit-run orchestration, agent router, entitlements, results persistence |
-| `ingress` | 12 | EPC/SQS ingest, Partner API, LOS controller, integrations orchestration |
-| `ops` | 13 | Portal admin, billing, config management, LLM experiments |
+| `platform` | 0 | Cross-cutting infrastructure: config, database, events, messaging, storage, LLM config, and shared libraries |
+| `runtime` | 1 | LangGraph agent runtime: shared graph utilities, observability, and the agent registry, router, and pipeline |
+| `identity` | 2 | Portal authentication, lender tenancy, audit log, feedback, release notes, and training videos |
+| `loan` | 3 | Loan records and the loan context read model |
+| `ruleops` | 3 | Rule authoring, versioning, export, and cutover operations; owns the mirror task and freshness checker |
+| `documents` | 4 | Document classification, splitting, extraction, and key-field review |
+| `generation-identity` | 5 | Retained evidence generation identities |
+| `appraisal` | 5 | Appraisal extraction, evaluation, SSR, and lender appraisal rule sets |
+| `credit` | 5 | Credit report extraction, evaluation, and lender credit rule sets |
+| `income` | 5 | Bank statement, lease, and Plaid income and asset analysis and lender income rule sets |
+| `ledger-shared` | 6 | Retained ledger records, payloads, and stored-data faults |
+| `eligibility` | 6 | Loan eligibility, DSCR engine, loan programs, and lender eligibility rules |
+| `credit-rules` | 6 | Lender credit rule sets, rules, and split drafts; serves them to the credit pipeline via a `CreditRuleSource` port |
+| `audit` | 7 | Audit orchestration, audit runs, and the LangGraph orchestrator that composes agents |
+| `ingress` | 8 | Inbound loan and document intake from Encompass, LOS, and partner APIs |
+| `ops` | 9 | Internal operator tooling: admin consoles, rules catalog, metrics, parity, and shadow monitoring |
 
-A context at layer N may import any context at layer < N. Two contexts on the same layer may not import each other. The composition root (`app.module.ts`, `main.ts`, `reconcile.module.ts`, `reconcile-entrypoint.ts`) sits above layer 13 and may import anything.
+A context at layer N may import any context at layer < N. Two contexts on the same layer may not import each other. The composition root (`app.module.ts`, `main.ts`, `reconcile.module.ts`, `reconcile-entrypoint.ts`) sits above layer 9 and may import anything.
+
+<Note>
+Three contexts were added during the LOA-3661 credit-rules refactor (2026-11-25): `credit-rules` (layer 6) isolates `src/modules/portal-credit-rules/` and its owned schema tables (`credit_rule_sets`, `credit_rules`, `credit_rule_split_drafts`) from the `credit` pipeline context. `generation-identity` (layer 5) holds retained evidence generation identities. `ledger-shared` (layer 6) owns retained ledger records and stored-data faults. The credit pipeline connects to credit-rules through a `CreditRuleSource` port instead of a direct module import, so correction or revert requests whose rule reads fail now return 503 and write nothing (previously 500).
+</Note>
 
 <Note>
 A deprecated entry exists for the `encompass-developer-connect` paths (`src/los/providers/dev-connect/`, `src/audit/providers/dev-connect/`). No new code may import or reference those paths by string literal. Existing uses are baselined and may only shrink.

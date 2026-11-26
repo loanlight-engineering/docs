@@ -821,6 +821,56 @@ Records subsequent loan-context captures for an audit run. The initial `loan_con
 
 Index: `evidence_loan_context_captures_source_idx` on `(source_id, lender_id, loan_id)`.
 
+## LOA-3160 — urla-declarations.v13 (shared-types 9.16.0)
+
+`@loanlight-engineering/shared-types` **9.16.0** publishes `URLA_DECLARATIONS_V13_REGISTRY`
+(`urla-declarations.v13`). It extends v12 with one new declaration row needed for the FC DSCR
+non-arm's-length driver:
+
+| Code | Subject | Sensitivity | MISMO path |
+|---|---|---|---|
+| `borrower.declaration.seller_relationship_indicator` | `borrower` | `restricted_personal` | `PARTY/ROLES/ROLE/BORROWER/DECLARATION/DECLARATION_DETAIL/EXTENSION/OTHER/ULAD:DECLARATION_DETAIL_EXTENSION/ULAD:SpecialBorrowerSellerRelationshipIndicator` |
+
+This is the URLA section 5 declaration "Do you have a family relationship or business affiliation
+with the seller of the property?" The row follows the ULAD extension path, in the same
+`BORROWER_DECLARATION_CONTAINER` as `borrower.citizenship_residency_type` and
+`borrower.intent_to_occupy_primary_residence`. Value kind `boolean`, cardinality `single`,
+adopter `EDU-03`. Every v12 row is included by reference; v12 and earlier snapshots are
+unchanged.
+
+## LOA-3791/LOA-3792 — urla-declarations.v14 and observation-loan-record.v1 (shared-types 9.17.1)
+
+`@loanlight-engineering/shared-types` **9.17.1** ships two new registry snapshots together.
+
+**`urla-declarations.v14`** (`URLA_DECLARATIONS_V14_REGISTRY`) extends v13 with one additional
+declaration row:
+
+| Code | Subject | Value type | MISMO path |
+|---|---|---|---|
+| `subject_property.original_cost_amount` | `subject_property` | `decimal_amount` (USD) | `COLLATERALS/COLLATERAL/SUBJECT_PROPERTY/PROPERTY_DETAIL/PropertyOriginalCostAmount` |
+
+This is the declared original acquisition price of the subject property, alongside
+`subject_property.acquired_date` in the same `PROPERTY_DETAIL` container. Sensitivity:
+`restricted`. Adopter: `EDU-03`. Every v13 row is included by reference.
+
+**`observation-loan-record.v1`** (`OBSERVATION_LOAN_RECORD_V1_REGISTRY`) is a new observation
+registry for raw Encompass loan-record facts. All five rows share the same shape: subject kind
+`loan`, cardinality `single`, value kind `text`, locator kind `structured`, sensitivity
+`standard`, producer `loanlight-api.loan-record`, and adopter `EDU-30`. Raw values are never
+canonicalized here — a reader maps them; an unmapped value stays raw.
+
+| Code | Origin field |
+|---|---|
+| `loan.documentation_type_raw.loan_type` | `CUST01FV` `loan_type` field |
+| `loan.documentation_type_raw.ob_doc_type` | `CUST01FV` `ob_doc_type` field |
+| `loan.documentation_type_raw.nonqm_doc_type` | `CUST01FV` `nonqm_doc_type` field |
+| `loan.documentation_type_raw.loan_program_name` | `CUST01FV` `loan_program_name` field |
+| `loan.origination_channel_raw` | `loanMetadata.channel` / `loans.channel` (`CUST01FV` channel) |
+
+The doc-type code set preserves every origin's raw value separately — when two origins disagree,
+both are kept. The channel is the Encompass origination channel as received. `preserveTextWhitespace: true`
+ensures exterior whitespace in raw text fields is not stripped before storage.
+
 ## Related
 
 <Columns cols={2}>
