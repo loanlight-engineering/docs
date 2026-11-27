@@ -130,6 +130,23 @@ To point a consumer at local source, use pnpm overrides:
 
 Not all shared packages are published to GitHub Packages. `loanlight-api` also ships workspace-internal built packages that live in the monorepo but are consumed by other packages inside `loanlight-api` itself, never by external repos.
 
+**`@loanlight/api-common` (LOA-3662).** A new workspace-internal built package at `loanlight-api/packages/api-common`. It consolidates the stateless helpers that API contexts share — pure functions and error/resilience types with no providers, environment reads, or database access. Importing nothing from `@loanlight/api` itself, it is consumed by any NestJS module that needs these utilities without introducing cross-boundary coupling. `@nestjs/common` and `cockatiel` are peer dependencies (shared with the API so `instanceof` checks on `QueueUnavailableAfterCommitError` and `CircuitStateUnavailableError` work across module instances).
+
+Exports from `packages/api-common/src/index.ts`:
+
+- **String utilities:** `stripUnpairedSurrogates` — removes lone surrogates from a string.
+- **Resilience types:** `CircuitStateUnavailableError`, `isCircuitStateUnavailable`, `FailureCategory`, `isCircuitFastFail`, `classifyFailureCategory` — circuit-breaker failure classification.
+- **Error logging:** `toLogSafeError`, `toLogSafeErrorMessage`, `toLogSafeErrorStack` — sanitize errors for log output.
+- **Queue guard:** `QueueUnavailableAfterCommitError` — thrown when a queue is unavailable after a commit.
+- **Retry policy:** `parseRetryAfterMs`, `calculateExponentialBackoffDelay`, `createRetryPolicy`, `RetryJitterStrategy`, `RetryPolicyConfig`.
+- **Content-Disposition:** `sanitizeContentDispositionFilename`, `encodeRFC5987`, `buildInlineContentDisposition`, `buildAttachmentContentDisposition`.
+- **Error class:** `errorClassName` — safe class-name extraction from an unknown error.
+- **Pagination:** `MAX_PAGE_SIZE`, `clampPagination`.
+- **S3:** `isS3MissingObjectError`.
+- **Name designations:** `cleanName`, `employerNameCore`, entity/suffix/designation helpers for borrower and business name normalization.
+- **Rule-set selection:** `comparePostgresTimestamps`.
+- **Enum lookup:** `safeEnumLookup`, `SAFE_ENUM_LOOKUP_SOURCE`.
+
 **`@loanlight/api-portal-auth` (LOA-3406).** A new built workspace package at `loanlight-api/packages/api-portal-auth`. It extracts the portal authentication primitives that were previously inlined in the API's core identity module so they can be consumed from any NestJS module without creating cross-boundary coupling. Exports:
 
 - `PortalContext` — the parsed session context interface.
@@ -252,6 +269,15 @@ and `observation-credit.v1` (EDU-26 — see the accordion below). The contract-b
     - `evidence-contract-reader` — public snapshot reader.
 
     Ships a frozen `URLA_DECLARATIONS_V1_REGISTRY` with 7 attribute definitions (codes, schemas, subjects, cardinalities, units, sensitivity, producer identity) and a fixture suite of 10 vectors (7 MISMO XML variants, golden JSON, PDF-page locator, legacy intake). Unknown top-level keys are rejected (strict mode, unlike the CDA/AVM delivery contracts). Published as `shared-types@2.1.0`.
+  </Accordion>
+  <Accordion title="LOA-3801 urla-declarations.v15 — 1003 stated monthly rent (shared-types 9.18.0)">
+    Minor release (`9.18.0`). Adds `URLA_DECLARATIONS_V15_REGISTRY` (`urla-declarations.v15`) = v14 plus one row.
+
+    **New row: `subject_property.estimated_gross_monthly_rent_amount`.** The 1003's stated estimated gross monthly rent for the subject property. `decimal_amount`, unit `currency_amount`, `restricted`, single, subject `subject_property`, adopter `EDU-03`, producer `loanlight-api.urla-evidence`. MISMO path: `COLLATERALS/COLLATERAL/SUBJECT_PROPERTY/PROPERTY_DETAIL/RentalEstimatedGrossMonthlyRentAmount` — the same `PROPERTY_DETAIL` container as `acquired_date` and `original_cost_amount`.
+
+    When the MISMO file does not carry this element the row's coverage is `absent` with no assertion; a DSCR run with no stated rent in the MISMO simply has no EDU claim for this code. The row is shaped exactly like `subject_property.original_cost_amount` (v14). All prior snapshots (v1–v14) are unchanged.
+
+    Consumers must bump to 9.18.0 and have `urla-xml-reader-subject-property.ts` read the element and emit the row under `urla-declarations.v15` (LOA-3801 AC 11).
   </Accordion>
   <Accordion title="LOA-3160 observation-income.v1, credit.v3, entity-owners.v1, and PDF origins (shared-types 9.6.0–9.9.0)">
     Four releases shipped as part of LOA-3160 (EDU LTV). See the full definitions in

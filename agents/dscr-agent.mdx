@@ -6,6 +6,8 @@ icon: calculator
 
 The DSCR agent (`dscrAgent`) computes the Debt Service Coverage Ratio (DSCR) for a loan using MISMO-sourced loan facts, the [Rental Income agent](/agents/rental-income-agent)'s resolved rents, and appraisal-supplied market rents. It is a standalone `queue_worker` agent and the final step in the DSCR evaluation pipeline.
 
+When the appraisal has not yet provided a market rent the agent computes a **preliminary run**, using the saved Rent Zestimate (or, if none exists, the 1003 stated rent) in place of the appraisal value. The portal displays a preliminary note while the appraisal is pending and replaces it with the final values once the appraisal lands.
+
 <Note>
 `dscrAgent` is **entitlement-gated**: it runs only for lenders holding an explicit `enabled=true` entitlement row. The router's zero-rows fallback does not grant it. See `requiresExplicitGrant` in [Agent catalog and pipeline](/agents/catalog-and-dependencies). Granting `dscrAgent` also requires that the lender holds a `rentalIncomeAgent` grant (`ENTITLEMENT_COREQUISITES`).
 </Note>
@@ -29,6 +31,18 @@ The engine (`lib/dscr-engine/engine.ts`) produces:
 | **Program matrix inputs** | The FICO / LTV / DSCR / occupancy snapshot the eligibility engine reads. |
 | **Findings** | `Finding[]` — warnings and signals about the loan (e.g. `finding.signal.dscr_below_min`, `finding.signal.short_term_rental_present`). |
 | **Needs-info codes** | `DscrNeedsInfoCode[]` — inputs missing or unknowable, carried from the rental income run or emitted by the DSCR engine itself. |
+
+### Preliminary runs
+
+A run is **preliminary** when at least one of the following is true for any unit:
+
+- The market rent came from a Rent Zestimate or the 1003 stated rent (not the appraisal).
+- The unit's occupancy was assumed rather than verified.
+- A lease is pending.
+
+While preliminary, the portal shows a note (built from `header.preliminary.note`) describing which inputs are outstanding and what will verify each one. Rent-rule and worksheet rows that the appraisal would settle are hidden; pending lease-required rows still show. Once the appraisal provides a verified market rent the run is re-computed and the note is removed.
+
+A withheld run (needs-info codes present) has no ratio regardless of preliminary status.
 
 ### Ratio provenance
 
@@ -81,6 +95,7 @@ One row per audit run (UNIQUE on `audit_run_id`). Migration `0268_add_dscr_runs.
 | `inputs` | jsonb NOT NULL (default `{}`) — `DscrRunInputs`: every input the engine read, keyed by input path, with its source, status, and evidence location. |
 | `output` | jsonb — `StoredDscrOutput`: the engine's computed result without identity-bearing echoes (per-unit, aggregates, payments, DSCR, program matrix inputs, findings, suggested conditions). |
 | `needs_info` | jsonb NOT NULL (default `[]`) — `DscrRunNeedsInfo[]`: the agent-own and rental-income needs-info codes that block the ratio. |
+| `payment` | jsonb — `DscrPayment`: the qualifying payment breakdown stored on the run. Present even when `ratio` is `null`, so the portal can display the payment while needs-info codes block the ratio (LOA-3800, migration `20261125214130_dscr_payment`). |
 | `params_snapshot` | jsonb — the merged engine params used for this run. |
 | `params_version` | text — the params version identifier. |
 | `created_at` | timestamptz NOT NULL |
@@ -103,17 +118,24 @@ One row per event that matters to LTV eligibility. Migration `20261119081040_dsc
 | `dscr_run_id` | Present on `claim` rows only. |
 | `rental_income_run_id` | Present on `rental_income_completed` rows only. |
 | `ratio`, `ratio_provenance`, `needs_info` | Present on `claim` rows; carry the computed result at the moment of the claim. |
+| `payment` | Present on `claim` rows; carries the qualifying payment breakdown at the moment of the claim (migration `20261125214130_dscr_payment`). |
 | `appraisal_revision` | Present on `claim` and `rental_income_completed` rows; records which appraisal publication drove this event. |
 | `recorded_at` | `clock_timestamp()` — wall-clock time, not transaction time. |
 
 The table is append-only: `evidence_append_only_guard` (before DELETE/UPDATE) and `evidence_truncate_guard` (before TRUNCATE) both invoke `evidence_reject_history_mutation()`, and `REVOKE UPDATE, DELETE, TRUNCATE ... FROM PUBLIC` is applied at migration time. Indexes: `(audit_run_id, kind, sequence)` for latest-event-of-kind lookups; `(loan_id, lender_id)` for cleanup probes.
 
 Event kinds written at each site:
-- **Processor claim fence** — writes `claim` with the current ratio, needs-info codes, and appraisal revision.
+- **Processor claim fence** — writes `claim` with the current ratio, needs-info codes, appraisal revision, and `payment`.
 - **Failed refresh** — writes `refresh_failed`.
 - **Entitlement-refused seal** — writes `refresh_skipped`.
 - **Both trigger reopens** and the **appraisal refresh reopen** — write `owed`.
 - **Rental-income fence** — writes `rental_income_completed` via `AgentRunReconciler.reopenAgentRun`, regardless of whether the row state changed.
+
+Migration `20261125214130_dscr_payment` adds the nullable `payment` jsonb column to both `dscr_runs` and `evidence_dscr_agent_events`.
+
+### rental_income_runs (first_used_rent_zestimate)
+
+Migration `20261126101521_add_rental_income_first_used_rent_zestimate` adds `first_used_rent_zestimate` (numeric, nullable) to `rental_income_runs`. It records the Rent Zestimate value the DSCR agent used on the first preliminary run, so that subsequent refreshes can reference which estimate was in effect before the appraisal landed.
 
 ### evidence_dscr_appraisal_publications
 
@@ -162,12 +184,14 @@ Guarded by `PortalAuditsAuthGuard`. See [Portal API: audit results](/portal/api-
 | Field | Notes |
 |---|---|
 | `status` | `complete`, `pending`, `failed`, `not_applicable`, `skipped`, or `absent`. `not_applicable` = skipped with reason `notTriggered` (not a DSCR loan). |
-| `header` | `DscrHeader` — ratio, provenance, occupancy, unit count, payment, check coverage counts. `null` when `status` ≠ `complete`. |
+| `header` | `DscrHeader` — ratio, provenance, occupancy, unit count, payment, check coverage counts. `null` when `status` ≠ `complete`. Carries `preliminary.note` while the run is preliminary (LOA-3801). |
 | `verdict` | `DscrVerdict` — program eligibility outcome (Pass / Failed / Needs info) with the failing axis and key metrics. `null` when eligibility is not graded. |
 | `checks` | `LabelledDscrCheck[]` — the full check catalogue with outcomes. |
-| `units` | `DscrUnitRow[]` — per-unit rent, rule, basis, and LTV reduction flag. |
-| `payments` | `DscrPaymentRow[]` — qualifying payment breakdown. |
+| `units` | `DscrUnitRow[]` — per-unit rent, rule, basis, LTV reduction flag, occupancy assumption, 1003 gross/net rent, market rent source, and building share. |
+| `payments` | `DscrPaymentRow[]` — qualifying payment breakdown. Returned even when `ratio` is `null` so the portal can show the payment while needs-info codes are present (LOA-3800). |
 | `shortTerm` | `DscrShortTermUnit[]` — short-term rental details per unit. |
+| `rentComparison` | `DscrRentComparison` — every rent figure for the loan (Rent Zestimate, 1003 stated, appraisal market rent) with the one used marked and percentage gaps between them. Present on preliminary and final runs. The appraisal figure leads once it is in. For 2–4 units the figures are building totals (LOA-3801). |
+| `worksheetCheck` | `DscrWorksheetCheck[]` — each value the worksheet states, beside the agent's value and its source, with an agreement result: `Agrees`, `Differs`, or `Unverified`. Covers ratio, per-unit market/current/rent-used/occupancy/short-term status, loan purpose, FICO, payment components, and the qualifying payment. Present whenever a worksheet was extracted (LOA-3801). |
 
 The portal renders the DSCR section at `/loan-audits/[auditRunId]/dscr` (staff viewer) and counts it in the portal hero's total and needs-review tallies. DSCR is also included in the partner API's `agentStatuses` summary.
 

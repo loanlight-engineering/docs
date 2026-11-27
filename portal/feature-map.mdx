@@ -16,7 +16,7 @@ The portal uses the Next.js App Router with five route groups under `src/app/`. 
     |---|---|
     | `/` | redirect → `/loan-audits` |
     | `/dashboard` | Client dashboard: summary cards, paginated audit table, filters. When `unified_loan_upload` is off: a "New Loan" dropdown (Pre-Underwriting / Appraisal / Income) launches individual product flows. When `unified_loan_upload` is on: a **New Loan** button links to `/loans/new`. `PAGE_SIZE=25`, `REQUEST_TIMEOUT_MS=30_000`. Write controls hidden for `read_only`. |
-    | `/loans/new` | New Loan screen (LOA-3573). Product, file, and detail cards; upload status; **Start** button. Gated on `unified_loan_upload` (default-OFF). See [file uploads](/portal/file-uploads) and [bank-statement-upload](/portal/api-bank-statement-dscr#bank-statement-upload). The five available products (checkboxes in `NewLoanProductsCard`) are **Pre-Underwriting**, **Appraisal**, **Credit**, **Bank Statements**, and **DSCR** (LOA-3714). After **Start**, the portal navigates to the started run's page (single product) or the dashboard (multiple products) and shows a toast for any failures or partial starts — the `LandingPlan` from `new-loan-landing.ts::planLanding` determines the destination and toast. The former confirmation modal (`new-loan-confirmation.tsx`) was replaced by this navigation-and-toast pattern (LOA-3711). |
+    | `/loans/new` | New Loan screen (LOA-3573). Product, file, and detail cards; upload status; **Start** button. Gated on `unified_loan_upload` (default-OFF). See [file uploads](/portal/file-uploads) and [bank-statement-upload](/portal/api-bank-statement-dscr#bank-statement-upload). The five available products (checkboxes in `NewLoanProductsCard`) are **Pre-Underwriting**, **Appraisal**, **Credit**, **Bank Statements**, and **DSCR** (LOA-3714). After **Start**, the portal navigates to the started run's page (single product) or the dashboard (multiple products) and shows a toast for any failures or partial starts — the `LandingPlan` from `new-loan-landing.ts::planLanding` determines the destination and toast. The former confirmation modal (`new-loan-confirmation.tsx`) was replaced by this navigation-and-toast pattern (LOA-3711). **On a rerun (LOA-3712)**, the Loan Application box shows the stored MISMO file's name and upload date with a **Replace** button. `Start` carries the stored object's version back; if the file changed between lookup and `Start`, the API returns `409 loan_application_changed` and the portal shows a reload prompt. `Start` takes the loan application only from the Loan Application slot — a MISMO in any other slot is ignored. |
     | `/appraisal-review` | Appraisal history list (`showInternal` for internal `client_admin`). |
     | `/appraisal-review/executive` | Appraisal executive dashboard (KPIs, value delta, geography, rules cards); day window 7/14/30/60/90. |
     | `/appraisal-review/metrics` | Appraisal metrics (internal-only tab): per-field accuracy, confidence chart. |
@@ -25,6 +25,8 @@ The portal uses the Next.js App Router with five route groups under `src/app/`. 
     | `/income` | Income analyses list; "New Income Analysis" modal; stat cards. Uses the unioned `/api/income/run`. |
     | `/income/[familySlug]/[runId]` | Income run detail. |
     | `/income/bank-statements/[runId]` | Bank-statement run detail. |
+    | `/reporting` | Reporting overview page. Redirects `read_only` users to `/dashboard`. Requires at least one product flag enabled (`appraisal`, `creditReview`, `bankStatements`, or `dscrAgent`). Overview-only lenders are redirected to `/dashboard`. See **Reporting page** below. |
+    | `/reporting/[slug]` | Per-tab reporting view. Allowed slugs: `overview`, `appraisal`, `credit-review`, `income`, `dscr`. |
     | `/whats-new` | "What's New" release notes feed; gated on `flags.releaseNotes` (default-OFF, env `FEATURE_RELEASE_NOTES`). When the flag is off, renders a "not enabled" message. See [release notes](/portal/release-notes). |
     | `/dscr-agent` | DSCR calculator; gated on `flags.dscrAgent`. |
     | `/statement-analyzer` (+ `/[runId]`) | Qualifying-assets review; gated on `flags.statementAnalyzer`. Renders a "not enabled" message when off. See [statement analyzer](/portal/statement-analyzer). |
@@ -176,6 +178,42 @@ The portal uses the Next.js App Router with five route groups under `src/app/`. 
     - **Report filtering (LOA-3285).** The overview cards and sidebar badge now show only the current (non-superseded) credit reports per borrower.
     - **Needs Info and Pending rules (LOA-3285).** The credit findings table includes `NEEDS_INFO` and `PENDING` rule results with their status and messages. Pending rules contribute to the per-report needs-review count.
     - **Tabless redesign, borrower and report info first (LOA-3331, behind `show_the_work`).** When `showTheWork` is `true`, the Credit Review section becomes one tabless, scrolling page: borrower info (`CreditBorrowersInfoCard`) and report info (`CreditReportsInfoCard`) appear first, followed by loan tiles and findings, then one collapsible `CreditReportBlock` per credit report (tradeline summary, score card, inquiries, written loan summary, report history). Joint reports show borrower data side by side. When `showTheWork` is `false`, the section renders the legacy tabbed view. The same `showTheWork` flag controls the standalone Credit product (`/credit-review/[runId]`).
+
+## Reporting page (LOA-3713, LOA-3780)
+
+The Reporting page (`/reporting`) gives lenders an aggregate view of audit activity across a configurable time window. It is gated on role and feature flags: `read_only` users cannot access it, and lenders with no product flag enabled are redirected to the dashboard.
+
+**Tabs.** The tab bar and default tab are driven by `REPORTING_TABS` (`reporting-tabs.ts`). Each product tab is shown only when the corresponding feature flag is on:
+
+| Tab | Slug | Flag |
+|---|---|---|
+| Overview | `overview` | always visible (but requires at least one product flag) |
+| Appraisal | `appraisal` | `appraisal` |
+| Credit Review | `credit-review` | `creditReview` |
+| Income | `income` | `bankStatements` |
+| DSCR | `dscr` | `dscrAgent` |
+
+**Time window.** A `days` search parameter controls the lookback window. Allowed values: `7`, `14`, `30` (default), `60`, `90`. Values outside this set fall back to 30. The window control sits in the top-right of the page alongside the tab bar (`ReportingWindow`).
+
+**BFF proxies.** Each tab's data comes from `GET /api/v1/portal/reporting/{tab}?days={n}` via per-tab BFF routes under `packages/app/src/app/api/reporting/`. The proxy validates that `days` is an integer between 1 and 90 and returns `400` otherwise.
+
+## Audit in-progress card (LOA-3709, LOA-3710)
+
+Before any check has reported on a running audit, the results page and the staff loan-audit page show an **Audit in progress** card (`AuditInProgressCard` from `packages/shared-ui`) instead of the section list. The sidebar is hidden while the card shows.
+
+**Card variants:**
+
+| Variant | When shown | Copy |
+|---|---|---|
+| `running` | Audit pending or processing, no check yet | "Audit in progress" with a three-step progress list (documents received → processing → running checks) and document counts. |
+| `slow` | 30 minutes elapsed with no check (`SLOW_AUDIT_AFTER_MS`) | "Audit in progress" with a "taking longer than usual" line and **Go to Dashboard** / **Report a problem** buttons. |
+| `failed` | Audit failed before any check ran | "This audit didn't finish" with a red alert icon and buttons. |
+
+`deriveAuditCard` (`audit-card-state.ts`) is a pure function over audit status, check ledger, `standaloneRun`, and `startedAt`. Once the card reaches `none` for the page session it stays `none` — a reopened check cannot bring it back.
+
+The overview API returns `documentProgress: { received, processed } | null` derived from `audit_runs.snapshot_doc_ids` and `loan_documents.llama_ingestion_status`. It is `null` for terminal audits, loanless audits, and failed reads.
+
+**Live progress beyond 30 minutes (LOA-3710).** When a ledger entry is unfinished, `useAuditRefresh` removes the 30-minute refresh ceiling and keeps polling until every check is terminal. The header and top bar show **"N of M checks complete"** while the audit runs; failed checks are named in the header line. Each section page shows a **Pending** state (spinner + placeholder lines) while its own check is unfinished. The 30-minute ceiling is preserved for the Dashboard.
 
 ## Feature flags
 

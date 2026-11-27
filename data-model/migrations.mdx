@@ -234,6 +234,8 @@ The table below records migrations that carry meaningful schema or policy change
 | `20261120181537_appraisal_runs_llamacloud_attempted_at` | Adds a nullable `llamacloud_attempted_at timestamptz` column to `appraisal_runs` (LOA-3603). `NULL` means no LlamaCloud extraction has been attempted on this run. Only the LlamaCloud extraction lane writes this column; a conditional write (`WHERE id = $run AND llamacloud_attempted_at IS NULL`) claims the one-attempt slot. See [Appraisal-Evaluation agent](/agents/appraisal-evaluation) for the full per-run guard. |
 | `20261121160000_appraisal_runs_mode` | Adds a `mode` column (`text`, NOT NULL DEFAULT `'full'`, CHECK `full \| light`) to `appraisal_runs`. Installed NOT VALID to avoid an ACCESS EXCLUSIVE lock during validation; the check is validated in `20261121160100`. (LOA-3160) |
 | `20261121160100_validate_appraisal_runs_mode` | Validates `appraisal_runs_mode_check` added NOT VALID by `20261121160000`, outside the ALTER TABLE lock. |
+| `20261125214130_dscr_payment` | Adds a nullable `payment` jsonb column to both `dscr_runs` and `evidence_dscr_agent_events`. Stores the qualifying payment breakdown on each run and claim row so the portal can display the payment even when needs-info codes block the ratio (LOA-3800). |
+| `20261126101521_add_rental_income_first_used_rent_zestimate` | Adds a nullable `first_used_rent_zestimate` numeric column to `rental_income_runs`. Records the Rent Zestimate value the DSCR agent used on the first preliminary run before the appraisal market rent arrives (LOA-3801). |
 
 ### Drizzle migrations (frozen chain)
 
