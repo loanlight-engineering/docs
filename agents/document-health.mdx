@@ -108,6 +108,23 @@ independent_collection | no_numbering`.
 `invalid_composite_mismatch`, `skipped_multi_doc`, `skipped_composite`, and `indeterminate`.
 Multi/composite validation requires LLM confidence ≥ 0.7 and present sub-documents, otherwise the
 status degrades to `skipped_*`.
+
+**Page numbering decides pass/fail (LOA-3344).** When every chunk in a file carries a page label
+and the file's page count is known, `auditPageNumbering` reads each page's header and footer
+(first and last 400 characters) for "Page k of Y" declarations. References — mid-body mentions,
+margin labels like "Attachment: Page 1 of 4", and "see page N" continuations — are excluded.
+For each total Y it identifies missing pages (pages that appear fewer times than the section
+count) and excuses a gap only when an unnumbered or blank stand-in occupies that slot. The
+result overrides the model's verdict: a gap fails any model verdict (`valid_*`, `skipped_*`,
+`indeterminate`); complete numbering passes any model verdict. The model still determines the
+structure label (e.g. `valid_multi_doc`). The override is appended to the stored `reasoning`
+field so overridden results are queryable. Without a page count, or when any chunk lacks a
+page label, the model's verdict stands.
+
+Missing page runs are stored in `doc_completeness_results.missing_pages` (nullable jsonb) and
+the stored message names each gap and the file pages adjacent to it. The `declared_total_pages`
+column reflects pages present plus numbered pages missing, so the portal's declared-minus-actual
+cell shows the exact gap.
 </Step>
 
 <Step title="validate-document-expiration — one Send per document">
@@ -547,7 +564,16 @@ could not be resolved) and is never coerced to `false`.
 </ResponseField>
 
 <ResponseField name="doc_completeness_results" type="table">
-One row per page-completeness result.
+One row per page-completeness result. Columns include `status` (`CompletenessStatus`),
+`declared_total_pages`, `actual_pages`, `completeness_message` (a prose description of the
+outcome), and `evidence` (jsonb, LOA-3344-era fields include `numbering.missing[]` — each entry
+is a `MissingNumberedPage` with `page`, `of`, `count`, `through?`, and `after[]` file pages).
+
+**`missing_pages` (migration `20261127145105_add_completeness_missing_pages.sql`, LOA-3344).** A
+nullable jsonb column that stores every missing-page run the page-numbering audit found, beyond
+the first 50 that appear in `completeness_message`. Each element mirrors the `numbering.missing[]`
+shape. `NULL` when the numbering audit found no gaps (a pass or a no-numbering document). Existing
+rows written before LOA-3344 have `missing_pages = NULL`.
 </ResponseField>
 
 <ResponseField name="doc_signature_verification_results (+ doc_signature_verification_evidence)" type="table">

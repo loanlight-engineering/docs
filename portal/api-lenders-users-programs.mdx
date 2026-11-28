@@ -33,6 +33,26 @@ Create a lender. Role: `super_admin`.
 Includes an `InitialAdminDto` for the first admin user. The initial admin role excludes `read_only`.
 </ParamField>
 
+**WorkOS provisioning (LOA-3775).** `createLender` now provisions through `LenderProvisioning`.
+The WorkOS call, the lender insert, and the flag defaults all run in one transaction, so a WorkOS
+failure leaves no lender row. Steps:
+
+1. The initial admin email is checked for uniqueness before anything is created; a taken email
+   returns `409` with nothing written.
+2. A WorkOS organization is created for the new lender and its `workos_organization_id` is stored
+   atomically with the lender row.
+3. New lenders are seeded with `enable_guideline_uploads = ON` and `iris_photo_review_enabled = OFF`
+   (the same defaults the `organization.created` webhook uses).
+4. The initial admin is invited through WorkOS via the existing `inviteUser` path. If the invite
+   fails, the lender is kept and the response carries a `warning` that the invitation may not have
+   been sent. Use **Resend invite** from Settings → Users in that case; if the admin is not listed
+   there, invite them manually and change their role to **Client Admin**.
+
+<Note>
+`POST /api/v1/portal/admin/lenders` (the former duplicate create route on the admin controller)
+was removed in LOA-3775. `POST /api/v1/portal/lenders` is the only create path.
+</Note>
+
 #### GET /api/v1/portal/lenders/:id
 
 Get a lender. Role: `super_admin`. `?include=usage` is the only honored include.
@@ -146,7 +166,7 @@ Controller: `portal-admin/portal-admin.controller.ts` at `api/v1/portal/admin`. 
 | `GET /api/v1/portal/admin/users` | Cross-tenant user list (`ListUsersQueryDto`; `role` validated by `@IsIn`; cursor pagination — `decoded.id` UUID-validated, `decoded.createdAt` `Date.parse`-validated) |
 | `GET /api/v1/portal/admin/dashboard` | Admin dashboard; `recentActions` ordered `desc(createdAt), desc(id)` |
 | `GET /api/v1/portal/admin/rule-set-status` | Per-lender active rule-set status (`RuleSetStatusQueryDto`) |
-| `POST /api/v1/portal/admin/lenders` | Create lender (`CreateLenderDto`) — admin variant |
+| ~~`POST /api/v1/portal/admin/lenders`~~ | Removed in LOA-3775. Use `POST /api/v1/portal/lenders` instead. |
 | `GET /api/v1/portal/admin/appraisal-runs` | `ListAppraisalRunsQueryDto` → `PortalAppraisalService.adminListRuns` |
 | `POST /api/v1/portal/admin/appraisal-runs/:id/rerun` | `adminRerunRun(id, userId)` |
 | `GET /api/v1/portal/admin/appraisal-runs/:id/files` | Presigned download URLs for every run artifact (source PDF, optional MISMO XML, each SSR). Cross-tenant by design — resolves the run by id and presigns against the run's own lender; returns presigned URLs only, never raw S3 keys (#2392, LOA-1552) |

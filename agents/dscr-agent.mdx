@@ -119,6 +119,7 @@ One row per event that matters to LTV eligibility. Migration `20261119081040_dsc
 | `rental_income_run_id` | Present on `rental_income_completed` rows only. |
 | `ratio`, `ratio_provenance`, `needs_info` | Present on `claim` rows; carry the computed result at the moment of the claim. |
 | `payment` | Present on `claim` rows; carries the qualifying payment breakdown at the moment of the claim (migration `20261125214130_dscr_payment`). |
+| `unit_rents` | jsonb array, nullable — present on `claim` rows only. Each element is a `DscrClaimUnitRent`: `{ unitIndex, source, marketRent, rentZestimate, stated1003 }`. `source` is `"appraisal"`, `"rentZestimate"`, `"stated1003"`, or `"none"`; records the market rent provenance for each unit as of this claim, so the LTV reader can trace which rent source drove the DSCR ratio. Migration `20261127210402_evidence_dscr_claim_unit_rents.sql`. |
 | `appraisal_revision` | Present on `claim` and `rental_income_completed` rows; records which appraisal publication drove this event. |
 | `recorded_at` | `clock_timestamp()` — wall-clock time, not transaction time. |
 
@@ -136,6 +137,23 @@ Migration `20261125214130_dscr_payment` adds the nullable `payment` jsonb column
 ### rental_income_runs (first_used_rent_zestimate)
 
 Migration `20261126101521_add_rental_income_first_used_rent_zestimate` adds `first_used_rent_zestimate` (numeric, nullable) to `rental_income_runs`. It records the Rent Zestimate value the DSCR agent used on the first preliminary run, so that subsequent refreshes can reference which estimate was in effect before the appraisal landed.
+
+### subject_rent_lookups (LOA-3801)
+
+One row per audit run (UNIQUE on `audit_run_id`). The Rental Income agent looks up the subject property's Rent Zestimate from Zillow once per audit run and caches the outcome here. The Property Data agent reuses the stored lookup for the same subject address instead of issuing a second Zillow request. Migrations `20261127210332_add_subject_rent_lookups.sql`, `20261127210333_subject_rent_lookup_pending_claim.sql`, and `20261127210334_subject_rent_lookup_searched_address.sql`.
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `audit_run_id` | uuid NOT NULL → `audit_runs` (cascade). UNIQUE. |
+| `loan_id` | uuid, nullable. |
+| `searched_address` | jsonb — `{ street, city, state, zip }` — the address the lookup searched. Property Data reuses the outcome only when the subject address matches. |
+| `status` | text NOT NULL — CHECK `pending \| found \| none \| failed`. `pending` while the lookup is in flight (`looked_up_at IS NULL`). |
+| `rent` | numeric — monthly Rent Zestimate; non-null only when `status = 'found'` and positive. |
+| `payload` | jsonb — the full Zillow property-details response (`PropertyDetails`); kept for Property Data enrichment. Non-null only when `status = 'found'`. |
+| `url` | text — Zillow page URL. Non-null only when `status = 'found'`. |
+| `looked_up_at` | timestamptz — stamped when the outcome is recorded; `NULL` exactly while `pending`. |
+| `created_at` | timestamptz NOT NULL |
 
 ### evidence_dscr_appraisal_publications
 

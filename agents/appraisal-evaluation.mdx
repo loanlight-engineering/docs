@@ -590,6 +590,26 @@ The IRIS photo checklist is the fourth step in the IRIS pipeline, running after 
 
 **Fail only on a complete analysis.** Absence-based failures ("not seen", "missing") abstain when the underlying analyzer is partial, failed, or never run. Presence-based failures (a sighting contradicts the report) stand regardless of analysis completeness.
 
+**`ChecklistLine` shape (LOA-3790).** Each item's verdict is broken into lines. The `ChecklistLine` interface carries:
+
+| Field | Meaning |
+|---|---|
+| `ok` | `true` = satisfied, `false` = not satisfied, `null` = can't tell. |
+| `note` | Present on `ok: false` lines: explains why the check failed. |
+| `attention` | Present on **`ok: true`** lines only: the check passed, but a reviewer should still inspect this detail (e.g. the full/half bath split disagrees, or more rooms were photographed than the report counts). Rendered in amber alongside the green tick. A failing line never carries `attention`. |
+| `merged` | Present on any outcome. Lists photo groups the check counted as one room. Each group has `photoIds` and `evidence[]` (the shared features that joined them, e.g. duplicate PDQ hash, identical scene elements). Displayed under "Counted as one room" regardless of verdict. |
+| `quote` | Verbatim text from the report when the line derives from report text. |
+| `photoIds` | Photos this line references. |
+| `pages` | Report pages this line references. |
+
+**Interior-rooms check — room counting (LOA-3790).** The `rooms_photographed` item now counts rooms the way the appraisal report does:
+- Full and half baths are one family; a caption like "1.5 Bath", "½ Bath", or "(half)" is recognised. When the full/half split in photos disagrees with the report's split, the line passes with an `attention` note rather than failing.
+- Photos of the same room (same picture used twice, or two photos sharing distinctive features beyond finishes) are merged and counted once. The merge uses complete linkage — A≈B and B≈C do not merge A with C unless A≈C independently.
+- A merge that would take a room type below the report or sketch count requires an extra shared feature to protect against over-merging.
+- Photos named for different units ("Unit 2", "Apt B") are never merged.
+- When a photo's caption names a room not counted by this check (living room, den, office), the check inspects the photo and may count it as `other_room`, which rolls up as can't tell with a note.
+- Misspelt captions (OSA distance 1 for 5–6 letter words, 2 for 7+, same first letter) are matched to their intended room type.
+
 #### Crop-match analyzer (LOA-3781)
 
 The `listing_crop_match` stored analyzer detects listing photos that the appraiser copied, cropped, resized, or squeezed into the appraisal report — transforms that change the PDQ hash and so evade the hash stage. It runs only when PDQ found no whole-frame copy for a given report photo.
